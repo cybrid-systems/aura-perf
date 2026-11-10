@@ -45,3 +45,7 @@ live workspace 没有被改。aura-perf 的 trial 使用单参数 apply。这是
 `set-code` 装入的 define 如果直接调用宿主里已经 `require` 的 `perf:mine`，下一步 `mutate:rebind` 的 selective typecheck 会拒绝 mutation，原因是 `unbound variable: perf:mine`。把 `(require …)` 写进被 `set-code` 的源码也不行：`require` 自己被报成未绑定变量。
 
 把查询过程作为值放进调用参数（策略里 `(let ((mine (hash-ref ctx "mine"))) (mine profile))`）可以通过这次 typecheck，rebind 返回 `#t`。aura-perf 的 `perf-strategy` 因此从 `ctx` 取 `mine`，不在 workspace 源码里写宿主函数名。
+
+## 7. `set-code` 之后，restricted sandbox 里 `engine:metrics` 会 SIGABRT
+
+`AURA_SANDBOX` 不是 `off` 时，`set-code` + `eval-current` 之后再调 `(engine:metrics)` 或 `(engine-metrics:group "compile")`，进程收到 SIGABRT，`try` 接不住。`AURA_SANDBOX=off` 时同一调用返回 compile 组计数。示例脚本因此一直导出 `AURA_SANDBOX=off`。`perf:compile-snap` 在 sandbox 不是 `off` 时直接返回 `available=0`，不去碰那个原语。

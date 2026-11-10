@@ -1,0 +1,45 @@
+(require "lib/perf/cct" all:)
+(require "lib/perf/gene" all:)
+(require "lib/perf/gate" all:)
+
+(define profile
+  (hash "cct"
+        (perf:cct-build
+          (list (hash "name" "k-length" "task-clock" 54 "calls" 1
+                      "stack" (list "bench-kernel" "k-length"))
+                (hash "name" "k-ref" "task-clock" 295 "calls" 4000
+                      "stack" (list "bench-kernel" "k-ref"))
+                (hash "name" "bench-kernel" "task-clock" 293 "calls" 1
+                      "stack" (list "bench-kernel"))))))
+
+(define seal
+  (perf:intend-seal
+    (hash "intend" (hash "min-faster-pct" 10
+                         "checksum" #t
+                         "protected" (list "k-ref" "k-length")))))
+
+(define genes
+  (list (hash "id" "gene-ratio-2" "ratio" 2 "actionable-ms" 1 "per-round" 2
+              "order" (list "specialize-k-ref" "wrong-scale" "redundant-pass" "linear-scan"))
+        (hash "id" "gene-ratio-8" "ratio" 8 "actionable-ms" 1 "per-round" 1
+              "order" (list "linear-scan"))
+        (hash "id" "gene-high-threshold" "ratio" 2 "actionable-ms" 1000000 "per-round" 1
+              "order" (list "linear-scan"))
+        (hash "id" "gene-drop-checksum" "ratio" 2 "actionable-ms" 1 "checksum" #f
+              "order" (list "linear-scan"))))
+
+(define picked (perf:select-gene profile genes seal))
+(define (reason id)
+  (let loop ((xs (hash-ref picked "verdicts" '())))
+    (if (null? xs)
+        "?"
+        (if (string=? (hash-ref (car xs) "id" "") id)
+            (string-append (hash-ref (car xs) "decision" "") " " (hash-ref (car xs) "reason" ""))
+            (loop (cdr xs))))))
+
+(display (list (hash-ref picked "winner-id" "")
+               (reason "gene-ratio-2")
+               (reason "gene-ratio-8")
+               (reason "gene-high-threshold")
+               (reason "gene-drop-checksum")))
+(newline)

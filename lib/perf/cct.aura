@@ -4,8 +4,10 @@
 ; Queries return Aura values a strategy can branch on.
 
 (export perf:cct-build perf:cct-node perf:cct-hot-prefix perf:cct-subtree
-        perf:cct-actionable perf:cct-delta perf:mine perf:split-protected
-        perf:node-clock)
+        perf:cct-actionable perf:cct-delta perf:mine perf:mine-with
+        perf:hypotheses perf:split-protected perf:node-clock
+        perf:count-rows perf:prefix-leaf perf:cct-worldline-query
+        perf:cct-cleared perf:should-continue? perf:delta-brief)
 
 (require "lib/perf/util" all:)
 
@@ -122,18 +124,31 @@
 ; repeated-index-walk: a callee measured under perf costs more than
 ; twice its sibling, and the stack is parent>callee. The mutable site
 ; is the parent define (the loop), not the protected leaf.
-(define (perf:mine profile)
+(define (perf:gene-num gene key default)
+  (if (not (hash? gene))
+      default
+      (let ((v (hash-ref gene key default)))
+        (if (number? v) v default))))
+
+; ratio is the classification gene: k-ref is a repeated index walk when
+; its task-clock exceeds ratio times k-length. actionable-ms drops cold
+; defines. protected comes from the sealed intend, not from the gene.
+(define (perf:mine-with profile gene protected)
   (let ((cct (if (and (hash? profile) (hash? (hash-ref profile "cct" #f)))
                  (hash-ref profile "cct")
-                 #f)))
+                 #f))
+        (ratio (perf:gene-num gene "ratio" 2))
+        (th (perf:gene-num gene "actionable-ms" 1))
+        (prot (if (list? protected) protected (list "k-ref" "k-length"))))
     (if (not cct)
         (hash "class" "" "hot-node" "" "site" "" "prefix" '()
-              "hypotheses" '() "actionable" '())
+              "hypotheses" '() "actionable" '()
+              "ratio" ratio "actionable-ms" th)
         (let* ((prefix (perf:cct-hot-prefix cct))
                (kref (perf:clock-of cct "k-ref"))
                (klen (perf:clock-of cct "k-length"))
                (class (if (and (number? kref) (number? klen)
-                               (> klen 0) (> kref (* klen 2)))
+                               (> klen 0) (> kref (* klen ratio)))
                           "repeated-index-walk"
                           (if (pair? prefix) "flat-hot" "")))
                (hot (if (and (pair? prefix) (pair? (cdr prefix)))
@@ -146,8 +161,14 @@
                 "prefix" prefix
                 "k-ref-ms" kref
                 "k-length-ms" klen
-                "actionable" (perf:cct-actionable cct 1.0 (list "k-ref" "k-length"))
+                "ratio" ratio
+                "actionable-ms" th
+                "actionable" (perf:cct-actionable cct th prot)
                 "hypotheses" (perf:hypotheses class site))))))
+
+(define (perf:mine profile)
+  (perf:mine-with profile (hash "ratio" 2 "actionable-ms" 1)
+                  (list "k-ref" "k-length")))
 
 ; Executable hypotheses. Each one names a catalog id, the define it
 ; would rebind, the constraint, and which counter it expects to move.
@@ -174,3 +195,126 @@
           (if (perf:member? protected site)
               (loop (cdr xs) ok (cons c refused))
               (loop (cdr xs) (cons c ok) refused))))))
+
+(define (perf:prefix-leaf prefix)
+  (let loop ((xs (if (list? prefix) prefix '())) (last ""))
+    (if (null? xs)
+        last
+        (loop (cdr xs) (if (string? (car xs)) (car xs) last)))))
+
+; Rows for one worldline. A callee with zero calls is omitted so the
+; hot prefix disappears from the tree instead of lingering at 0.
+(define (perf:count-rows root-name root-ms counts)
+  (let ((root (hash "name" root-name
+                    "task-clock" (if (number? root-ms) root-ms 0)
+                    "calls" 1
+                    "page-faults" 0
+                    "stack" (list root-name))))
+    (let loop ((xs (if (list? counts) counts '())) (acc (list root)))
+      (if (null? xs)
+          (reverse acc)
+          (let* ((c (car xs))
+                 (calls (hash-ref c "calls" 0)))
+            (loop (cdr xs)
+                  (if (and (number? calls) (> calls 0))
+                      (cons (hash "name" (hash-ref c "name" "")
+                                  "task-clock" (hash-ref c "task-clock" 0)
+                                  "calls" calls
+                                  "page-faults" 0
+                                  "stack" (hash-ref c "stack" (list (hash-ref c "name" ""))))
+                            acc)
+                      acc)))))))
+
+(define (perf:cct-has-nodes? cct)
+  (and (hash? cct) (pair? (hash-ref cct "nodes" '()))))
+
+(define (perf:node-gone? before after id)
+  (let ((b (perf:cct-node before id))
+        (a (perf:cct-node after id)))
+    (and (hash? b)
+         (or (not (hash? a))
+             (and (number? (hash-ref a "calls" -1))
+                  (= (hash-ref a "calls" -1) 0))
+             (and (number? (perf:node-clock a))
+                  (<= (perf:node-clock a) 0)
+                  (number? (perf:node-clock b))
+                  (> (perf:node-clock b) 0))))))
+
+(define (perf:moved-ids rows leaf noise)
+  (let ((floor (if (and (number? noise) (>= noise 0)) noise 1)))
+    (let loop ((xs (if (list? rows) rows '())) (acc '()))
+      (if (null? xs)
+          (reverse acc)
+          (let* ((h (car xs))
+                 (id (hash-ref h "id" ""))
+                 (d (hash-ref h "delta-ms" 0)))
+            (loop (cdr xs)
+                  (if (and (not (string=? id ""))
+                           (not (string=? id leaf))
+                           (number? d)
+                           (> d floor))
+                      (cons id acc)
+                      acc)))))))
+
+; Query over one worldline's tree against the baseline tree.
+; An empty after-tree is "not measured", not "the prefix was removed".
+(define (perf:cct-worldline-query before after prefix . rest)
+  (let ((noise (if (and (pair? rest) (number? (car rest))) (car rest) 1))
+        (leaf (perf:prefix-leaf prefix)))
+    (if (or (not (perf:cct-has-nodes? before))
+            (not (perf:cct-has-nodes? after))
+            (string=? leaf ""))
+        (hash "measured" #f
+              "prefix" (if (list? prefix) prefix '())
+              "hot-leaf" leaf
+              "prefix-removed" #f
+              "cost-moved" #f
+              "moved-to" '()
+              "delta" '())
+        (let* ((rows (perf:cct-delta before after))
+               (moved (perf:moved-ids rows leaf noise))
+               (removed (perf:node-gone? before after leaf)))
+          (hash "measured" #t
+                "prefix" prefix
+                "hot-leaf" leaf
+                "prefix-removed" removed
+                "cost-moved" (pair? moved)
+                "moved-to" moved
+                "delta" rows)))))
+
+(define (perf:flag? v)
+  (or (eq? v #t) (eq? v 1)))
+
+; Ids whose mutation removed the same hot prefix and did not move cost.
+(define (perf:cct-cleared cands before prefix)
+  (let loop ((xs (if (list? cands) cands '())) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (let* ((c (car xs))
+               (q (perf:cct-worldline-query before (hash-ref c "cct" #f) prefix)))
+          (loop (cdr xs)
+                (if (and (perf:flag? (hash-ref q "measured" #f))
+                         (perf:flag? (hash-ref q "prefix-removed" #f))
+                         (not (perf:flag? (hash-ref q "cost-moved" #f))))
+                    (cons (hash-ref c "id" "") acc)
+                    acc))))))
+
+; After KEEP, continue only when the kept tree still shows the cost
+; living on a different define.
+(define (perf:should-continue? query)
+  (and (hash? query)
+       (perf:flag? (hash-ref query "measured" #f))
+       (perf:flag? (hash-ref query "prefix-removed" #f))
+       (perf:flag? (hash-ref query "cost-moved" #f))))
+
+(define (perf:delta-brief rows)
+  (let loop ((xs (if (list? rows) rows '())) (acc ""))
+    (if (null? xs)
+        acc
+        (let ((h (car xs)))
+          (loop (cdr xs)
+                (string-append acc
+                               (if (string=? acc "") "" ",")
+                               (hash-ref h "id" "?")
+                               ":"
+                               (number->string (hash-ref h "delta-ms" 0))))))))

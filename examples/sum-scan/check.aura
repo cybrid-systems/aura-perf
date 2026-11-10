@@ -1,0 +1,38 @@
+(require "std/process" all:)
+(require "lib/perf/util" all:)
+(require "lib/perf/sysinfo" all:)
+(require "lib/perf/layers" all:)
+
+(shell "mkdir -p out")
+
+(define info (perf:sysinfo))
+(define sample (perf:check-sample 0))
+(define advice (perf:advice info (hash)))
+(define lines
+  (append
+    (list (string-append "check seconds=" (number->string (hash-ref sample "seconds" 0))
+                         " cpu-class=" (hash-ref sample "cpu-class" "?")
+                         " user-pct=" (number->string (hash-ref sample "user-pct" 0))
+                         " iowait-pct=" (number->string (hash-ref sample "iowait-pct" 0))
+                         " idle-pct=" (number->string (hash-ref sample "idle-pct" 0)))
+          (string-append "check disk sectors-read=" (number->string (hash-ref sample "sectors-read" 0))
+                         " sectors-written=" (number->string (hash-ref sample "sectors-written" 0)))
+          (string-append "check net rx-bytes=" (number->string (hash-ref sample "rx-bytes" 0))
+                         " tx-bytes=" (number->string (hash-ref sample "tx-bytes" 0)))
+          (string-append "check ipi res=" (number->string (hash-ref sample "res" 0))
+                         " cal=" (number->string (hash-ref sample "cal" 0))
+                         " tlb=" (number->string (hash-ref sample "tlb" 0))))
+    (perf:sysinfo-lines info)
+    (perf:advice-lines advice)))
+
+(let loop ((xs lines))
+  (if (null? xs)
+      #t
+      (begin
+        (display (car xs))
+        (newline)
+        (loop (cdr xs)))))
+
+(perf:write-text "out/check.txt" (string-append (perf:join lines "\n") "\n"))
+(perf:write-text "out/check.json" (json-encode (hash "sample" sample "sysinfo" info "advice" advice)))
+(display "")

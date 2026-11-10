@@ -6,6 +6,7 @@
 (require "lib/perf/loop" all:)
 (require "lib/perf/util" all:)
 (require "lib/perf/score" all:)
+(require "examples/sum-scan/policy" all:)
 
 (define (call-kernel xs)
   (bench-kernel xs))
@@ -42,13 +43,7 @@
                         (if (>= i n) 0
                             (begin (k-ref xs i) (loop (+ i 1))))))))))
 
-; Expert EDSL: hard constraints the autotuner cannot bypass.
-; k-ref and k-length stay put. The mutable site is bench-kernel.
-(define expert-intend
-  (hash "min-faster-pct" 10
-        "checksum" #t
-        "budget" 4
-        "protected" (list "k-ref" "k-length")))
+; expert-intend and strategy-genes live in policy.aura.
 
 (perf:autotune
   (hash "seed-path" "examples/sum-scan/seed.aura"
@@ -59,6 +54,9 @@
         "repeats" 5
         "profile-repeats" 3
         "min-speedup-pct" 20
+        "screen-n" 800
+        "screen-slack-ms" 5
+        "genes" strategy-genes
         "expect-child" "k-ref"
         "require-success" #t
         "intend" expert-intend

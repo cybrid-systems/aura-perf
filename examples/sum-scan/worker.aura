@@ -8,6 +8,7 @@
 (require "lib/perf/score" all:)
 (require "lib/perf/cct" all:)
 (require "lib/perf/profile" all:)
+(require "lib/perf/gate" all:)
 
 (define (worker-fail why)
   (display why)
@@ -50,6 +51,49 @@
   (evo:candidate genome
                  (hash "target" target "thought" ident)))
 
+; Count callee entries on this worldline, then put the originals back
+; so the held-out timing is the candidate itself.
+(define (worldline-cct kernel xs root-ms)
+  (let ((box (hash "k-ref" 0 "k-length" 0 "k-ref-ms" 0 "k-length-ms" 0))
+        (saved-ref k-ref)
+        (saved-len k-length))
+    (set! k-ref (lambda (a i)
+                  (let ((t0 (monotonic-ms)))
+                    (let ((v (saved-ref a i)))
+                      (hash-set! box "k-ref" (+ (hash-ref box "k-ref" 0) 1))
+                      (hash-set! box "k-ref-ms"
+                                 (+ (hash-ref box "k-ref-ms" 0) (- (monotonic-ms) t0)))
+                      v))))
+    (set! k-length (lambda (a)
+                     (let ((t0 (monotonic-ms)))
+                       (let ((v (saved-len a)))
+                         (hash-set! box "k-length" (+ (hash-ref box "k-length" 0) 1))
+                         (hash-set! box "k-length-ms"
+                                    (+ (hash-ref box "k-length-ms" 0) (- (monotonic-ms) t0)))
+                         v))))
+    (try (kernel xs) (catch (e) #f))
+    (set! k-ref saved-ref)
+    (set! k-length saved-len)
+    (perf:cct-build
+      (perf:count-rows "bench-kernel" root-ms
+                       (list (hash "name" "k-ref"
+                                   "calls" (hash-ref box "k-ref" 0)
+                                   "task-clock" (hash-ref box "k-ref-ms" 0)
+                                   "stack" (list "bench-kernel" "k-ref"))
+                             (hash "name" "k-length"
+                                   "calls" (hash-ref box "k-length" 0)
+                                   "task-clock" (hash-ref box "k-length-ms" 0)
+                                   "stack" (list "bench-kernel" "k-length")))))))
+
+(define (screen-result screen-ms cct fidelity heldout-ms mismatches samples)
+  (hash "objectives" (hash "heldout-ms" heldout-ms)
+        "constraints" (hash "checksum" mismatches)
+        "behavior" (hash "mismatches" mismatches
+                         "samples" samples
+                         "fidelity" fidelity
+                         "screen-ms" screen-ms
+                         "cct" cct)))
+
 (define tr
   (evo:trial cand
              (hash "apply" apply-candidate
@@ -58,15 +102,31 @@
                    (lambda (c)
                      (let ((chk (perf:check-kernel bench-kernel (perf:check-inputs))))
                        (if (> (hash-ref chk "mismatches" 1) 0)
-                           (hash "objectives" (hash "heldout-ms" -1)
-                                 "constraints" (hash "checksum" (hash-ref chk "mismatches"))
-                                 "behavior" (hash "mismatches" (hash-ref chk "mismatches")
-                                                  "samples" '()))
-                           (let ((tm (perf:time-checked repeats bench-kernel heldout)))
-                             (hash "objectives" (hash "heldout-ms" (hash-ref tm "median"))
-                                   "constraints" (hash "checksum" (hash-ref tm "mismatches"))
-                                   "behavior" (hash "mismatches" (hash-ref tm "mismatches")
-                                                    "samples" (hash-ref tm "samples" '()))))))))))
+                           (screen-result -1
+                                          (hash "kind" "perf-cct" "nodes" '())
+                                          "checksum" -1
+                                          (hash-ref chk "mismatches")
+                                          '())
+                           (let* ((n (hash-ref job "screen-n" 0))
+                                  (screen-xs (if (and (number? n) (> n 0)) (perf:range n) '()))
+                                  (screen (if (null? screen-xs)
+                                              (hash "median" -1)
+                                              (perf:time-checked 1 bench-kernel screen-xs)))
+                                  (screen-ms (hash-ref screen "median" -1))
+                                  (cct (if (null? screen-xs)
+                                           (hash "kind" "perf-cct" "nodes" '())
+                                           (worldline-cct bench-kernel screen-xs screen-ms)))
+                                  (prune (perf:screen-prune?
+                                           (hash-ref job "screen-baseline-ms" -1)
+                                           screen-ms
+                                           (hash-ref job "screen-slack-ms" 5))))
+                             (if prune
+                                 (screen-result screen-ms cct "screen-pruned" -1 0 '())
+                                 (let ((tm (perf:time-checked repeats bench-kernel heldout)))
+                                   (screen-result screen-ms cct "held-out"
+                                                  (hash-ref tm "median")
+                                                  (hash-ref tm "mismatches")
+                                                  (hash-ref tm "samples" '())))))))))))
 
 (define objs (hash-ref tr "objectives" (hash)))
 (define beh (hash-ref tr "behavior" (hash)))
@@ -85,6 +145,9 @@
         "mismatches" (if (number? mismatches) mismatches -1)
         "heldout-ms" (hash-ref objs "heldout-ms" -1)
         "samples" (hash-ref beh "samples" '())
+        "fidelity" (hash-ref beh "fidelity" "")
+        "screen-ms" (hash-ref beh "screen-ms" -1)
+        "cct" (hash-ref beh "cct" (hash "kind" "perf-cct" "nodes" '()))
         "dur-ms" (hash-ref tr "dur-ms" 0)
         "error" (let ((e (hash-ref tr "error" #f)))
                   (if (string? e) e ""))))

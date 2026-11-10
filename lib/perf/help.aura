@@ -1,0 +1,36 @@
+; Verbs an agent or a person can run. The text is the contract for
+; ./run.sh. Each row says what the verb needs. It does not start a tool.
+
+(export perf:help perf:help-lines)
+
+(define (perf:help)
+  (list
+    (hash "verb" "autotune"
+          "needs" "aura; perf optional (task-clock). No API key."
+          "summary" "Measure the target, mine, trial, gate, write out/report.txt.")
+    (hash "verb" "recheck"
+          "needs" "out/evidence.json from autotune. No perf, no rebuild."
+          "summary" "Re-apply the current intend and strategy genes to the saved run.")
+    (hash "verb" "sysinfo"
+          "needs" "read /proc and /sys. Root not required. perf, numactl, dmidecode, bpftrace optional."
+          "summary" "Export this machine's inventory to out/sysinfo.txt and out/sysinfo.json.")
+    (hash "verb" "check"
+          "needs" "same as sysinfo, plus a short /proc sample. Set AURA_PERF_CHECK_SEC to lengthen it (default 1)."
+          "summary" "CPU, memory, disk, network, and interrupt deltas. Missing PMU stays missing.")
+    (hash "verb" "test"
+          "needs" "aura test. No perf."
+          "summary" "Run the value-level tests.")
+    (hash "verb" "help"
+          "needs" "nothing"
+          "summary" "List these verbs.")))
+
+(define (perf:help-lines)
+  (cons "aura-perf commands  (./run.sh <verb>)"
+        (let loop ((xs (perf:help)) (acc '()))
+          (if (null? xs)
+              (reverse acc)
+              (let ((h (car xs)))
+                (loop (cdr xs)
+                      (cons (string-append (hash-ref h "verb" "?") "  " (hash-ref h "summary" "")
+                                           "  needs: " (hash-ref h "needs" ""))
+                            acc)))))))

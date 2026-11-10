@@ -1,0 +1,61 @@
+; Negative memory keyed by mined class and hot node.
+; Dropping a candidate id is not enough: the same idea must not be
+; proposed again for the same hotspot, and may be proposed again when
+; the hotspot changes.
+
+(export perf:neg-remember perf:neg-blocked? perf:neg-query
+        perf:neg-ideas perf:filter-negative)
+
+(define (perf:neg-same? rec class hot idea)
+  (and (hash? rec)
+       (string=? (hash-ref rec "class" "") class)
+       (string=? (hash-ref rec "hot-node" "") hot)
+       (string=? (hash-ref rec "idea" "") idea)))
+
+(define (perf:neg-blocked? mem class hot idea)
+  (let loop ((xs (if (list? mem) mem '())))
+    (if (null? xs)
+        #f
+        (if (perf:neg-same? (car xs) class hot idea)
+            #t
+            (loop (cdr xs))))))
+
+(define (perf:neg-remember mem class hot idea reason)
+  (if (or (not (string? idea)) (string=? idea "")
+          (perf:neg-blocked? mem class hot idea))
+      (if (list? mem) mem '())
+      (cons (hash "class" class
+                  "hot-node" hot
+                  "idea" idea
+                  "reason" (if (string? reason) reason ""))
+            (if (list? mem) mem '()))))
+
+(define (perf:neg-query mem class hot)
+  (let loop ((xs (if (list? mem) mem '())) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (let ((r (car xs)))
+          (loop (cdr xs)
+                (if (and (hash? r)
+                         (string=? (hash-ref r "class" "") class)
+                         (string=? (hash-ref r "hot-node" "") hot))
+                    (cons r acc)
+                    acc))))))
+
+(define (perf:neg-ideas mem class hot)
+  (let loop ((xs (perf:neg-query mem class hot)) (acc ""))
+    (if (null? xs)
+        acc
+        (loop (cdr xs)
+              (string-append acc
+                             (if (string=? acc "") "" ",")
+                             (hash-ref (car xs) "idea" ""))))))
+
+(define (perf:filter-negative cands mem class hot)
+  (let loop ((xs (if (list? cands) cands '())) (ok '()) (skipped '()))
+    (if (null? xs)
+        (hash "ok" (reverse ok) "skipped" (reverse skipped))
+        (let ((id (hash-ref (car xs) "id" "")))
+          (if (perf:neg-blocked? mem class hot id)
+              (loop (cdr xs) ok (cons (car xs) skipped))
+              (loop (cdr xs) (cons (car xs) ok) skipped))))))

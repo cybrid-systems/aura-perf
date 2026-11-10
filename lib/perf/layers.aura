@@ -1,0 +1,161 @@
+; Layered machine advice. Counts come from the sysinfo value.
+; A skipped probe is a skipped probe. It is not a zero counter.
+
+(export perf:pct perf:cpu-class perf:advice perf:advice-lines perf:check-sample)
+
+(require "std/process" all:)
+(require "lib/perf/util" all:)
+(require "lib/perf/sysinfo" all:)
+
+(define (perf:pct part total)
+  (if (or (not (number? part)) (not (number? total)) (<= total 0))
+      0
+      (quotient (* part 100) total)))
+
+(define (perf:cpu-class delta)
+  (if (not (hash? delta))
+      (hash "class" "unknown" "user-pct" 0 "iowait-pct" 0 "idle-pct" 0)
+      (let* ((user (hash-ref delta "user" 0))
+             (system (hash-ref delta "system" 0))
+             (idle (hash-ref delta "idle" 0))
+             (iowait (hash-ref delta "iowait" 0))
+             (irq (hash-ref delta "irq" 0))
+             (soft (hash-ref delta "softirq" 0))
+             (total (+ user system idle iowait irq soft)))
+        (hash "class" (cond ((< total 1) "unknown")
+                            ((>= (perf:pct iowait total) 20) "io-wait")
+                            ((>= (perf:pct (+ user system) total) 60) "cpu-user")
+                            ((>= (perf:pct idle total) 70) "idle")
+                            (else "mixed"))
+              "user-pct" (perf:pct (+ user system) total)
+              "iowait-pct" (perf:pct iowait total)
+              "idle-pct" (perf:pct idle total)))))
+
+(define (perf:advice sys mined)
+  (let* ((info (if (hash? sys) sys (hash)))
+         (pclass (if (hash? mined) (hash-ref mined "class" "") ""))
+         (site (if (hash? mined) (hash-ref mined "site" "") ""))
+         (focus (if (and (not (string=? pclass ""))
+                         (not (string=? pclass "flat-hot")))
+                    "program"
+                    "machine"))
+         (nodes (hash-ref info "numa-nodes" 0))
+         (sockets (hash-ref info "sockets" 0))
+         (c2c (hash-ref info "perf-c2c" "missing"))
+         (pmu (hash-ref info "pmu" ""))
+         (ipi (hash-ref info "ipi" (hash)))
+         (program (if (and (string? pclass) (not (string=? pclass "")))
+                      (list (hash "id" "program-hot-prefix"
+                                  "layer" "application"
+                                  "site" site
+                                  "status" "actionable"
+                                  "reason" pclass
+                                  "measured" #t))
+                      '()))
+         (numa (list (hash "id" (if (and (number? nodes) (> nodes 1))
+                                    "numa-multi-node"
+                                    "numa-single-node")
+                           "layer" "memory"
+                           "site" "machine"
+                           "status" "noted"
+                           "reason" (string-append "numa-nodes="
+                                                   (number->string (if (number? nodes) nodes 0)))
+                           "measured" #t)))
+         (pack (list (if (and (number? sockets) (> sockets 1))
+                         (hash "id" "cross-package"
+                               "layer" "interconnect"
+                               "site" "machine"
+                               "status" "noted"
+                               "reason" "more than one socket; placement was not timed"
+                               "measured" #f)
+                         (hash "id" "cross-package"
+                               "layer" "interconnect"
+                               "site" "machine"
+                               "status" "not-applicable"
+                               "reason" "single socket"
+                               "measured" #f))))
+         (share (list (hash "id" "cacheline-sharing"
+                            "layer" "cache"
+                            "site" "machine"
+                            "status" "skipped"
+                            "reason" (if (string=? c2c "present")
+                                         (if (string=? pmu "hardware-events")
+                                             "perf-c2c-present-not-sampled"
+                                             "pmu-absent")
+                                         "perf-c2c-unavailable")
+                            "measured" #f)))
+         (inter (list (if (and (hash? ipi) (= (hash-ref ipi "res-seen" 0) 1))
+                          (hash "id" "ipi-inventory"
+                                "layer" "interrupt"
+                                "site" "machine"
+                                "status" "noted"
+                                "reason" "counts from /proc/interrupts"
+                                "res" (hash-ref ipi "res" 0)
+                                "cal" (hash-ref ipi "cal" 0)
+                                "tlb" (hash-ref ipi "tlb" 0)
+                                "measured" #t)
+                          (hash "id" "ipi-inventory"
+                                "layer" "interrupt"
+                                "site" "machine"
+                                "status" "skipped"
+                                "reason" "no RES/CAL/TLB rows"
+                                "measured" #f)))))
+    (hash "focus" focus
+          "program-class" pclass
+          "program-site" site
+          "arch" (hash-ref info "arch" "")
+          "pmu" pmu
+          "hypotheses" (append program numa pack share inter))))
+
+(define (perf:advice-lines advice)
+  (if (not (hash? advice))
+      '()
+      (cons (string-append "advise focus=" (hash-ref advice "focus" "?")
+                           " program=" (hash-ref advice "program-class" "")
+                           " site=" (hash-ref advice "program-site" "")
+                           " arch=" (hash-ref advice "arch" "")
+                           " pmu=" (hash-ref advice "pmu" ""))
+            (let loop ((xs (hash-ref advice "hypotheses" '())) (acc '()))
+              (if (null? xs)
+                  (reverse acc)
+                  (let ((h (car xs)))
+                    (loop (cdr xs)
+                          (cons (string-append "advice " (hash-ref h "id" "?")
+                                               " layer=" (hash-ref h "layer" "?")
+                                               " status=" (hash-ref h "status" "?")
+                                               " measured=" (if (eq? (hash-ref h "measured" #f) #t) "1" "0")
+                                               " reason=" (hash-ref h "reason" ""))
+                                acc))))))))
+
+(define (perf:env-seconds)
+  (let ((v (getenv "AURA_PERF_CHECK_SEC")))
+    (if (and (string? v) (number? (string->number v)) (> (string->number v) 0))
+        (string->number v)
+        1)))
+
+; Short sample. Default is one second. A longer window is
+; AURA_PERF_CHECK_SEC, not a fixed lecture.
+(define (perf:check-sample seconds)
+  (let ((sec (if (and (number? seconds) (> seconds 0)) seconds (perf:env-seconds))))
+    (let ((s0 (perf:parse-cpu-totals (perf:read-text "/proc/stat")))
+          (d0 (perf:parse-disk-sectors (perf:read-text "/proc/diskstats")))
+          (n0 (perf:parse-net-bytes (perf:read-text "/proc/net/dev")))
+          (i0 (perf:parse-ipi (perf:read-text "/proc/interrupts"))))
+      (shell (string-append "sleep " (number->string sec)))
+      (let ((s1 (perf:parse-cpu-totals (perf:read-text "/proc/stat")))
+            (d1 (perf:parse-disk-sectors (perf:read-text "/proc/diskstats")))
+            (n1 (perf:parse-net-bytes (perf:read-text "/proc/net/dev")))
+            (i1 (perf:parse-ipi (perf:read-text "/proc/interrupts")))
+            (cpu (perf:cpu-class (perf:cpu-delta s0 s1))))
+        (hash "seconds" sec
+              "cpu-class" (hash-ref cpu "class" "unknown")
+              "user-pct" (hash-ref cpu "user-pct" 0)
+              "iowait-pct" (hash-ref cpu "iowait-pct" 0)
+              "idle-pct" (hash-ref cpu "idle-pct" 0)
+              "sectors-read" (- (hash-ref d1 "sectors-read" 0) (hash-ref d0 "sectors-read" 0))
+              "sectors-written" (- (hash-ref d1 "sectors-written" 0) (hash-ref d0 "sectors-written" 0))
+              "rx-bytes" (- (hash-ref n1 "rx-bytes" 0) (hash-ref n0 "rx-bytes" 0))
+              "tx-bytes" (- (hash-ref n1 "tx-bytes" 0) (hash-ref n0 "tx-bytes" 0))
+              "res" (- (hash-ref i1 "res" 0) (hash-ref i0 "res" 0))
+              "cal" (- (hash-ref i1 "cal" 0) (hash-ref i0 "cal" 0))
+              "tlb" (- (hash-ref i1 "tlb" 0) (hash-ref i0 "tlb" 0)))))))

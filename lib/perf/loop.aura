@@ -245,7 +245,7 @@
 
 (define (perf:commit-kernel spec entry baseline buf)
   ; Snapshot first. A parallel let could rebind before the snapshot.
-  (let* ((snap (ast:snapshot "perf-kernel"))
+  (let* ((snap (mutate :snapshot "perf-kernel"))
          (compile-before (perf:compile-snap))
          (rb (mutate:rebind (hash-ref spec "target" "bench-kernel")
                             (hash-ref entry "genome" "")
@@ -292,7 +292,7 @@
                   (perf:note buf "keep" (hash-ref entry "id" "") "held-out gate")
                   #t)
                 (begin
-                  (ast:restore snap)
+                  (mutate :restore snap)
                   (eval-current)
                   (perf:bump buf "rollback")
                   (perf:audit-decision (hash-ref spec "target") "ROLLBACK"
@@ -312,7 +312,7 @@
           (perf:note buf "reject" "perf-strategy" "unsafe-order")
           (perf:bump buf "rollback")
           #f)
-        (let* ((snap (ast:snapshot "perf-strategy"))
+        (let* ((snap (mutate :snapshot "perf-strategy"))
                (rb (mutate:rebind "perf-strategy" src "perf-strategy-revise")))
           (if (not (eq? rb #t))
               (begin
@@ -341,7 +341,7 @@
                                                      (perf:join (map (lambda (s) (string-append " " s)) order) "")))
                         plan)
                       (begin
-                        (ast:restore snap)
+                        (mutate :restore snap)
                         (eval-current)
                         (perf:bump buf "rollback")
                         (perf:audit-decision "perf-strategy" "ROLLBACK" "strategy-verify-failed" (hash))

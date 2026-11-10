@@ -54,8 +54,8 @@ live workspace 没有被改。aura-perf 的 trial 使用单参数 apply。这是
 
 支持的构建是 `aura 0.2.0`，commit `cf7353373`（tag v0.2.0）。在这份构建上，同一个命名 `let` 连调两次，每次都按自己的参数算：`(sum 3)`、`(sum 7)`、`(sum 2)` 得到 `3`、`21`、`1`。
 
-Aura `main` 从 [#5102](https://github.com/cybrid-systems/aura/pull/5102)（`6aa43942a`，为 CLI fiber 整数循环加的闭包元数据缓存）起，这个循环在单线程路径上不可重入。第二次调用交回第一次的结果。issue 在 `245e05589` 上复现。`perf:parse-cpu-totals` 和 `perf:strip-noise` 都是这种循环。不探测的话，运行时在走到下标时抛出 `string-ref: index out of bounds`，源码位置落在被索引的字符串字面量上。`./run.sh sysinfo` 和 `./run.sh check` 走同一条路径，在这份构建上退出非 0。
+Aura `main` 从 [#5102](https://github.com/cybrid-systems/aura/pull/5102)（`6aa43942a`，为 CLI fiber 整数循环加的闭包元数据缓存）起，这个循环在单线程路径上不可重入。第二次调用交回第一次的结果。issue 在 `245e05589` 上复现。`perf:parse-cpu-totals` 和 `perf:strip-noise` 都是这种循环。不探测的话，运行时在走到下标时抛出 `string-ref: index out of bounds`，源码位置落在被索引的字符串字面量上。`aura-perf sysinfo` 和 `aura-perf check` 走同一条路径，在这份构建上退出非 0。
 
 上游：https://github.com/cybrid-systems/aura/issues/5116
 
-aura-perf 不改 Aura。`tests/runtime_probe.aura` 用上面的三次 `sum` 做探测。v0.2.0 上打印 `named-let-reentrant`。坏的构建上，错误文本带这次的 `aura -V`（`AURA_PERF_BUILD`）、三次调用的实际值、支持的版本和上游链接。解析器的 `perf:char-at` 在下标越界且探测失败时抛同一段文本；探测通过时，越界仍是带下标和长度的 `string-ref: index out of bounds`。`./run.sh test` 在 `aura test` 非 0 时再打一行构建号。探测失败不会把别的失败记成通过，suite 继续跑完。
+aura-perf 不改 Aura。`tests/runtime_probe.aura` 用上面的三次 `sum` 做探测。v0.2.0 上打印 `named-let-reentrant`。坏的构建上，错误文本带这次的 `aura -V`（`AURA_PERF_BUILD`）、三次调用的实际值、支持的版本和上游链接。解析器的 `perf:char-at` 在下标越界且探测失败时抛同一段文本；探测通过时，越界仍是带下标和长度的 `string-ref: index out of bounds`。`aura-perf test` 在 `aura test` 非 0 时再打一行构建号。探测失败不会把别的失败记成通过，suite 继续跑完。

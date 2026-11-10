@@ -1,5 +1,6 @@
 ; Verbs an agent or a person can run. The text is the contract for
-; ./run.sh. Each row says what the verb needs. It does not start a tool.
+; the aura-perf command. Each row says what the verb needs. It does not
+; start a tool.
 
 (export perf:help perf:help-lines)
 
@@ -25,7 +26,7 @@
           "summary" "List these verbs.")))
 
 (define (perf:help-lines)
-  (cons "aura-perf commands  (./run.sh <verb>)"
+  (cons "aura-perf commands  (aura-perf <verb>; ./run.sh <verb> in a checkout)"
         (let loop ((xs (perf:help)) (acc '()))
           (if (null? xs)
               (reverse acc)

@@ -28,7 +28,7 @@ need_out() {
   name=$1
   want=$2
   file=$3
-  if grep -q "$want" "$file"; then
+  if grep -qF "$want" "$file"; then
     printf 'ok %s contains %s\n' "$name" "$want"
   else
     printf 'FAIL %s missing %s\n' "$name" "$want" >&2
@@ -48,13 +48,40 @@ fi
 check recheck-missing 1 ./run.sh recheck
 need_out recheck-hint "recheck needs out/evidence.json" /tmp/aura-perf-exit-out
 need_out recheck-hint-cmd "./run.sh autotune" /tmp/aura-perf-exit-out
-
 check unknown-verb 1 ./run.sh recheck-with-a-typo
 need_out unknown-verb-msg "unknown verb:" /tmp/aura-perf-exit-err
 
 check help 0 ./run.sh help
 check sysinfo 0 ./run.sh sysinfo
 check check 0 ./run.sh check
+
+# The installed command: same verbs, and it must work from any directory.
+# The repo root is resolved from the script's own path, so a symlink in
+# ~/.local/bin runs this checkout.
+check cmd-help 0 sh bin/aura-perf help
+need_out cmd-help-usage "aura-perf [verb]" /tmp/aura-perf-exit-out
+check cmd-unknown 1 sh bin/aura-perf not-a-verb
+check cmd-from-elsewhere 0 sh -c "cd / && '$PWD/bin/aura-perf' help"
+check cmd-sysinfo-from-elsewhere 0 sh -c "cd / && '$PWD/bin/aura-perf' sysinfo"
+# help must not need the aura binary
+check cmd-help-no-aura 0 env -u AURA_BIN PATH=/bin:/usr/bin "$PWD/bin/aura-perf" help
+check cmd-no-aura 1 env -u AURA_BIN PATH=/bin:/usr/bin "$PWD/bin/aura-perf" sysinfo
+
+# The retired primitive prefixes (Aura v0.2.1 closed the alias window):
+# ast: / workspace: / ws: / dirty: / mutation-log: / syntax: / fiber:overlay-
+# are unbound now. A library that still calls one dies mid-run, so the
+# sources are checked here instead of waiting for that run.
+retired=$(grep -rEn '\((ast|workspace|ws|dirty|mutation-log|syntax|fiber:overlay-)[a-z-]+' \
+            lib examples 2>/dev/null | grep -v '^\s*;' || true)
+if [ -z "$retired" ]; then
+  printf 'ok no-retired-prefix exit=0\n'
+else
+  printf 'FAIL retired-prefix exit=1\n' >&2
+  printf '%s\n' "$retired" >&2
+  printf 'these primitives are unbound on Aura v0.2.1 and later; use the\n' >&2
+  printf 'mutate verb (mutate :snapshot / :restore) or (query :op ...)\n' >&2
+  fail=1
+fi
 
 printf '%s\n' 'verdict intend-met=1 KEEP=3 ROLLBACK=6 speedup-x=81.25 (325ms->4ms n=5 spread=120->0ms)' \
   > /tmp/aura-perf-verdict-met.txt

@@ -4,7 +4,7 @@
 
 ## 现在
 
-`./run.sh autotune` 跑完一轮。每个 worldline 有一棵 CCT，可以查询哪次 mutation 去掉了同一条热前缀且没有把代价挪走。负例按 `class` + `hot-node` 记住。分类阈值和 catalog 顺序是策略基因，走 KEEP / ROLLBACK。intend 封在门里。没有 perf 二进制时 CCT 用 region timer 的毫秒，并写明硬件计数器没有读。`./run.sh sysinfo` 和 `./run.sh check` 把这台机器的 CPU、内存、NUMA、中断和工具有无收成可查询的值。
+`aura-perf autotune` 跑完一轮。每个 worldline 有一棵 CCT，可以查询哪次 mutation 去掉了同一条热前缀且没有把代价挪走。负例按 `class` + `hot-node` 记住。分类阈值和 catalog 顺序是策略基因，走 KEEP / ROLLBACK。intend 封在门里。没有 perf 二进制时 CCT 用 region timer 的毫秒，并写明硬件计数器没有读。`aura-perf sysinfo` 和 `aura-perf check` 把这台机器的 CPU、内存、NUMA、中断和工具有无收成可查询的值。
 
 ## 接着做
 

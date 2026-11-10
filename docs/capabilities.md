@@ -98,7 +98,7 @@ KEEP 不重启 agent。同一个进程里：
 - `min-faster-pct` 和 checksum 是门，策略改不掉
 - catalog 和 `perf-strategy` 的顺序本身是 workspace 代码，失败后被 `mutate:rebind` 改成只留还没失败的假设，失败则 `ast:restore`
 
-没有审批网页。专家若要手试一条思路，用同一套 `evo:trial` 即可，结果进同一条 `AURA_EVO_LOG`。边界拒绝是已经跑过的那一步。intend 和策略基因在 `examples/sum-scan/policy.aura`，改完执行 `./run.sh recheck`。
+没有审批网页。专家若要手试一条思路，用同一套 `evo:trial` 即可，结果进同一条 `AURA_EVO_LOG`。边界拒绝是已经跑过的那一步。intend 和策略基因在 `examples/sum-scan/policy.aura`，改完执行 `aura-perf recheck`。
 
 度量：`expert-refuse` 行出现，且随后的 trial 名单里没有该 id。
 
@@ -126,7 +126,7 @@ Checksum 失败的候选不做 held-out。正确的候选先在 `screen-n` 上�
 
 ### 12. 机器层库存和建议
 
-`perf:sysinfo` 读 `/proc`、`/sys`，并在二进制存在时探测 `perf`、`lscpu`、`lsmem`、`numactl`、`dmidecode`、`bpftrace`。支持的 perf 事件和 `<not supported>` 分开记。`perf c2c` 只记录子命令在不在，不编造 hit。`perf:advice` 把程序热点和机器层分开：NUMA 节点数、单 socket、IPI 计数来自 `/proc/interrupts`，cache-line sharing 在 c2c 没采样时是 `skipped`。`./run.sh check` 默认采样 1 秒（`AURA_PERF_CHECK_SEC` 可加长），给出 CPU / 磁盘扇区 / 网卡字节 / IPI 的差分。
+`perf:sysinfo` 读 `/proc`、`/sys`，并在二进制存在时探测 `perf`、`lscpu`、`lsmem`、`numactl`、`dmidecode`、`bpftrace`。支持的 perf 事件和 `<not supported>` 分开记。`perf c2c` 只记录子命令在不在，不编造 hit。`perf:advice` 把程序热点和机器层分开：NUMA 节点数、单 socket、IPI 计数来自 `/proc/interrupts`，cache-line sharing 在 c2c 没采样时是 `skipped`。`aura-perf check` 默认采样 1 秒（`AURA_PERF_CHECK_SEC` 可加长），给出 CPU / 磁盘扇区 / 网卡字节 / IPI 的差分。
 
 KEEP 时若 `AURA_SANDBOX=off`，读 compile 组的 `cascade_full_count` 和 `module_dirty_recompiles`。示例里 `world-rebuilt=0`。这是证据，不是另一道会把正确加速打回去的门。
 
@@ -154,7 +154,7 @@ Trial 在子进程的 `evo:trial` 里做，live 指纹不变；过门才在父�
 ## 实施顺序
 
 1. 已做：目标程序的测量 → CCT → `perf:mine` → 策略基因 → protected 拒绝 → 并行 trial（每条 worldline 一棵 CCT）→ KEEP → 负例按 class + hot-node → intend 门。
-2. 已做：`./run.sh sysinfo` 和 `./run.sh check` 把机器库存收成 Aura 值。缺工具就写 skipped。
+2. 已做：`aura-perf sysinfo` 和 `aura-perf check` 把机器库存收成 Aura 值。缺工具就写 skipped。
 3. 下一步：语义火焰，然后才是 kernel 下沉、c2c 采样和外部 trace。
 
 不要做的：HTML/SVG 火焰图、perf script 原文进模型、给人看的仪表盘或审批页。

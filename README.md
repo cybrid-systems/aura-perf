@@ -6,31 +6,42 @@
 
 一条命令跑完测量、挖掘、试验、门控和报告。不需要虚拟环境，不需要 API key，不需要配置文件。需要 [Aura v0.2.0](https://github.com/cybrid-systems/aura/releases/tag/v0.2.0)（nightly `cf7353373`）。`perf` 可用时用它的 task-clock；没有二进制或没有 PMU 时改用 region timer，并在报告里写明，不把缺的计数器写成 0。
 
-这个仓库只保证 v0.2.0。Aura `main` 上命名 `let` 不能重入：同一个循环第二次调用交回第一次的结果，回归来自 [#5102](https://github.com/cybrid-systems/aura/pull/5102)（`6aa43942a`），记在 [aura#5116](https://github.com/cybrid-systems/aura/issues/5116)。`./run.sh test` 会先跑 `tests/runtime_probe.aura`。探测失败时，输出里有这次的 `aura -V`、期望的 `(sum 3) (sum 7) (sum 2) = 3 21 1`，以及上游链接。解析器在下标越界时也报这一段，而不是一句落在字符串字面量上的 `string-ref: index out of bounds`。探测通过之后，其余断言照常跑；真失败仍然失败。
+命令装上以后，**在任何目录**都能跑：
 
 ```sh
-./run.sh
+git clone https://github.com/cybrid-systems/aura-perf.git
+cd aura-perf && ./bin/aura-perf install     # 链到 ~/.local/bin（可用 PREFIX 改）
+aura-perf                                  # 等价于 aura-perf autotune
 ```
 
-`./run.sh` 就是 `./run.sh autotune`。报告在 `out/report.txt`，第一行是结论，例如 `verdict intend-met=1 KEEP=3 ROLLBACK=6 speedup-x=81.25 (325ms->4ms n=5 spread=120->0ms)`。`speedup-x` 是两次 held-out 中位的比值。括号里是这两次中位（毫秒）、样本数 `n`，以及样本极差（最大减最小，`基线->优化后`）。同一台机器上基线中位会漂，极差写在结论行上。后面每个拒绝一行原因（`checksum`、`protected`、`screen-pruned`、`no-speedup`、`intend-bypass`、`misclassify` 等）。
+不想装也行：在 checkout 里 `./run.sh <verb>` 和 `aura-perf <verb>` 完全等价（`run.sh` 就是命令的包装）。
 
-退出码跟结论一致。`autotune` 在 `intend-met=1` 时是 0，否则非 0。`recheck` 没有 `out/evidence.json` 时非 0，并提示先跑 `./run.sh autotune`。未知动词非 0。`help`、`sysinfo`、`check` 是 0。
+这个仓库只保证 v0.2.0。Aura `main` 上命名 `let` 不能重入：同一个循环第二次调用交回第一次的结果，回归来自 [#5102](https://github.com/cybrid-systems/aura/pull/5102)（`6aa43942a`），记在 [aura#5116](https://github.com/cybrid-systems/aura/issues/5116)。`aura-perf test` 会先跑 `tests/runtime_probe.aura`。探测失败时，输出里有这次的 `aura -V`、期望的 `(sum 3) (sum 7) (sum 2) = 3 21 1`，以及上游链接。解析器在下标越界时也报这一段，而不是一句落在字符串字面量上的 `string-ref: index out of bounds`。探测通过之后，其余断言照常跑；真失败仍然失败。
+
+```sh
+aura-perf
+```
+
+`aura-perf` 就是 `aura-perf autotune`。报告在 `out/report.txt`，第一行是结论，例如 `verdict intend-met=1 KEEP=3 ROLLBACK=6 speedup-x=81.25 (325ms->4ms n=5 spread=120->0ms)`。`speedup-x` 是两次 held-out 中位的比值。括号里是这两次中位（毫秒）、样本数 `n`，以及样本极差（最大减最小，`基线->优化后`）。同一台机器上基线中位会漂，极差写在结论行上。后面每个拒绝一行原因（`checksum`、`protected`、`screen-pruned`、`no-speedup`、`intend-bypass`、`misclassify` 等）。
+
+退出码跟结论一致。`autotune` 在 `intend-met=1` 时是 0，否则非 0。`recheck` 没有 `out/evidence.json` 时非 0，并提示先跑 `aura-perf autotune`。未知动词非 0。`help`、`sysinfo`、`check` 是 0。
 
 改 `examples/sum-scan/policy.aura` 里的 intend 或策略基因之后，用上次写下的 `out/evidence.json` 重判门，不重新剖析，也不重建 workspace：
 
 ```sh
-./run.sh recheck
+aura-perf recheck
 ```
 
 其他命令：
 
 ```sh
-./run.sh help       # 动词、每条需要什么（root、PMU、哪个工具）
-./run.sh sysinfo    # 这台机器的库存 → out/sysinfo.txt 和 out/sysinfo.json
-./run.sh check      # 约 1 秒的 CPU / 磁盘 / 网络 / 中断差分。加长：AURA_PERF_CHECK_SEC=60 ./run.sh check
-./run.sh test       # aura test
+aura-perf help       # 动词、每条需要什么（root、PMU、哪个工具）
+aura-perf sysinfo    # 这台机器的库存 → out/sysinfo.txt 和 out/sysinfo.json
+aura-perf check      # 约 1 秒的 CPU / 磁盘 / 网络 / 中断差分。加长：AURA_PERF_CHECK_SEC=60 aura-perf check
+aura-perf test       # aura test
 ```
 
+`aura-perf help` 不需要 aura 二进制；其余动词需要 `aura` 在 PATH 上（或 `AURA_BIN` 指向它）。
 `sysinfo` 和 `check` 不需要 root。DMI、`perf`、`numactl`、`dmidecode`、`bpftrace` 缺了就记 `skipped` 或 `missing`。
 
 特有能力的清单在 [docs/capabilities.md](docs/capabilities.md)。

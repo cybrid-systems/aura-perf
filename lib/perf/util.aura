@@ -5,6 +5,7 @@
         perf:join perf:take perf:member? perf:safe-id? perf:fmt-x
         perf:nth perf:string-ref-ok? perf:char-at
         perf:named-let-reentrant? perf:named-let-fault-text
+        perf:mutate-ops-present? perf:mutate-ops-fault-text
         perf:verdict-speedup)
 
 (require "std/string" all:)
@@ -58,6 +59,28 @@
       (number->string (hash-ref s "c" -1))
       ", expected 3 21 1. "
       "This is an Aura value-semantics regression, not an aura-perf parser bug.")))
+
+; The v0.2.1 primitive split: snapshot / restore moved under the mutate
+; verb and the ast: / workspace: / ws: prefixes are gone. A build without
+; them makes the autotune die with "unbound variable: ast:snapshot" the
+; first time a candidate is committed, so the probe names it here.
+(define (perf:mutate-ops-present?)
+  ;; The op answers with a snapshot id, or -1 when there is no live workspace
+  ;; (the probe runs before any set-code). What matters is that the call
+  ;; does not raise "unbound variable": that is a build without the op.
+  (let ((snap (try (mutate :snapshot "aura-perf-probe") (catch (e) #f))))
+    (number? snap)))
+
+(define (perf:mutate-ops-fault-text)
+  (string-append
+    "Aura on this build does not carry the mutate-verb snapshot op "
+    "(the v0.2.0 alias window is closed). "
+    "aura build: " (perf:aura-build-text) ". "
+    "supported: Aura v0.2.0 (nightly cf7353373) and later. "
+    "The autotune commits a candidate with (mutate :snapshot …); on a build "
+    "without that op it dies with 'unbound variable: ast:snapshot'. "
+    "upstream: https://github.com/cybrid-systems/aura/issues/5118. "
+    "This is an Aura surface change, not an aura-perf bug."))
 
 (define (perf:char-at s i)
   (if (perf:string-ref-ok? s i)

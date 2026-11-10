@@ -1,0 +1,1 @@
+(floor 20 slow-intend-met 0 slow-keep 0 slow-lines (reject linear-scan no-speedup) broken-lines (reject linear-scan isolation-violation) reason-no-speedup no-speedup reason-isolation isolation-violation accept-ok 1)

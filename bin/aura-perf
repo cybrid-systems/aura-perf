@@ -1,0 +1,151 @@
+#!/bin/sh
+# aura-perf - an optimization runtime for agents.
+#
+#   aura-perf [verb]
+#
+# The default verb is autotune. The command works from any directory: the
+# repository root is resolved from this script's own path (symlinks are
+# followed), so an installed copy in ~/.local/bin runs exactly the code a
+# checkout runs.
+#
+# Needs Aura v0.2.0 on PATH, or AURA_BIN pointing at it. No API key, no
+# virtualenv, no config file.
+set -eu
+
+# ── where is the repository? ─────────────────────────────────────────
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in
+    /*) self=$link ;;
+    *)  self=$(dirname "$self")/$link ;;
+  esac
+done
+ROOT=$(cd "$(dirname "$self")/.." && pwd)
+cd "$ROOT"
+
+usage() {
+  cat <<'EOF'
+aura-perf - an optimization runtime for agents
+
+  aura-perf [verb]
+
+  autotune   measure the target, mine hotspots, trial candidates in isolated
+             worldlines, gate them, write out/report.txt and out/evidence.json
+             (the default verb; exits 0 only when the intend is met)
+  recheck    re-apply the current intend and strategy genes to the saved run -
+             no perf, no rebuild
+  sysinfo    export this machine's inventory to out/sysinfo.txt and .json
+  check      CPU, memory, disk, network and interrupt deltas (1 s sample)
+  test       run the value-level tests
+  help       this text
+  install    link this command into ~/.local/bin (or $PREFIX/bin)
+
+Environment:
+  AURA_BIN        the aura executable (default: aura on PATH)
+  AURA_PATH       where std/* lives (default: <aura prefix>/lib)
+  AURA_PERF_CHECK_SEC   lengthen the check sample (default 1)
+  PERF_BIN        a perf binary that can count task-clock (optional)
+EOF
+}
+
+# ── find aura ────────────────────────────────────────────────────────
+aura_bin() {
+  if [ -n "${AURA_BIN:-}" ]; then printf '%s\n' "$AURA_BIN"; return 0; fi
+  if command -v aura >/dev/null 2>&1; then command -v aura; return 0; fi
+  if [ -x "$HOME/aura/bin/aura" ]; then printf '%s\n' "$HOME/aura/bin/aura"; return 0; fi
+  return 1
+}
+
+install_self() {
+  dest="${PREFIX:-$HOME/.local/bin}"
+  mkdir -p "$dest"
+  ln -sf "$ROOT/bin/aura-perf" "$dest/aura-perf"
+  printf 'installed %s -> %s\n' "$dest/aura-perf" "$ROOT/bin/aura-perf"
+  case ":$PATH:" in
+    *":$dest:"*) ;;
+    *) printf 'add %s to PATH to run aura-perf from anywhere\n' "$dest" ;;
+  esac
+}
+
+cmd="${1:-autotune}"
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+  help|-h|--help)
+    usage
+    exit 0
+    ;;
+  install)
+    install_self
+    exit 0
+    ;;
+esac
+
+AURA=$(aura_bin) || {
+  echo "aura-perf: aura is not on PATH. Install Aura v0.2.0 or set AURA_BIN." >&2
+  exit 1
+}
+export AURA_BIN="$AURA"
+# A source build keeps std/ in <repo>/lib; a release package in <prefix>/lib.
+if [ -z "${AURA_PATH:-}" ]; then
+  lib=$(dirname "$(dirname "$AURA")")/lib
+  if [ -d "$lib" ]; then AURA_PATH="$lib"; export AURA_PATH; fi
+fi
+export AURA_SANDBOX=off
+
+case "$cmd" in
+  autotune|run)
+    mkdir -p out/jobs out/trials
+    export AURA_EVO_LOG="${AURA_EVO_LOG:-$PWD/out/evo.jsonl}"
+    if [ -z "${PERF_BIN:-}" ]; then
+      PERF_BIN="$(sh scripts/find-perf.sh 2>/dev/null || true)"
+      if [ -n "$PERF_BIN" ]; then export PERF_BIN; fi
+    fi
+    exec "$AURA" --preset dev --grant exec examples/sum-scan/main.aura
+    ;;
+  recheck)
+    mkdir -p out
+    exec "$AURA" --preset dev examples/sum-scan/recheck.aura
+    ;;
+  sysinfo)
+    mkdir -p out
+    exec "$AURA" --preset dev --grant exec examples/sum-scan/sysinfo.aura
+    ;;
+  check)
+    mkdir -p out
+    exec "$AURA" --preset dev --grant exec examples/sum-scan/check.aura
+    ;;
+  test)
+    # Probe first so a named-let regression is named, then run every
+    # test anyway. A real assertion failure is still a failure.
+    set +e
+    "$AURA" --preset dev tests/runtime_probe.aura >/tmp/aura-perf-probe.out 2>/tmp/aura-perf-probe.err
+    probe=$?
+    "$AURA" test
+    rc=$?
+    sh tests/exit_test.sh
+    exit_rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "aura-perf: aura test failed." >&2
+      echo "aura build: ${AURA_PERF_BUILD:-unknown}" >&2
+      echo "supported: Aura v0.2.0 (nightly cf7353373)" >&2
+      if [ "$probe" -ne 0 ]; then
+        echo "named-let reentrancy probe failed. Upstream: https://github.com/cybrid-systems/aura/issues/5116" >&2
+        echo "An index-out-of-bounds error or a parser golden mismatch on this build is that regression, not an aura-perf parser bug." >&2
+        cat /tmp/aura-perf-probe.err >&2 || true
+        cat /tmp/aura-perf-probe.out >&2 || true
+      fi
+    fi
+    if [ "$rc" -ne 0 ]; then
+      exit "$rc"
+    fi
+    exit "$exit_rc"
+    ;;
+  *)
+    echo "unknown verb: $cmd" >&2
+    usage >&2
+    exit 1
+    ;;
+esac

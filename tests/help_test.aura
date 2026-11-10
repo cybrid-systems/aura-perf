@@ -1,0 +1,10 @@
+(require "lib/perf/help" all:)
+
+(define (verbs)
+  (let loop ((xs (perf:help)) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (loop (cdr xs) (cons (hash-ref (car xs) "verb" "") acc)))))
+
+(display (verbs))
+(newline)

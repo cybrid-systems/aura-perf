@@ -4,23 +4,20 @@
 
 ## 现在
 
-`perf:autotune` 对示例目标跑完一轮：perf 测量 define 级 task-clock，建成 CCT，策略调用 `perf:mine`，保护边界拒绝改叶子，并行 trial 两条会失败的假设，KEEP 线性扫描，再采一棵树做差分。硬件 PMU 不在的机器上用软件事件，并写明哪些事件 `<not supported>`。
+`./run.sh autotune` 跑完一轮。每个 worldline 有一棵 CCT，可以查询哪次 mutation 去掉了同一条热前缀且没有把代价挪走。负例按 `class` + `hot-node` 记住。分类阈值和 catalog 顺序是策略基因，走 KEEP / ROLLBACK。intend 封在门里。没有 perf 二进制时 CCT 用 region timer 的毫秒，并写明硬件计数器没有读。`./run.sh sysinfo` 和 `./run.sh check` 把这台机器的 CPU、内存、NUMA、中断和工具有无收成可查询的值。
 
 ## 接着做
 
-1. 每个 worldline 一棵 CCT。查询「哪次 mutation 去掉了同一条热前缀，且代价没有挪到别的 define」。差分记在该候选的 evo 证据里。
-2. 负例按 `class` + `hot-node` 检索，而不只丢掉同名 id。同一热点不再原样重提。
-3. 分类阈值和 catalog 顺序收成可 trial 的策略基因，和 kernel 走同一套 KEEP / ROLLBACK。
-4. intend 变成运行时规范：checksum、最低加速、protected 都不能被策略改掉。
+- 语义火焰：节点可以是策略阶段或规则。
+- `perf c2c` / `perf mem` / `perf sched` 现在只探测子命令在不在。PMU 可用时才采样，并仍不把缺测写成 0。
+- bpftrace / bcc 只在已经安装时登记，不附带脚本。
+- 机器层建议的跨次负例（现在的负例记的是同一次 autotune 里的程序热点）。
+- KernelBench 式算子和 [aura-kernel-sink](https://github.com/cybrid-systems/aura-kernel-sink) 的 C 下沉，作为一种假设接进 autotune。没有 GPU 就不报 SOL。
+- Warpline 一类 trace 作为另一种 CCT 来源。
 
-## 再往后
+[aura-harness](https://github.com/cybrid-systems/aura-harness) / [hephaestus](https://github.com/cybrid-systems/hephaestus) 的多角色循环，是策略基因的宿主，不是另一套外层 Python。
 
-- 语义火焰：节点可以是策略阶段或规则，agent 用它优化 harness，而不是只看用户 define。
-- 增量编译计数进门控，确认一次 rebind 没有整包重编。
-- KernelBench 式算子和 [aura-kernel-sink](https://github.com/cybrid-systems/aura-kernel-sink) 的 C 下沉，作为一种假设接进 autotune。契约和 checksum 仍然先于计时。没有 GPU 就不报 SOL 分数。
-- Warpline 一类 trace 作为另一种 CCT 来源，填同一套 `perf:cct-*` 查询。不另做给人看的报告。
-
-[aura-harness](https://github.com/cybrid-systems/aura-harness) / [hephaestus](https://github.com/cybrid-systems/hephaestus) 的多角色循环，是上面第 3 步的宿主，不是另一套外层 Python。
+增量编译计数已经写进 KEEP 的证据（`world-rebuilt`、`cascade-full`、`body-only`）。示例里 `world-rebuilt=0`。它还不是一道失败就打回正确加速的门。
 
 ## 不做
 

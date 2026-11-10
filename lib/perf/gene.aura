@@ -1,0 +1,116 @@
+; Strategy genes: classification threshold and catalog order.
+; They are trialed on the same KEEP / ROLLBACK vocabulary as a kernel.
+; A gene cannot lower the intend. The deterministic gate owns the decision.
+
+(export perf:gene-trial perf:select-gene perf:reference-gene)
+
+(require "lib/perf/cct" all:)
+(require "lib/perf/gate" all:)
+
+(define (perf:reference-gene)
+  (hash "id" "reference" "ratio" 2 "actionable-ms" 1))
+
+(define (perf:gene-id gene)
+  (if (hash? gene) (hash-ref gene "id" "gene") "gene"))
+
+(define (perf:order-waste order class)
+  (let ((wins (let loop ((xs (perf:hypotheses class "site")) (acc '()))
+                (if (null? xs)
+                    acc
+                    (loop (cdr xs)
+                          (if (string=? (hash-ref (car xs) "expect" "")
+                                        "lower-task-clock")
+                              (cons (hash-ref (car xs) "id" "") acc)
+                              acc))))))
+    (if (null? wins)
+        999
+        (let loop ((xs (if (list? order) order '())) (i 0))
+          (cond ((null? xs) 999)
+                ((let scan ((ys wins))
+                   (if (null? ys)
+                       #f
+                       (if (string=? (car ys) (car xs))
+                           #t
+                           (scan (cdr ys)))))
+                 i)
+                (else (loop (cdr xs) (+ i 1))))))))
+
+(define (perf:gene-trial profile gene seal)
+  (let* ((prot (if (hash? seal) (hash-ref seal "protected" '()) '()))
+         (ref (perf:mine-with profile (perf:reference-gene) prot))
+         (got (perf:mine-with profile gene prot))
+         (ref-class (hash-ref ref "class" ""))
+         (got-class (hash-ref got "class" ""))
+         (order (if (hash? gene) (hash-ref gene "order" '()) '()))
+         (ratio (let ((r (if (hash? gene) (hash-ref gene "ratio" 2) 2)))
+                  (if (number? r) r 2)))
+         (reason (cond ((perf:gene-bypasses? gene seal) "intend-bypass")
+                       ((and (string=? ref-class "") (not (= ratio 2))) "no-signal")
+                       ((not (string=? ref-class got-class)) "misclassify")
+                       ((and (pair? (hash-ref ref "actionable" '()))
+                             (null? (hash-ref got "actionable" '())))
+                        "no-actionable-site")
+                       ((or (not (list? order)) (null? order)) "empty-order")
+                       (else "classifies-hot-prefix"))))
+    (hash "id" (perf:gene-id gene)
+          "decision" (if (string=? reason "classifies-hot-prefix") "KEEP" "ROLLBACK")
+          "reason" reason
+          "class" got-class
+          "order" (if (list? order) order '())
+          "ratio" ratio
+          "per-round" (let ((n (if (hash? gene) (hash-ref gene "per-round" 2) 2)))
+                        (if (and (number? n) (> n 0)) n 2))
+          "score" (perf:order-waste (if (list? order) order '()) ref-class)
+          "gene" gene)))
+
+(define (perf:better-gene? a b)
+  (let ((sa (hash-ref a "score" 999))
+        (sb (hash-ref b "score" 999))
+        (la (length (hash-ref a "order" '())))
+        (lb (length (hash-ref b "order" '()))))
+    (or (< sa sb)
+        (and (= sa sb) (> la lb))
+        (and (= sa sb) (= la lb)
+             (< (hash-ref a "ratio" 999) (hash-ref b "ratio" 999)))
+        (and (= sa sb) (= la lb)
+             (= (hash-ref a "ratio" 999) (hash-ref b "ratio" 999))
+             (string<? (hash-ref a "id" "") (hash-ref b "id" ""))))))
+
+; One winner. Other genes that also classified the hotspot are
+; dominated: they are not a second KEEP.
+(define (perf:select-gene profile genes seal)
+  (let ((raw (let loop ((xs (if (list? genes) genes '())) (acc '()))
+               (if (null? xs)
+                   (reverse acc)
+                   (loop (cdr xs) (cons (perf:gene-trial profile (car xs) seal) acc))))))
+    (let ((best (let loop ((xs raw) (win #f))
+                  (if (null? xs)
+                      win
+                      (let ((v (car xs)))
+                        (if (and (string=? (hash-ref v "decision" "") "KEEP")
+                                 (or (not win) (perf:better-gene? v win)))
+                            (loop (cdr xs) v)
+                            (loop (cdr xs) win)))))))
+      (let ((final (let loop ((xs raw) (acc '()))
+                     (if (null? xs)
+                         (reverse acc)
+                         (let ((v (car xs)))
+                           (loop (cdr xs)
+                                 (cons (if (and best
+                                                (string=? (hash-ref v "decision" "") "KEEP")
+                                                (not (string=? (hash-ref v "id" "")
+                                                               (hash-ref best "id" ""))))
+                                           (hash "id" (hash-ref v "id" "")
+                                                 "decision" "ROLLBACK"
+                                                 "reason" "dominated"
+                                                 "class" (hash-ref v "class" "")
+                                                 "order" (hash-ref v "order" '())
+                                                 "ratio" (hash-ref v "ratio" 2)
+                                                 "per-round" (hash-ref v "per-round" 2)
+                                                 "score" (hash-ref v "score" 0)
+                                                 "gene" (hash-ref v "gene" (hash)))
+                                           v)
+                                       acc)))))))
+        (hash "verdicts" final
+              "winner" (if best (hash-ref best "gene" #f) #f)
+              "winner-id" (if best (hash-ref best "id" "") ""))))))

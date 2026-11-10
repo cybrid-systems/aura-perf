@@ -1,0 +1,36 @@
+(require "lib/perf/gate" all:)
+
+(define seal
+  (perf:intend-seal
+    (hash "min-speedup-pct" 20
+          "intend" (hash "min-faster-pct" 10
+                         "checksum" #t
+                         "budget" 4
+                         "protected" (list "k-ref" "k-length")))))
+
+(define slow
+  (hash "status" "ok" "checksum-ok" 1 "live-unchanged" 1
+        "mismatches" 0 "heldout-ms" 95 "force-keep" #t))
+
+(define bad
+  (hash "status" "ok" "checksum-ok" 0 "live-unchanged" 1
+        "mismatches" 2 "heldout-ms" 10 "force-keep" #t))
+
+(display (list (perf:gate-pct 0 (hash-ref seal "min-faster-pct" 0))
+               (perf:gate-pct 20 (hash-ref seal "min-faster-pct" 0))
+               (if (perf:gene-bypasses?
+                     (hash "checksum" #f "ratio" 2)
+                     seal) 1 0)
+               (if (perf:gene-bypasses?
+                     (hash "min-faster-pct" 0 "ratio" 2)
+                     seal) 1 0)
+               (if (perf:gene-bypasses?
+                     (hash "protected" '() "ratio" 2)
+                     seal) 1 0)
+               (if (perf:gene-bypasses? (hash "ratio" 2) seal) 1 0)
+               (if (perf:accept? 100 slow (perf:gate-pct 0 10)) 1 0)
+               (if (perf:accept? 100 bad 10) 1 0)
+               (if (perf:screen-prune? 10 30 5) 1 0)
+               (if (perf:screen-prune? 10 12 5) 1 0)
+               (if (perf:screen-prune? 0 100 5) 1 0)))
+(newline)

@@ -1,0 +1,5 @@
+recheck intend-met=1 KEEP=1 ROLLBACK=1 speedup-x=2.50
+reject wrong-scale checksum
+keep linear-scan gate-pass
+recheck intend-met=0 KEEP=0 ROLLBACK=2 speedup-x=2.50
+reject linear-scan protected

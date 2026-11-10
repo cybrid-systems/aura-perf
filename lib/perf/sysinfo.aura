@@ -1,0 +1,479 @@
+; Machine inventory as Aura values.
+; Reads /proc, /sys, and optional tools. Missing tools and counters stay
+; missing. Nothing here turns "<not supported>" into a zero.
+
+(export perf:split-kv perf:cpu-list-count perf:cpu-indices
+        perf:parse-cpuinfo perf:parse-cpu-totals perf:cpu-delta
+        perf:parse-ipi perf:parse-disk-sectors perf:parse-net-bytes
+        perf:thp-mode perf:sysinfo perf:sysinfo-lines)
+
+(require "std/string" all:)
+(require "std/process" all:)
+(require "lib/perf/util" all:)
+(require "lib/perf/profile" all:)
+
+(define (perf:trim s)
+  (if (not (string? s))
+      ""
+      (let ((n (string-length s)))
+        (let lo ((i 0))
+          (if (or (>= i n) (> (string-ref s i) 32))
+              (let hi ((j n))
+                (if (or (<= j i) (> (string-ref s (- j 1)) 32))
+                    (substring s i j)
+                    (hi (- j 1))))
+              (lo (+ i 1)))))))
+
+(define (perf:ends-colon? t)
+  (and (string? t)
+       (> (string-length t) 0)
+       (= (string-ref t (- (string-length t) 1)) 58)))
+
+(define (perf:strip-colon t)
+  (if (perf:ends-colon? t)
+      (substring t 0 (- (string-length t) 1))
+      t))
+
+(define (perf:split-kv line)
+  (let ((toks (perf:tokens line)))
+    (let loop ((xs toks) (pre '()))
+      (if (null? xs)
+          #f
+          (let ((t (car xs)))
+            (cond ((string=? t ":")
+                   (hash "key" (perf:join (reverse pre) " ")
+                         "val" (perf:join (cdr xs) " ")))
+                  ((perf:ends-colon? t)
+                   (hash "key" (perf:join (append (reverse pre)
+                                                  (list (perf:strip-colon t)))
+                                          " ")
+                         "val" (perf:join (cdr xs) " ")))
+                  (else (loop (cdr xs) (cons t pre)))))))))
+
+(define (perf:cpu-list-count s)
+  (if (or (not (string? s)) (string=? (perf:trim s) ""))
+      0
+      (let loop ((xs (string-split (perf:trim s) ",")) (n 0))
+        (if (null? xs)
+            n
+            (let ((part (perf:trim (car xs))))
+              (if (string=? part "")
+                  (loop (cdr xs) n)
+                  (let ((bits (string-split part "-")))
+                    (if (null? (cdr bits))
+                        (loop (cdr xs) (+ n 1))
+                        (let ((a (perf:parse-number (car bits)))
+                              (b (perf:parse-number (car (cdr bits)))))
+                          (loop (cdr xs)
+                                (+ n (if (and (number? a) (number? b) (>= b a))
+                                         (+ (- b a) 1)
+                                         0))))))))))))
+
+(define (perf:range-down b a acc)
+  (if (or (< b a) (> (length acc) 256))
+      acc
+      (perf:range-down (- b 1) a (cons b acc))))
+
+(define (perf:cpu-indices s)
+  (if (or (not (string? s)) (string=? (perf:trim s) ""))
+      '()
+      (let loop ((xs (string-split (perf:trim s) ",")) (acc '()))
+        (if (or (null? xs) (> (length acc) 256))
+            acc
+            (let ((part (perf:trim (car xs))))
+              (if (string=? part "")
+                  (loop (cdr xs) acc)
+                  (let ((bits (string-split part "-")))
+                    (if (null? (cdr bits))
+                        (let ((n (perf:parse-number (car bits))))
+                          (loop (cdr xs) (if (number? n) (append acc (list n)) acc)))
+                        (let ((a (perf:parse-number (car bits)))
+                              (b (perf:parse-number (car (cdr bits)))))
+                          (loop (cdr xs)
+                                (if (and (number? a) (number? b) (>= b a))
+                                    (append acc (perf:range-down b a '()))
+                                    acc)))))))))))
+
+(define (perf:parse-cpuinfo text)
+  (let loop ((lines (if (string? text) (string-split text "\n") '()))
+             (cpus 0) (vendor "") (model "") (model-id "")
+             (family "") (micro "") (impl ""))
+    (if (null? lines)
+        (hash "cpus" cpus
+              "vendor" (if (string=? vendor "") impl vendor)
+              "model" model
+              "model-id" model-id
+              "family" family
+              "microcode" micro)
+        (let ((kv (perf:split-kv (car lines))))
+          (if (not kv)
+              (loop (cdr lines) cpus vendor model model-id family micro impl)
+              (let ((k (hash-ref kv "key" ""))
+                    (v (hash-ref kv "val" "")))
+                (cond ((string=? k "processor")
+                       (loop (cdr lines) (+ cpus 1) vendor model model-id family micro impl))
+                      ((string=? k "vendor_id")
+                       (loop (cdr lines) cpus v model model-id family micro impl))
+                      ((string=? k "model name")
+                       (loop (cdr lines) cpus vendor v model-id family micro impl))
+                      ((string=? k "model")
+                       (loop (cdr lines) cpus vendor model v family micro impl))
+                      ((string=? k "cpu family")
+                       (loop (cdr lines) cpus vendor model model-id v micro impl))
+                      ((string=? k "microcode")
+                       (loop (cdr lines) cpus vendor model model-id family v impl))
+                      ((or (string=? k "CPU implementer") (string=? k "CPU part"))
+                       (loop (cdr lines) cpus vendor model model-id family micro
+                             (if (string=? impl "") v impl)))
+                      (else
+                       (loop (cdr lines) cpus vendor model model-id family micro impl)))))))))
+
+(define (perf:parse-cpu-totals text)
+  (let loop ((lines (if (string? text) (string-split text "\n") '())))
+    (if (null? lines)
+        #f
+        (let ((toks (perf:tokens (car lines))))
+          (if (and (pair? toks) (string=? (car toks) "cpu"))
+              (hash "user" (let ((n (perf:parse-number (perf:nth toks 1)))) (if (number? n) n 0))
+                    "nice" (let ((n (perf:parse-number (perf:nth toks 2)))) (if (number? n) n 0))
+                    "system" (let ((n (perf:parse-number (perf:nth toks 3)))) (if (number? n) n 0))
+                    "idle" (let ((n (perf:parse-number (perf:nth toks 4)))) (if (number? n) n 0))
+                    "iowait" (let ((n (perf:parse-number (perf:nth toks 5)))) (if (number? n) n 0))
+                    "irq" (let ((n (perf:parse-number (perf:nth toks 6)))) (if (number? n) n 0))
+                    "softirq" (let ((n (perf:parse-number (perf:nth toks 7)))) (if (number? n) n 0)))
+              (loop (cdr lines)))))))
+
+(define (perf:sub a b)
+  (- (if (number? a) a 0) (if (number? b) b 0)))
+
+(define (perf:cpu-delta before after)
+  (if (or (not (hash? before)) (not (hash? after)))
+      #f
+      (hash "user" (perf:sub (hash-ref after "user" 0) (hash-ref before "user" 0))
+            "system" (perf:sub (hash-ref after "system" 0) (hash-ref before "system" 0))
+            "idle" (perf:sub (hash-ref after "idle" 0) (hash-ref before "idle" 0))
+            "iowait" (perf:sub (hash-ref after "iowait" 0) (hash-ref before "iowait" 0))
+            "irq" (perf:sub (hash-ref after "irq" 0) (hash-ref before "irq" 0))
+            "softirq" (perf:sub (hash-ref after "softirq" 0) (hash-ref before "softirq" 0)))))
+
+(define (perf:sum-numbers toks)
+  (let loop ((xs toks) (n 0) (saw #f))
+    (if (null? xs)
+        (if saw n #f)
+        (let ((v (perf:parse-number (car xs))))
+          (if (number? v)
+              (loop (cdr xs) (+ n v) #t)
+              (loop (cdr xs) n saw))))))
+
+(define (perf:parse-ipi text)
+  (let ((acc (hash "res" 0 "cal" 0 "tlb" 0 "res-seen" 0 "cal-seen" 0 "tlb-seen" 0)))
+    (let loop ((lines (if (string? text) (string-split text "\n") '())))
+      (if (null? lines)
+          acc
+          (let ((toks (perf:tokens (car lines))))
+            (if (pair? toks)
+                (let ((name (perf:strip-colon (car toks)))
+                      (sum (perf:sum-numbers (cdr toks))))
+                  (cond ((and (string=? name "RES") (number? sum))
+                         (hash-set! acc "res" sum)
+                         (hash-set! acc "res-seen" 1))
+                        ((and (string=? name "CAL") (number? sum))
+                         (hash-set! acc "cal" sum)
+                         (hash-set! acc "cal-seen" 1))
+                        ((and (string=? name "TLB") (number? sum))
+                         (hash-set! acc "tlb" sum)
+                         (hash-set! acc "tlb-seen" 1))
+                        (else #f)))
+                #f)
+            (loop (cdr lines)))))
+    acc))
+
+(define (perf:disk-line? name)
+  (and (string? name)
+       (not (string=? name ""))
+       (not (string-prefix? name "loop"))
+       (not (string-prefix? name "ram"))))
+
+(define (perf:parse-disk-sectors text)
+  (let loop ((lines (if (string? text) (string-split text "\n") '()))
+             (read 0) (write 0))
+    (if (null? lines)
+        (hash "sectors-read" read "sectors-written" write)
+        (let ((toks (perf:tokens (car lines))))
+          (if (and (pair? toks) (pair? (cdr toks)) (pair? (cdr (cdr toks)))
+                   (perf:disk-line? (perf:nth toks 2)))
+              (let ((r (perf:parse-number (perf:nth toks 5)))
+                    (w (perf:parse-number (perf:nth toks 9))))
+                (loop (cdr lines)
+                      (+ read (if (number? r) r 0))
+                      (+ write (if (number? w) w 0))))
+              (loop (cdr lines) read write))))))
+
+(define (perf:parse-net-bytes text)
+  (let loop ((lines (if (string? text) (string-split text "\n") '()))
+             (rx 0) (tx 0))
+    (if (null? lines)
+        (hash "rx-bytes" rx "tx-bytes" tx)
+        (let ((toks (perf:tokens (car lines))))
+          (if (and (pair? toks) (perf:ends-colon? (car toks))
+                   (not (string=? (perf:strip-colon (car toks)) "lo"))
+                   (not (string=? (perf:strip-colon (car toks)) "face")))
+              (let ((r (perf:parse-number (perf:nth toks 1)))
+                    (w (perf:parse-number (perf:nth toks 9))))
+                (loop (cdr lines)
+                      (+ rx (if (number? r) r 0))
+                      (+ tx (if (number? w) w 0))))
+              (loop (cdr lines) rx tx))))))
+
+(define (perf:thp-mode text)
+  (if (not (string? text))
+      ""
+      (let ((n (string-length text)))
+        (let loop ((i 0))
+          (if (>= i n)
+              (perf:trim text)
+              (if (= (string-ref text i) 91)
+                  (let end ((j (+ i 1)))
+                    (if (or (>= j n) (= (string-ref text j) 93))
+                        (substring text (+ i 1) j)
+                        (end (+ j 1))))
+                  (loop (+ i 1))))))))
+
+(define (perf:tool name)
+  (let ((p (which name)))
+    (if (and (string? p) (not (string=? p ""))) p "missing")))
+
+(define (perf:sh-ok cmd)
+  (= (shell cmd) 0))
+
+(define (perf:read-kv path)
+  (perf:trim (perf:read-text path)))
+
+(define (perf:meminfo-kb text key)
+  (let loop ((lines (if (string? text) (string-split text "\n") '())))
+    (if (null? lines)
+        -1
+        (let ((kv (perf:split-kv (car lines))))
+          (if (and kv (string=? (hash-ref kv "key" "") key))
+              (let ((n (perf:parse-number (car (perf:tokens (hash-ref kv "val" ""))))))
+                (if (number? n) n -1))
+              (loop (cdr lines)))))))
+
+(define (perf:caches)
+  (let loop ((i 0) (acc '()))
+    (if (>= i 8)
+        (reverse acc)
+        (let ((base (string-append "/sys/devices/system/cpu/cpu0/cache/index"
+                                   (number->string i) "/")))
+          (let ((level (perf:read-kv (string-append base "level")))
+                (ty (perf:read-kv (string-append base "type")))
+                (size (perf:read-kv (string-append base "size")))
+                (shared (perf:read-kv (string-append base "shared_cpu_list"))))
+            (if (string=? level "")
+                (loop (+ i 1) acc)
+                (loop (+ i 1)
+                      (cons (hash "level" level "type" ty "size" size
+                                  "shared" shared)
+                            acc))))))))
+
+(define (perf:packages indices)
+  (let loop ((xs indices) (ids '()))
+    (if (null? xs)
+        (length ids)
+        (let ((id (perf:read-kv (string-append "/sys/devices/system/cpu/cpu"
+                                               (number->string (car xs))
+                                               "/topology/physical_package_id"))))
+          (loop (cdr xs)
+                (if (or (string=? id "") (perf:member? ids id))
+                    ids
+                    (cons id ids)))))))
+
+(define (perf:smt? indices)
+  (let loop ((xs indices))
+    (if (null? xs)
+        0
+        (let ((sib (perf:read-kv (string-append "/sys/devices/system/cpu/cpu"
+                                                (number->string (car xs))
+                                                "/topology/thread_siblings_list"))))
+          (if (> (perf:cpu-list-count sib) 1)
+              1
+              (loop (cdr xs)))))))
+
+(define (perf:nodes)
+  (let loop ((i 0) (acc '()))
+    (if (>= i 16)
+        (reverse acc)
+        (let ((cpus (perf:read-kv (string-append "/sys/devices/system/node/node"
+                                                 (number->string i) "/cpulist"))))
+          (if (string=? cpus "")
+              (loop (+ i 1) acc)
+              (loop (+ i 1) (cons (hash "id" i "cpus" cpus) acc)))))))
+
+(define (perf:bios)
+  (let ((vendor (perf:read-kv "/sys/class/dmi/id/bios_vendor"))
+        (version (perf:read-kv "/sys/class/dmi/id/bios_version"))
+        (date (perf:read-kv "/sys/class/dmi/id/bios_date"))
+        (product (perf:read-kv "/sys/class/dmi/id/product_name")))
+    (if (and (string=? vendor "") (string=? version "") (string=? product ""))
+        (hash "status" "skipped" "reason" "dmi-unreadable"
+              "vendor" "" "version" "" "date" "" "product" "")
+        (hash "status" "read" "reason" ""
+              "vendor" vendor "version" version "date" date "product" product))))
+
+(define (perf:uname-field flag)
+  (let ((path (string-append "/tmp/aura-perf-uname-" flag ".txt")))
+    (shell (string-append "uname -" flag " > " path " 2>/dev/null"))
+    (perf:trim (perf:read-text path))))
+
+(define (perf:event-probe bin)
+  (if (or (not (string? bin)) (string=? bin "missing"))
+      (hash "perf" "missing" "pmu" "perf-missing" "supported" '() "unsupported" '())
+      (let* ((events "task-clock,cpu-clock,cycles,instructions,cache-references,cache-misses,branches,branch-misses,context-switches,page-faults")
+             (out "/tmp/aura-perf-sys-stat.txt")
+             (text (begin
+                     (shell (string-append bin " stat -e " events " -o " out " -- true >/tmp/aura-perf-sys-stat.err 2>&1"))
+                     (perf:read-text out)))
+             (parsed (perf:parse-perf-stat text))
+             (unsup (perf:unsupported-events text))
+             (sup (let loop ((ks (if (hash? parsed) (hash-keys parsed) '())) (acc '()))
+                    (if (null? ks)
+                        acc
+                        (loop (cdr ks)
+                              (if (perf:member? unsup (car ks))
+                                  acc
+                                  (cons (car ks) acc)))))))
+        (hash "perf" bin
+              "pmu" (if (perf:member? unsup "cycles")
+                        "software-events-only"
+                        (if (number? (hash-ref parsed "cycles" #f))
+                            "hardware-events"
+                            "unknown"))
+              "supported" sup
+              "unsupported" unsup))))
+
+(define (perf:sub-ok bin name)
+  (if (or (not (string? bin)) (string=? bin "missing"))
+      "missing"
+      (let ((out (string-append "/tmp/aura-perf-" name ".txt")))
+        (if (perf:sh-ok (string-append bin " " name " --help > " out " 2>&1"))
+            "present"
+            "missing"))))
+
+(define (perf:note skipped item)
+  (if (and (string? item) (not (string=? item "")))
+      (append skipped (list item))
+      skipped))
+
+(define (perf:sysinfo)
+  (let* ((arch (perf:uname-field "m"))
+         (kernel (perf:uname-field "sr"))
+         (info (perf:parse-cpuinfo (perf:read-text "/proc/cpuinfo")))
+         (online (perf:read-kv "/sys/devices/system/cpu/online"))
+         (indices (perf:cpu-indices online))
+         (nodes (perf:nodes))
+         (mem (perf:read-text "/proc/meminfo"))
+         (ipi (perf:parse-ipi (perf:read-text "/proc/interrupts")))
+         (bin (let ((b (perf:find-bin))) (if (string? b) b "missing")))
+         (events (perf:event-probe bin))
+         (bios (perf:bios))
+         (c2c (perf:sub-ok bin "c2c"))
+         (memtool (perf:sub-ok bin "mem"))
+         (sched (perf:sub-ok bin "sched"))
+         (bpf (perf:tool "bpftrace"))
+         (numactl (perf:tool "numactl"))
+         (dmi (perf:tool "dmidecode"))
+         (skipped (perf:note
+                    (perf:note
+                      (perf:note
+                        (perf:note '()
+                                   (if (string=? (hash-ref bios "status" "") "skipped")
+                                       "bios:dmi-unreadable" ""))
+                        (if (string=? bin "missing") "perf:no-usable-binary" ""))
+                      (if (string=? (hash-ref events "pmu" "") "software-events-only")
+                          "pmu:hardware-events-not-supported" ""))
+                    (if (string=? c2c "present")
+                        "perf-c2c:present-not-sampled"
+                        "perf-c2c:not-run"))))
+      (hash "kind" "perf-sysinfo"
+            "arch" arch
+            "kernel" kernel
+            "cmdline" (perf:trim (perf:read-text "/proc/cmdline"))
+            "vendor" (hash-ref info "vendor" "")
+            "model" (hash-ref info "model" "")
+            "model-id" (hash-ref info "model-id" "")
+            "family" (hash-ref info "family" "")
+            "microcode" (hash-ref info "microcode" "")
+            "cpus" (hash-ref info "cpus" 0)
+            "online" online
+            "sockets" (perf:packages indices)
+            "smt" (perf:smt? indices)
+            "caches" (perf:caches)
+            "numa-nodes" (length nodes)
+            "nodes" nodes
+            "mem-kib" (perf:meminfo-kb mem "MemTotal")
+            "mem-available-kib" (perf:meminfo-kb mem "MemAvailable")
+            "hugepages" (perf:meminfo-kb mem "HugePages_Total")
+            "thp" (perf:thp-mode (perf:read-text "/sys/kernel/mm/transparent_hugepage/enabled"))
+            "bios" bios
+            "ipi" ipi
+            "paranoid" (perf:trim (perf:read-text "/proc/sys/kernel/perf_event_paranoid"))
+            "perf" bin
+            "pmu" (hash-ref events "pmu" "")
+            "events-supported" (hash-ref events "supported" '())
+            "events-unsupported" (hash-ref events "unsupported" '())
+            "perf-c2c" c2c
+            "perf-mem" memtool
+            "perf-sched" sched
+            "numactl" numactl
+            "dmidecode" dmi
+            "lscpu" (perf:tool "lscpu")
+            "lsmem" (perf:tool "lsmem")
+            "bpftrace" bpf
+            "spe" (if (or (string=? arch "aarch64") (string=? arch "arm64"))
+                      (if (string=? (perf:read-kv "/sys/devices/arm_spe_0/type") "")
+                          "not-found"
+                          "present")
+                      "not-on-this-arch")
+            "skipped" skipped)))
+
+(define (perf:sysinfo-lines info)
+  (if (not (hash? info))
+      '("sysinfo unavailable")
+      (let ((bios (hash-ref info "bios" (hash)))
+            (ipi (hash-ref info "ipi" (hash))))
+        (list
+          (string-append "sysinfo arch=" (hash-ref info "arch" "?")
+                         " kernel=" (hash-ref info "kernel" "?")
+                         " vendor=" (hash-ref info "vendor" "?")
+                         " model=" (hash-ref info "model" "?"))
+          (string-append "cpu cpus=" (number->string (hash-ref info "cpus" 0))
+                         " online=" (hash-ref info "online" "?")
+                         " sockets=" (number->string (hash-ref info "sockets" 0))
+                         " smt=" (number->string (hash-ref info "smt" 0))
+                         " family=" (hash-ref info "family" "?")
+                         " model-id=" (hash-ref info "model-id" "?")
+                         " microcode=" (hash-ref info "microcode" "?"))
+          (string-append "numa nodes=" (number->string (hash-ref info "numa-nodes" 0)))
+          (string-append "memory kib=" (number->string (hash-ref info "mem-kib" -1))
+                         " available-kib=" (number->string (hash-ref info "mem-available-kib" -1))
+                         " thp=" (hash-ref info "thp" "?")
+                         " hugepages=" (number->string (hash-ref info "hugepages" -1)))
+          (string-append "bios status=" (hash-ref bios "status" "?")
+                         " reason=" (hash-ref bios "reason" "")
+                         " vendor=" (hash-ref bios "vendor" "")
+                         " version=" (hash-ref bios "version" ""))
+          (string-append "pmu " (hash-ref info "pmu" "?")
+                         " perf=" (hash-ref info "perf" "?"))
+          (string-append "events-unsupported " (perf:join (hash-ref info "events-unsupported" '()) ","))
+          (string-append "tools c2c=" (hash-ref info "perf-c2c" "?")
+                         " mem=" (hash-ref info "perf-mem" "?")
+                         " sched=" (hash-ref info "perf-sched" "?")
+                         " numactl=" (if (string=? (hash-ref info "numactl" "missing") "missing") "missing" "present")
+                         " dmidecode=" (if (string=? (hash-ref info "dmidecode" "missing") "missing") "missing" "present")
+                         " bpftrace=" (if (string=? (hash-ref info "bpftrace" "missing") "missing") "missing" "present")
+                         " spe=" (hash-ref info "spe" "?"))
+          (string-append "ipi RES=" (number->string (hash-ref ipi "res" 0))
+                         " CAL=" (number->string (hash-ref ipi "cal" 0))
+                         " TLB=" (number->string (hash-ref ipi "tlb" 0))
+                         " measured=" (number->string (hash-ref ipi "res-seen" 0)))
+          (string-append "skipped " (perf:join (hash-ref info "skipped" '()) ","))))))

@@ -9,7 +9,7 @@
         perf:parse-proc-stat perf:unsupported-events perf:record-samples
         perf:select-child perf:find-bin perf:tool-status perf:read-proc
         perf:engine-snap perf:collect perf:hottest perf:hot-child
-        perf:measure-live)
+        perf:measure-live perf:compile-snap perf:compile-delta)
 
 (require "std/string" all:)
 (require "std/process" all:)
@@ -406,9 +406,11 @@
       (if (string=? perf-s "missing")
           "perf: no usable binary (the /usr/bin/perf wrapper often rejects a newer kernel). Target hotspots fall back to region timers."
           (string-append "perf: using " perf-s " on the target program, not on the Aura interpreter"))
-      (if (null? unsup)
-          "perf: requested hardware events were accepted"
-          (string-append "perf: events not supported on this kernel: " (perf:join unsup ",")))
+      (if (string=? perf-s "missing")
+          "perf: hardware counters were not read"
+          (if (null? unsup)
+              "perf: requested hardware events were accepted"
+              (string-append "perf: events not supported on this kernel: " (perf:join unsup ","))))
       (if (string=? gprof-s "missing")
           "gprof: binary not on PATH"
           (if (string=? gmon "no-gmon")
@@ -426,6 +428,19 @@
             (perf:parse-gprof (perf:read-text path))
             '()))
       '()))
+
+(define (perf:region-rows raw)
+  (let loop ((xs (if (list? raw) raw '())) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (let ((h (car xs)))
+          (loop (cdr xs)
+                (cons (hash "name" (hash-ref h "name" "")
+                            "task-clock" (hash-ref h "self-ms" 0)
+                            "calls" (hash-ref h "calls" 1)
+                            "page-faults" 0
+                            "stack" (hash-ref h "stack" (list (hash-ref h "name" ""))))
+                      acc))))))
 
 (define (perf:collect regions opts)
   (let* ((o (if (hash? opts) opts (hash)))
@@ -461,7 +476,10 @@
                     (perf:profile-targets bin targets)
                     (hash "rows" '() "child" "" "unsupported" '() "bench" #f
                           "record-samples" -1 "record-event" "")))
-         (cct (perf:cct-build (hash-ref pinfo "rows" '())))
+         (cct (let ((built (perf:cct-build (hash-ref pinfo "rows" '()))))
+                (if (null? (hash-ref built "nodes" '()))
+                    (perf:cct-build (perf:region-rows raw))
+                    built)))
          (phs (perf:perf-hotspots (hash-ref pinfo "rows" '())))
          (merged (append region-hs phs)))
     (let loop ((xs merged))
@@ -515,6 +533,41 @@
 
 ; Hottest region whose declared stack has a caller. This is the child
 ; the strategy uses to pick a mutation family.
+; engine:metrics after set-code aborts when the sandbox is restricted.
+; The example exports AURA_SANDBOX=off. Otherwise the snap says unavailable.
+(define (perf:compile-snap)
+  (let ((s (getenv "AURA_SANDBOX")))
+    (if (not (and (string? s) (string=? s "off")))
+        (hash "available" 0)
+        (let ((g (try (engine-metrics:group "compile") (catch (e) #f))))
+          (if (not (hash? g))
+              (hash "available" 0)
+              (hash "available" 1
+                    "relower-full" (hash-ref g "relower_full_called_count" 0)
+                    "partial-funcs" (hash-ref g "relower_partial_funcs_saved_total" 0)
+                    "cascade-full" (hash-ref g "cascade_full_count" 0)
+                    "body-only" (hash-ref g "cascade_body_only_count" 0)
+                    "dirty-recompiles" (hash-ref g "module_dirty_recompiles" 0)))))))
+
+(define (perf:compile-sub after before key)
+  (- (hash-ref after key 0) (hash-ref before key 0)))
+
+(define (perf:compile-delta before after)
+  (if (or (not (hash? before)) (not (hash? after))
+          (not (= (hash-ref before "available" 0) 1))
+          (not (= (hash-ref after "available" 0) 1)))
+      (hash "available" 0 "world-rebuilt" -1
+            "cascade-full" 0 "body-only" 0 "relower-full" 0 "dirty-recompiles" 0)
+      (let ((cf (perf:compile-sub after before "cascade-full"))
+            (dr (perf:compile-sub after before "dirty-recompiles")))
+        (hash "available" 1
+              "cascade-full" cf
+              "body-only" (perf:compile-sub after before "body-only")
+              "relower-full" (perf:compile-sub after before "relower-full")
+              "partial-funcs" (perf:compile-sub after before "partial-funcs")
+              "dirty-recompiles" dr
+              "world-rebuilt" (if (or (> cf 0) (> dr 0)) 1 0)))))
+
 (define (perf:hot-child profile)
   (let ((chosen (if (hash? profile) (hash-ref profile "perf-child" "") "")))
     (if (and (string? chosen) (not (string=? chosen "")))

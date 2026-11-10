@@ -2,7 +2,8 @@
 ; A candidate is accepted only when it is correct and at least `pct`
 ; percent faster than the live baseline on the held-out input.
 
-(export perf:speedup-ok? perf:accept?)
+(export perf:speedup-ok? perf:accept? perf:intend-seal perf:gate-pct
+        perf:gene-bypasses? perf:screen-prune? perf:covers?)
 
 (define (perf:speedup-ok? baseline-ms cand-ms pct)
   (and (number? baseline-ms) (> baseline-ms 0)
@@ -21,3 +22,59 @@
        (perf:flag-on? result "live-unchanged")
        (= (hash-ref result "mismatches" 1) 0)
        (perf:speedup-ok? baseline-ms (hash-ref result "heldout-ms" -1) pct)))
+
+; The intend is a value the strategy cannot rewrite. A gene that asks
+; for a lower bar, a cleared checksum, or a shorter protected list is
+; rejected. The gate then uses the floor, not the request.
+(define (perf:intend-seal spec)
+  (let ((i (if (and (hash? spec) (hash? (hash-ref spec "intend" #f)))
+               (hash-ref spec "intend")
+               (hash)))
+        (fallback (if (hash? spec) (hash-ref spec "min-speedup-pct" 10) 10)))
+    (hash "min-faster-pct" (let ((p (hash-ref i "min-faster-pct" fallback)))
+                             (if (number? p) p fallback))
+          "checksum" (not (eq? (hash-ref i "checksum" #t) #f))
+          "protected" (let ((p (hash-ref i "protected" '())))
+                        (if (list? p) p '()))
+          "budget" (let ((b (hash-ref i "budget" 0)))
+                     (if (number? b) b 0)))))
+
+(define (perf:covers? have need)
+  (let loop ((xs (if (list? need) need '())))
+    (if (null? xs)
+        #t
+        (if (let scan ((ys (if (list? have) have '())))
+              (if (null? ys)
+                  #f
+                  (if (equal? (car ys) (car xs))
+                      #t
+                      (scan (cdr ys)))))
+            (loop (cdr xs))
+            #f))))
+
+(define (perf:gate-pct requested floor)
+  (cond ((not (number? floor)) (if (number? requested) requested 10))
+        ((not (number? requested)) floor)
+        ((< requested floor) floor)
+        (else requested)))
+
+(define (perf:gene-bypasses? gene seal)
+  (and (hash? gene)
+       (or (eq? (hash-ref gene "checksum" 'absent) #f)
+           (and (number? (hash-ref gene "min-faster-pct" #f))
+                (number? (hash-ref seal "min-faster-pct" #f))
+                (< (hash-ref gene "min-faster-pct" 0)
+                   (hash-ref seal "min-faster-pct" 0)))
+           (and (list? (hash-ref gene "protected" #f))
+                (not (perf:covers? (hash-ref gene "protected" '())
+                                   (hash-ref seal "protected" '())))))))
+
+; Promote to held-out only when the cheap screen is not clearly worse.
+; A zero reading is "timer could not separate them", so it is promoted.
+; The held-out gate still refuses a slower survivor.
+(define (perf:screen-prune? base cand slack)
+  (and (number? base) (> base 0)
+       (number? cand) (> cand 0)
+       (number? slack) (>= slack 0)
+       (> cand (+ base slack))
+       (> cand (* base 2))))

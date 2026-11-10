@@ -1,0 +1,56 @@
+(require "lib/perf/sysinfo" all:)
+(require "lib/perf/layers" all:)
+
+(define info-text
+  "processor\t: 0\n\
+vendor_id\t: GenuineIntel\n\
+cpu family\t: 6\n\
+model\t\t: 207\n\
+model name\t: Intel(R) Xeon(R) Processor\n\
+microcode\t: 0x1\n\
+\n\
+processor\t: 1\n\
+vendor_id\t: GenuineIntel\n\
+model name\t: Intel(R) Xeon(R) Processor\n")
+
+(define ipi-text
+  "           CPU0       CPU1\n\
+RES:       10       12   Rescheduling interrupts\n\
+CAL:       3        4    Function call interrupts\n\
+TLB:       1        1    TLB shootdowns\n")
+
+(define stat-a "cpu  10 0 5 80 5 0 0 0 0 0\ncpu0 10 0 5 80 5 0 0 0 0 0\n")
+(define stat-b "cpu  10 0 5 180 5 0 0 0 0 0\n")
+(define cpu (perf:parse-cpuinfo info-text))
+(define ipi (perf:parse-ipi ipi-text))
+(define klass (perf:cpu-class (perf:cpu-delta (perf:parse-cpu-totals stat-a)
+                                              (perf:parse-cpu-totals stat-b))))
+(define advice
+  (perf:advice (hash "arch" "x86_64" "numa-nodes" 1 "sockets" 1
+                     "pmu" "software-events-only" "perf-c2c" "missing"
+                     "ipi" ipi)
+               (hash "class" "repeated-index-walk" "site" "bench-kernel")))
+
+(define (field id key)
+  (let loop ((xs (hash-ref advice "hypotheses" '())))
+    (if (null? xs)
+        "?"
+        (if (string=? (hash-ref (car xs) "id" "") id)
+            (hash-ref (car xs) key "?")
+            (loop (cdr xs))))))
+
+(display (list (hash-ref cpu "cpus")
+               (hash-ref cpu "vendor")
+               (hash-ref cpu "model-id")
+               (perf:cpu-list-count "0-3")
+               (perf:cpu-list-count "0-3,8-11")
+               (hash-ref ipi "res")
+               (hash-ref ipi "cal")
+               (hash-ref klass "class")
+               (perf:thp-mode "always [madvise] never\n")
+               (hash-ref advice "focus")
+               (field "cacheline-sharing" "status")
+               (field "cacheline-sharing" "reason")
+               (field "cross-package" "status")
+               (if (eq? (field "cacheline-sharing" "measured") #t) 1 0)))
+(newline)

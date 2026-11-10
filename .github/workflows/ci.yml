@@ -32,14 +32,23 @@ jobs:
       - name: Parser, query, proposer, gate, and CCT tests
         run: aura test
       - name: Autotune the sum-scan target
-        run: sh scripts/run-example.sh
+        run: ./run.sh autotune
         env:
           AURA_EVO_LOG: ${{ github.workspace }}/out/evo.jsonl
       - name: Report has a keep, a rollback, and an intend result
         run: |
+          grep -q 'verdict intend-met=' out/report.txt
           grep -q 'KEEP' out/report.txt
           grep -q 'ROLLBACK' out/report.txt
           grep -q 'intend-met' out/report.txt
+      - name: Recheck the saved gate without reprofiling
+        run: ./run.sh recheck
+      - name: Machine inventory and a one-second layered check
+        run: |
+          ./run.sh sysinfo
+          ./run.sh check
+          grep -q 'sysinfo arch=' out/sysinfo.txt
+          grep -q 'check seconds=' out/check.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:

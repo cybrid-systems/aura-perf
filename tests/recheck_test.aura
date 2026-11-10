@@ -1,0 +1,36 @@
+(require "lib/perf/recheck" all:)
+(require "lib/perf/gate" all:)
+
+(define evidence
+  (hash "before-ms" 100
+        "after-ms" 40
+        "cct" (hash "kind" "perf-cct" "nodes" '())
+        "candidates"
+        (list (hash "id" "wrong-scale" "target" "bench-kernel" "status" "ok"
+                    "checksum-ok" 0 "mismatches" 4 "heldout-ms" -1
+                    "fidelity" "checksum" "live-unchanged" 1)
+              (hash "id" "linear-scan" "target" "bench-kernel" "status" "ok"
+                    "checksum-ok" 1 "mismatches" 0 "heldout-ms" 40
+                    "fidelity" "held-out" "live-unchanged" 1))))
+
+(define intend
+  (hash "min-faster-pct" 10 "checksum" #t "budget" 4
+        "protected" (list "k-ref" "k-length")))
+
+(define lines (perf:recheck-lines evidence intend '()))
+(define strict
+  (perf:recheck-lines evidence
+                      (hash "min-faster-pct" 70 "checksum" #t
+                            "protected" (list "k-ref" "k-length" "bench-kernel"))
+                      '()))
+
+(display (car lines))
+(newline)
+(display (car (cdr lines)))
+(newline)
+(display (car (cdr (cdr lines))))
+(newline)
+(display (car strict))
+(newline)
+(display (car (cdr (cdr strict))))
+(newline)

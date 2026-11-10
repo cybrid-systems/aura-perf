@@ -1,0 +1,25 @@
+; Rescore out/evidence.json with the intend and genes in policy.aura.
+; No perf, no set-code, no child trial.
+
+(require "lib/perf/util" all:)
+(require "lib/perf/recheck" all:)
+(require "examples/sum-scan/policy" all:)
+
+(define text (perf:read-text "out/evidence.json"))
+(define evidence (if (string=? text "") #f (try (json-parse text) (catch (e) #f))))
+(define lines (if (hash? evidence)
+                  (perf:recheck-lines evidence expert-intend strategy-genes)
+                  (list "verdict no-evidence"
+                        "recheck needs out/evidence.json. Run: ./run.sh autotune")))
+
+(let loop ((xs lines))
+  (if (null? xs)
+      #t
+      (begin
+        (display (car xs))
+        (newline)
+        (loop (cdr xs)))))
+
+(perf:write-text "out/recheck.txt"
+                 (string-append (perf:join lines "\n") "\n"))
+(display "")

@@ -1,0 +1,41 @@
+; Intend and strategy genes. Edit this file, then:
+;   ./run.sh recheck
+; recheck rescores the saved run. It does not rebuild the workspace
+; and it does not start perf.
+
+(export expert-intend strategy-genes)
+
+(define expert-intend
+  (hash "min-faster-pct" 10
+        "checksum" #t
+        "budget" 4
+        "protected" (list "k-ref" "k-length")))
+
+; ratio and actionable-ms are the mining genes. order is the catalog gene.
+; A gene that clears checksum, lowers the floor, or drops a protected
+; define is rejected by the gate.
+(define strategy-genes
+  (list
+    (hash "id" "gene-ratio-2"
+          "ratio" 2
+          "actionable-ms" 1
+          "per-round" 2
+          "order" (list "specialize-k-ref" "wrong-scale"
+                        "redundant-pass" "linear-scan"))
+    (hash "id" "gene-ratio-8"
+          "ratio" 8
+          "actionable-ms" 1
+          "per-round" 1
+          "order" (list "specialize-k-ref" "wrong-scale"
+                        "redundant-pass" "linear-scan"))
+    (hash "id" "gene-high-threshold"
+          "ratio" 2
+          "actionable-ms" 1000000
+          "per-round" 1
+          "order" (list "linear-scan"))
+    (hash "id" "gene-drop-checksum"
+          "ratio" 2
+          "actionable-ms" 1
+          "per-round" 1
+          "checksum" #f
+          "order" (list "wrong-scale" "linear-scan"))))

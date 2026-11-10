@@ -86,9 +86,9 @@ KEEP 不重启 agent。同一个进程里：
 
 差分是下一轮策略的输入，不是两张红蓝图。本轮示例在假设被确认后停止（intend 已满足）。热前缀 `k-ref` 从后树上消失，`bench-kernel` 的 task-clock 下降，才打印 `hypothesis-confirmed`。
 
-度量：`cct-delta` 的 `delta-ms` 为负，且 live task-clock 下降。region timer 的 `perf:delta` 同时留下 define 级毫秒差，两套数不要混成一个单位。
+度量：`cct-delta` 的 `delta-ms` 为负，且 live task-clock 下降。region timer 的 `perf:delta` 同时留下 define 级毫秒差，两套数不要混成一个单位。没有 perf 时不打印 live task-clock，改由 worldline 查询打印 `hypothesis-confirmed`。
 
-依赖：hot-update（`mutate:rebind` + `eval-current`）、同一 PID 上的 `perf stat`、CCT 差分。
+依赖：hot-update（`mutate:rebind` + `eval-current`）、同一 PID 上的 `perf stat`（二进制可用时）、CCT 差分。
 
 ### 6. 专家用 EDSL 加约束，不看图审批
 
@@ -98,46 +98,63 @@ KEEP 不重启 agent。同一个进程里：
 - `min-faster-pct` 和 checksum 是门，策略改不掉
 - catalog 和 `perf-strategy` 的顺序本身是 workspace 代码，失败后被 `mutate:rebind` 改成只留还没失败的假设，失败则 `ast:restore`
 
-没有审批网页。专家若要手试一条思路，用同一套 `evo:trial` 即可，结果进同一条 `AURA_EVO_LOG`。本轮没有单独的「专家 fork 一条 worldline」演示，边界拒绝是已经跑过的那一步。
+没有审批网页。专家若要手试一条思路，用同一套 `evo:trial` 即可，结果进同一条 `AURA_EVO_LOG`。边界拒绝是已经跑过的那一步。intend 和策略基因在 `examples/sum-scan/policy.aura`，改完执行 `./run.sh recheck`。
 
 度量：`expert-refuse` 行出现，且随后的 trial 名单里没有该 id。
+
+### 7. 每个 worldline 一棵 CCT
+
+Trial 子进程在 checksum 通过之后，用一次便宜的 region 计数把 `k-ref` / `k-length` 的调用次数记进那条 worldline 的 CCT。父进程调用 `(perf:cct-worldline-query before after prefix)`，得到 `prefix-removed`、`cost-moved`、`moved-to`。`(perf:cct-cleared …)` 回答「哪次 mutation 去掉了同一条热前缀，且没有把代价挪到别的 define」。差分摘要写进该候选的 `evo:record!` evidence（`cct-delta`）。KEEP 之后若 `perf:should-continue?` 为真，用新树再 `perf:mine`；示例里线性扫描是 `continue 0`。
+
+度量：`cleared` 行点名候选；`worldline` 行给出 measured / prefix-removed / cost-moved。空树是 `measured=0`，不算「前缀被删掉」。
+
+### 8. 负例按 class + hot-node
+
+`(perf:neg-remember mem class hot idea reason)` 记下失败的想法。`(perf:neg-blocked? …)` 在同一热点上拒绝原样重提；热点或 class 变了，同一 id 可以再提。`perf:round-candidates` 会过滤，并打印 `negative-skip`。这和「从 order 里删掉 id」同时存在，过滤才是按热点的那一层。
+
+### 9. 策略基因走同一条 KEEP / ROLLBACK
+
+分类比（默认 2）、`actionable-ms`、catalog 顺序是基因。`(perf:select-gene profile genes seal)` 逐个给 KEEP 或 ROLLBACK：`intend-bypass`、`misclassify`、`no-actionable-site`、`no-signal`、`empty-order`，胜者才 `mutate:rebind` `perf-strategy`。输家不改 live 定义。基因不能把 checksum 关掉、不能把最低加速调低、不能缩短 protected。
+
+### 10. intend 是门，不是提示
+
+`(perf:intend-seal spec)` 取出 checksum、`min-faster-pct`、protected、budget。试验用的百分比是 seal 和 spec 里更严的那个。`force-keep` 不参与 `perf:accept?`。预算是实际 launch 的 kernel trial 数，基因判定不占这份预算。
+
+### 11. 便宜筛选，再花 held-out
+
+Checksum 失败的候选不做 held-out。正确的候选先在 `screen-n` 上计一次。只有屏幕时间明显更差（慢过两倍，并且慢过 baseline 加 slack）才 `screen-pruned`。活下来的才跑 held-out。屏幕读数是 0 时放行，交给 held-out 门拒绝更慢的结果。
+
+### 12. 机器层库存和建议
+
+`perf:sysinfo` 读 `/proc`、`/sys`，并在二进制存在时探测 `perf`、`lscpu`、`lsmem`、`numactl`、`dmidecode`、`bpftrace`。支持的 perf 事件和 `<not supported>` 分开记。`perf c2c` 只记录子命令在不在，不编造 hit。`perf:advice` 把程序热点和机器层分开：NUMA 节点数、单 socket、IPI 计数来自 `/proc/interrupts`，cache-line sharing 在 c2c 没采样时是 `skipped`。`./run.sh check` 默认采样 1 秒（`AURA_PERF_CHECK_SEC` 可加长），给出 CPU / 磁盘扇区 / 网卡字节 / IPI 的差分。
+
+KEEP 时若 `AURA_SANDBOX=off`，读 compile 组的 `cascade_full_count` 和 `module_dirty_recompiles`。示例里 `world-rebuilt=0`。这是证据，不是另一道会把正确加速打回去的门。
 
 ## 部分
 
 ### 观察、试探、证明、提交是同一语言
 
-Trial 在子进程的 `evo:trial` 里做，live 指纹不变；过门才在父进程 snapshot → rebind → 再测，失败则 restore。Agent 改文件绕不开这道门，因为 KEEP 只认 gate。类型检查会拒绝 typecheck 失败的 genome。还没有一个 `(perf:intend …)` 运行时对象把「checksum 不变且 ≥1.1×」变成引擎强制的规范；现在是 spec hash + `perf:speedup-ok?`。
-
-### 多 worldline 的树群
-
-多个候选由 `orch:parallel` 同时 trial，各自一份 `out/trials/<id>.jsonl`。父进程只在全部返回后选 KEEP。还没有「每个 trial 一棵 CCT，查询哪次 mutation 砍掉了同一热前缀且没有把代价挪走」。现在的差分是 KEEP 前的树对 KEEP 后的树，挂在同一次运行的审计上，不是候选之间的树对比。
-
-### Provenance 给下一个 agent 读
-
-`evo:record!` 和引擎的 `mutate:rebind` 行在 `out/evo.jsonl`。字段有 decision、reason、heldout-ms、mismatches、id。下一轮策略通过 `failed` id 列表不再原样重提。还没有把 CCT 哈希写进证据，也没有按热点检索历史负例的原语；负例就是本轮的 refused/ROLLBACK id。
+Trial 在子进程的 `evo:trial` 里做，live 指纹不变；过门才在父进程 snapshot → rebind → 再测，失败则 restore。KEEP 只认 gate。`(perf:intend-seal …)` 把 checksum、最低加速和 protected 收成一次运行里改不掉的值。类型检查仍会拒绝 typecheck 失败的 genome。
 
 ### 计数器 join 到节点
 
-`perf stat` 的 task-clock、cpu-clock、page-faults、context-switches 在 profile 的 `counters` 里，节点上有 task-clock 和 page-faults。`engine:metrics` 的 eval/jit/mutate 差分也在 counters。硬件事件 `cycles`、`instructions`、`cache-misses` 在这台没有 PMU 的内核上是 `<not supported>`，不会写成 0。page-faults 在各 define 上几乎一样（进程启动占主导），不能用来选热点；选热点的是 task-clock。
+有 perf 时，task-clock、cpu-clock、page-faults、context-switches 在 profile 的 `counters` 里。硬件事件不支持就列入 `events-unsupported`，不写成 0。没有 perf 二进制时，CCT 节点上的毫秒来自 region timer，报告里写明硬件计数器没有读。page-faults 在各 define 上几乎一样，不拿来选热点。
 
-### 策略自身可演化
+### 机器层探针还没采样
 
-失败假设从 `perf-strategy` 的 order 里删掉，新源码再 `eval-current`。新源码仍然调用 `mine`。这是 harness 的一次 KEEP。还没有把分类阈值、特征权重做成基因再搜索。
+`perf c2c`、`perf mem`、`perf sched` 只回答子命令是否存在。cache-to-cache、SPE、跨 die 的命中数没有测到就是 `skipped`，没有 0。bpftrace 未安装就不运行。
 
 ## 未开始
 
-- **语义火焰**：代价归到 intent、策略阶段、规则，而不只是 define 名。方便 agent 优化自己的 harness。需要阶段标记进 CCT 节点。
-- **增量编译反馈**：KEEP 时读 `compile:*` 的 partial relower / dirty 计数，确认 trial 没有整包重编。原语在 `engine:metrics`，还没接进门控。
-- **候选之间的 CCT 差分**挂到 evo 血缘：每个 worldline 采一棵树，查询「热前缀被砍且没有搬家」。
-- **Kernel / C 下沉**：`aura-kernel-sink` 作为 autotune 的一种假设（「纯计算 define → 下沉」），走同一道 checksum 和回滚。不是本轮的事。
-- **Warpline 等 trace**：另一种 CCT 采样源，填同一套节点，不另做报告。
+- **语义火焰**：代价归到 intent、策略阶段、规则，而不只是 define 名。
+- **Kernel / C 下沉**：`aura-kernel-sink` 作为 autotune 的一种假设。没有 GPU 就不报 SOL。
+- **Warpline 等 trace**：另一种 CCT 采样源，填同一套 `perf:cct-*` 查询。
+- **跨运行的机器层负例**：同一次 autotune 里的负例已经按热点记住；机器建议还没有自己的跨次记忆。
 
 ## 实施顺序
 
-1. 已做：目标程序的 `perf stat` / `perf record` → CCT → `perf:mine` → 策略消费 → protected 拒绝 → 并行 trial → KEEP → 再采树并 `perf:cct-delta` → `perf:autotune` 报 intend。
-2. 下一步：每个 trial 一棵 CCT，差分挂上候选 id；负例按 `hot-node` + `class` 检索，而不只是 id 字符串。
-3. 把分类阈值和 catalog 顺序收成可再 trial 的策略基因。
-4. intend 升成运行时检查的规范，类型门和 checksum 门都不能被策略关掉。
-5. 语义火焰（阶段 / 规则节点），然后才是 kernel 下沉和外部 trace。
+1. 已做：目标程序的测量 → CCT → `perf:mine` → 策略基因 → protected 拒绝 → 并行 trial（每条 worldline 一棵 CCT）→ KEEP → 负例按 class + hot-node → intend 门。
+2. 已做：`./run.sh sysinfo` 和 `./run.sh check` 把机器库存收成 Aura 值。缺工具就写 skipped。
+3. 下一步：语义火焰，然后才是 kernel 下沉、c2c 采样和外部 trace。
 
 不要做的：HTML/SVG 火焰图、perf script 原文进模型、给人看的仪表盘或审批页。

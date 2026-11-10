@@ -1,0 +1,43 @@
+(require "lib/perf/cct" all:)
+
+(define before
+  (perf:cct-build
+    (list (hash "name" "k-length" "task-clock" 10 "calls" 1
+                "stack" (list "bench-kernel" "k-length"))
+          (hash "name" "k-ref" "task-clock" 100 "calls" 40
+                "stack" (list "bench-kernel" "k-ref"))
+          (hash "name" "bench-kernel" "task-clock" 120 "calls" 1
+                "stack" (list "bench-kernel")))))
+
+(define cleared
+  (perf:cct-build
+    (list (hash "name" "bench-kernel" "task-clock" 8 "calls" 1
+                "stack" (list "bench-kernel")))))
+
+(define moved
+  (perf:cct-build
+    (list (hash "name" "k-length" "task-clock" 90 "calls" 40
+                "stack" (list "bench-kernel" "k-length"))
+          (hash "name" "bench-kernel" "task-clock" 100 "calls" 1
+                "stack" (list "bench-kernel")))))
+
+(define prefix (list "bench-kernel" "k-ref"))
+(define q1 (perf:cct-worldline-query before cleared prefix))
+(define q2 (perf:cct-worldline-query before moved prefix))
+(define q0 (perf:cct-worldline-query before (hash "kind" "perf-cct" "nodes" '()) prefix))
+(define ids (perf:cct-cleared
+              (list (hash "id" "linear-scan" "cct" cleared)
+                    (hash "id" "moved" "cct" moved)
+                    (hash "id" "empty" "cct" (hash)))
+              before prefix))
+
+(display (list (if (eq? (hash-ref q1 "prefix-removed" #f) #t) 1 0)
+               (if (eq? (hash-ref q1 "cost-moved" #f) #t) 1 0)
+               (if (perf:should-continue? q1) 1 0)
+               (if (eq? (hash-ref q2 "prefix-removed" #f) #t) 1 0)
+               (if (eq? (hash-ref q2 "cost-moved" #f) #t) 1 0)
+               (car (hash-ref q2 "moved-to" '()))
+               (if (perf:should-continue? q2) 1 0)
+               (if (eq? (hash-ref q0 "measured" #f) #t) 1 0)
+               (car ids)))
+(newline)

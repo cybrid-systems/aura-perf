@@ -1,0 +1,9 @@
+(require "lib/perf/help" all:)
+
+(let loop ((xs (perf:help-lines)))
+  (if (null? xs)
+      (display "")
+      (begin
+        (display (car xs))
+        (newline)
+        (loop (cdr xs)))))

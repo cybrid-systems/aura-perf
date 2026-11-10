@@ -1,0 +1,22 @@
+(require "std/process" all:)
+(require "lib/perf/util" all:)
+(require "lib/perf/sysinfo" all:)
+(require "lib/perf/layers" all:)
+
+(shell "mkdir -p out")
+
+(define info (perf:sysinfo))
+(define advice (perf:advice info (hash)))
+(define lines (append (perf:sysinfo-lines info) (perf:advice-lines advice)))
+
+(let loop ((xs lines))
+  (if (null? xs)
+      #t
+      (begin
+        (display (car xs))
+        (newline)
+        (loop (cdr xs)))))
+
+(perf:write-text "out/sysinfo.txt" (string-append (perf:join lines "\n") "\n"))
+(perf:write-text "out/sysinfo.json" (json-encode (hash "sysinfo" info "advice" advice)))
+(display "")

@@ -1,0 +1,23 @@
+; Held-out speed gate. Checksum failures are infeasible regardless of time.
+; A candidate is accepted only when it is correct and at least `pct`
+; percent faster than the live baseline on the held-out input.
+
+(export perf:speedup-ok? perf:accept?)
+
+(define (perf:speedup-ok? baseline-ms cand-ms pct)
+  (and (number? baseline-ms) (> baseline-ms 0)
+       (number? cand-ms) (> cand-ms 0)
+       (number? pct) (>= pct 0) (< pct 100)
+       (<= (* cand-ms 100) (* baseline-ms (- 100 pct)))))
+
+(define (perf:flag-on? result key)
+  (let ((v (hash-ref result key 0)))
+    (or (eq? v #t) (eq? v 1))))
+
+(define (perf:accept? baseline-ms result pct)
+  (and (hash? result)
+       (string=? (hash-ref result "status" "") "ok")
+       (perf:flag-on? result "checksum-ok")
+       (perf:flag-on? result "live-unchanged")
+       (= (hash-ref result "mismatches" 1) 0)
+       (perf:speedup-ok? baseline-ms (hash-ref result "heldout-ms" -1) pct)))

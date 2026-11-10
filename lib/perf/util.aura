@@ -1,0 +1,101 @@
+; Shared string, file, and number helpers for aura-perf.
+; Export before require (#2769).
+
+(export perf:tokens perf:parse-number perf:read-text perf:write-text
+        perf:join perf:take perf:member? perf:safe-id? perf:fmt-x
+        perf:nth perf:string-ref-ok?)
+
+(require "std/string" all:)
+
+(define (perf:tokens s)
+  (if (string? s) (string-split-words s) '()))
+
+(define (perf:strip-noise t)
+  (let ((n (string-length t)))
+    (let loop ((i 0) (acc ""))
+      (if (>= i n)
+          acc
+          (let ((c (string-ref t i)))
+            ; drop commas and a trailing percent sign
+            (if (or (= c 44) (= c 37))
+                (loop (+ i 1) acc)
+                (loop (+ i 1) (string-append acc (substring t i (+ i 1))))))))))
+
+(define (perf:parse-number t)
+  (if (not (string? t))
+      #f
+      (let ((s (perf:strip-noise t)))
+        (if (string=? s "")
+            #f
+            (let ((n (string->number s)))
+              (if (number? n) n #f))))))
+
+(define (perf:read-text path)
+  (let ((v (try (read-file path) (catch (e) #f))))
+    (if (string? v) v "")))
+
+(define (perf:write-text path text)
+  (write-file path (if (string? text) text "")))
+
+(define (perf:join xs sep)
+  (if (or (not (list? xs)) (null? xs))
+      ""
+      (let loop ((ys (cdr xs)) (acc (car xs)))
+        (if (null? ys)
+            acc
+            (loop (cdr ys) (string-append acc sep (car ys)))))))
+
+(define (perf:take xs k)
+  (let ((n (if (number? k) k 0)))
+    (let loop ((ys (if (list? xs) xs '())) (i 0) (acc '()))
+      (if (or (null? ys) (>= i n))
+          (reverse acc)
+          (loop (cdr ys) (+ i 1) (cons (car ys) acc))))))
+
+(define (perf:member? xs key)
+  (let loop ((ys (if (list? xs) xs '())))
+    (if (null? ys)
+        #f
+        (if (equal? (car ys) key)
+            #t
+            (loop (cdr ys))))))
+
+(define (perf:nth xs i)
+  (let loop ((ys xs) (n 0))
+    (cond ((null? ys) #f)
+          ((= n i) (car ys))
+          (else (loop (cdr ys) (+ n 1))))))
+
+(define (perf:string-ref-ok? s i)
+  (and (string? s) (>= i 0) (< i (string-length s))))
+
+; Identifiers we splice into generated Aura source.
+(define (perf:safe-id? s)
+  (if (not (string? s))
+      #f
+      (let ((n (string-length s)))
+        (if (= n 0)
+            #f
+            (let loop ((i 0))
+              (if (>= i n)
+                  #t
+                  (let ((c (string-ref s i)))
+                    (if (or (and (>= c 48) (<= c 57))
+                            (and (>= c 65) (<= c 90))
+                            (and (>= c 97) (<= c 122))
+                            (= c 45))
+                        (loop (+ i 1))
+                        #f))))))))
+
+; Integer ratio with two fractional digits, truncated toward zero.
+; 164 / 12 -> "13.66".
+(define (perf:fmt-x num den)
+  (if (or (not (number? num)) (not (number? den)) (<= den 0))
+      "na"
+      (let* ((q (quotient (* num 100) den))
+             (whole (quotient q 100))
+             (frac (modulo q 100))
+             (frac-s (number->string frac)))
+        (string-append (number->string whole) "."
+                       (if (< (string-length frac-s) 2) "0" "")
+                       frac-s))))

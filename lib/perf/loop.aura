@@ -1,0 +1,476 @@
+; Profile, propose, trial on forked worldlines, gate, KEEP or ROLLBACK.
+; The live workspace is only rewritten after a candidate has already
+; passed the held-out gate in a child process. Strategy rewrites use
+; ast:snapshot / ast:restore on this process.
+
+(export perf:optimize)
+
+(require "std/evo-core" all:)
+(require "std/evo" all:)
+(require "std/process" all:)
+(require "lib/perf/util" all:)
+(require "lib/perf/score" all:)
+(require "lib/perf/gate" all:)
+(require "lib/perf/profile" all:)
+(require "lib/perf/query" all:)
+(require "lib/perf/propose" all:)
+(require "lib/perf/audit" all:)
+(require "lib/perf/trial" all:)
+
+(define (perf:say buf line)
+  (hash-set! buf "lines" (append (hash-ref buf "lines" '()) (list line)))
+  (display line)
+  (newline)
+  line)
+
+(define (perf:bump buf key)
+  (hash-set! buf key (+ (hash-ref buf key 0) 1)))
+
+(define (perf:audit-decision target decision reason evidence)
+  (try (evo:record! target decision reason
+                    (if (hash? evidence) evidence (hash))
+                    "" 0 "" (hash))
+       (catch (e) #f)))
+
+(define (perf:ensure-dirs out)
+  (shell (string-append "mkdir -p " out "/jobs " out "/trials")))
+
+(define (perf:install-seed path)
+  (let ((text (perf:read-text path)))
+    (if (string=? text "")
+        #f
+        (begin
+          (set-code text)
+          (eval-current)
+          #t))))
+
+(define (perf:baseline spec)
+  (let ((xs (perf:range (hash-ref spec "heldout-n" 0))))
+    (perf:time-checked (hash-ref spec "repeats" 3)
+                       (hash-ref spec "call")
+                       xs)))
+
+(define (perf:catalog spec)
+  (hash-ref spec "catalog" '()))
+
+(define (perf:entry catalog id)
+  (let loop ((xs catalog))
+    (if (null? xs)
+        #f
+        (if (string=? (hash-ref (car xs) "id" "") id)
+            (car xs)
+            (loop (cdr xs))))))
+
+(define (perf:job-record spec cand out)
+  (let ((id (hash-ref cand "id" "candidate")))
+    (hash "id" id
+          "seed" (hash-ref spec "seed-path")
+          "target" (hash-ref spec "target" "bench-kernel")
+          "genome" (hash-ref cand "genome" "")
+          "heldout-n" (hash-ref spec "heldout-n")
+          "repeats" (hash-ref spec "repeats" 3)
+          "timeout-ms" 60000
+          "result" (string-append out "/jobs/" id ".result.json")
+          "job" (string-append out "/jobs/" id ".job.json")
+          "log" (string-append out "/trials/" id ".jsonl"))))
+
+(define (perf:write-jobs records)
+  (let loop ((xs records))
+    (if (null? xs)
+        #t
+        (begin
+          (perf:write-text (hash-ref (car xs) "job") (json-encode (car xs)))
+          (loop (cdr xs))))))
+
+(define (perf:find-result results id)
+  (let loop ((xs results))
+    (if (null? xs)
+        #f
+        (if (and (hash? (car xs)) (string=? (hash-ref (car xs) "id" "") id))
+            (car xs)
+            (loop (cdr xs))))))
+
+(define (perf:reason result baseline pct)
+  (cond ((not (hash? result)) "no-result")
+        ((not (string=? (hash-ref result "status" "") "ok"))
+         (let ((e (hash-ref result "error" "")))
+           (if (and (string? e) (not (string=? e "")))
+               e
+               (string-append "trial-" (hash-ref result "status" "error")))))
+        ((not (or (eq? (hash-ref result "checksum-ok" 0) 1)
+                  (eq? (hash-ref result "checksum-ok" 0) #t)))
+         (string-append "checksum mismatches="
+                        (number->string (hash-ref result "mismatches" -1))))
+        ((not (or (eq? (hash-ref result "live-unchanged" 0) 1)
+                  (eq? (hash-ref result "live-unchanged" 0) #t)))
+         "isolation-violation")
+        ((not (perf:speedup-ok? baseline (hash-ref result "heldout-ms" -1) pct))
+         "no-speedup")
+        (else "gate-pass")))
+
+(define (perf:format-candidate result baseline pct)
+  (string-append
+    "candidate " (hash-ref result "id" "?")
+    " " (if (string=? (perf:reason result baseline pct) "gate-pass") "PASS" "ROLLBACK")
+    " reason=" (perf:reason result baseline pct)
+    " heldout-ms=" (number->string (hash-ref result "heldout-ms" -1))
+    " mismatches=" (number->string (hash-ref result "mismatches" -1))
+    " live-unchanged=" (number->string (hash-ref result "live-unchanged" 0))
+    " trial-applied=" (number->string (hash-ref result "trial-applied" 0))
+    " dur-ms=" (number->string (hash-ref result "dur-ms" 0))))
+
+(define (perf:sum-dur results)
+  (let loop ((xs results) (acc 0))
+    (if (null? xs)
+        acc
+        (loop (cdr xs) (+ acc (hash-ref (car xs) "dur-ms" 0))))))
+
+(define (perf:trial-round spec cands out buf baseline)
+  (let ((records (let loop ((xs cands) (acc '()))
+                   (if (null? xs)
+                       (reverse acc)
+                       (loop (cdr xs) (cons (perf:job-record spec (car xs) out) acc))))))
+    (perf:write-jobs records)
+    (let* ((fp-before (evo:source-fingerprint))
+           (batch (perf:launch-jobs records (hash-ref spec "worker")))
+           (fp-after (evo:source-fingerprint))
+           (results (hash-ref batch "results" '()))
+           (pct (hash-ref spec "min-speedup-pct" 20)))
+      (perf:say buf (string-append
+                      "round-wall-ms " (number->string (hash-ref batch "wall-ms" 0))
+                      " round-dur-sum-ms " (number->string (perf:sum-dur results))
+                      " jobs " (number->string (length records))))
+      (perf:say buf (string-append
+                      "live-fingerprint-during-trials "
+                      (number->string fp-before) " -> " (number->string fp-after)
+                      (if (= fp-before fp-after) " unchanged" " CHANGED")))
+      (let loop ((xs cands))
+        (if (null? xs)
+            results
+            (let* ((id (hash-ref (car xs) "id" ""))
+                   (result (perf:find-result results id)))
+              (if (not result)
+                  (begin
+                    (perf:say buf (string-append "candidate " id " ROLLBACK reason=missing-result"))
+                    (perf:bump buf "rollback")
+                    (perf:audit-decision (hash-ref spec "target" "bench-kernel")
+                                         "ROLLBACK" "missing-result" (hash "id" id)))
+                  (begin
+                    (perf:say buf (perf:format-candidate result baseline pct))
+                    (perf:audit-decision
+                      (hash-ref spec "target" "bench-kernel")
+                      (if (string=? (perf:reason result baseline pct) "gate-pass")
+                          "PROPOSE" "ROLLBACK")
+                      (perf:reason result baseline pct)
+                      (hash "id" id
+                            "heldout-ms" (hash-ref result "heldout-ms" -1)
+                            "mismatches" (hash-ref result "mismatches" -1)))
+                    (if (string=? (perf:reason result baseline pct) "gate-pass")
+                        #t
+                        (perf:bump buf "rollback"))))
+              (loop (cdr xs))))))))
+
+(define (perf:best-passing results baseline pct)
+  (let loop ((xs results) (best #f))
+    (if (null? xs)
+        best
+        (let ((r (car xs)))
+          (if (and (hash? r) (perf:accept? baseline r pct))
+              (if (or (not best)
+                      (< (hash-ref r "heldout-ms" 999999999)
+                         (hash-ref best "heldout-ms" 999999999)))
+                  (loop (cdr xs) r)
+                  (loop (cdr xs) best))
+              (loop (cdr xs) best))))))
+
+(define (perf:any-infra? results)
+  (let loop ((xs (if (list? results) results '())))
+    (if (null? xs)
+        #f
+        (if (or (not (hash? (car xs)))
+                (not (string=? (hash-ref (car xs) "status" "") "ok")))
+            #t
+            (loop (cdr xs))))))
+
+(define (perf:failed-ids results baseline pct)
+  (let loop ((xs results) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (let ((r (car xs)))
+          (if (and (hash? r) (not (perf:accept? baseline r pct)))
+              (loop (cdr xs) (cons (hash-ref r "id" "") acc))
+              (loop (cdr xs) acc))))))
+
+(define (perf:commit-kernel spec entry baseline buf)
+  ; Snapshot first. A parallel let could rebind before the snapshot.
+  (let* ((snap (ast:snapshot "perf-kernel"))
+         (rb (mutate:rebind (hash-ref spec "target" "bench-kernel")
+                            (hash-ref entry "genome" "")
+                            "perf-keep")))
+    (if (not (eq? rb #t))
+        (begin
+          (perf:say buf (string-append "kernel ROLLBACK reason=rebind-"
+                                       (if (string? rb) rb "failed")))
+          (perf:bump buf "rollback")
+          (perf:audit-decision (hash-ref spec "target") "ROLLBACK" "rebind-failed" (hash))
+          #f)
+        (begin
+          (eval-current)
+          (let* ((chk (perf:check-kernel (hash-ref spec "call") (perf:check-inputs)))
+                 (tm (perf:time-checked (hash-ref spec "repeats" 3)
+                                        (hash-ref spec "call")
+                                        (perf:range (hash-ref spec "heldout-n"))))
+                 (pct (hash-ref spec "min-speedup-pct" 20))
+                 (ok (and (eq? (hash-ref chk "ok" #f) #t)
+                          (= (hash-ref tm "mismatches" 1) 0)
+                          (perf:speedup-ok? baseline (hash-ref tm "median" -1) pct))))
+            (if ok
+                (begin
+                  (hash-set! buf "after-ms" (hash-ref tm "median"))
+                  (hash-set! buf "after-samples" (hash-ref tm "samples" '()))
+                  (perf:bump buf "keep")
+                  (perf:audit-decision (hash-ref spec "target") "KEEP" "held-out gate"
+                                       (hash "heldout-ms" (hash-ref tm "median")
+                                             "id" (hash-ref entry "id" "")))
+                  (perf:say buf (string-append "kernel KEEP id=" (hash-ref entry "id" "")
+                                               " heldout-ms=" (number->string (hash-ref tm "median"))))
+                  #t)
+                (begin
+                  (ast:restore snap)
+                  (eval-current)
+                  (perf:bump buf "rollback")
+                  (perf:audit-decision (hash-ref spec "target") "ROLLBACK"
+                                       "post-keep-verify-failed" (hash))
+                  (perf:say buf "kernel ROLLBACK reason=post-keep-verify-failed")
+                  #f)))))))
+
+(define (perf:commit-strategy spec order buf)
+  (let ((src (perf:strategy-source order 1)))
+    (if (not (string? src))
+        (begin
+          (perf:say buf "strategy ROLLBACK reason=unsafe-order")
+          (perf:bump buf "rollback")
+          #f)
+        (let* ((snap (ast:snapshot "perf-strategy"))
+               (rb (mutate:rebind "perf-strategy" src "perf-strategy-revise")))
+          (if (not (eq? rb #t))
+              (begin
+                (perf:say buf "strategy ROLLBACK reason=rebind-failed")
+                (perf:bump buf "rollback")
+                (perf:audit-decision "perf-strategy" "ROLLBACK" "rebind-failed" (hash))
+                #f)
+              (begin
+                (eval-current)
+                (let ((plan (try (perf-strategy (hash "hot-child" "")) (catch (e) #f))))
+                  (if (and (hash? plan)
+                           (equal? (perf:order-of plan) order))
+                      (begin
+                        (perf:bump buf "keep")
+                        (perf:audit-decision "perf-strategy" "KEEP"
+                                             "drop mutations that failed the held-out gate"
+                                             (hash "order" order))
+                        (perf:say buf (string-append "strategy KEEP order"
+                                                     (perf:join (map (lambda (s) (string-append " " s)) order) "")))
+                        plan)
+                      (begin
+                        (ast:restore snap)
+                        (eval-current)
+                        (perf:bump buf "rollback")
+                        (perf:audit-decision "perf-strategy" "ROLLBACK" "strategy-verify-failed" (hash))
+                        (perf:say buf "strategy ROLLBACK reason=strategy-verify-failed")
+                        #f)))))))))
+
+(define (perf:ids cands)
+  (let loop ((xs cands) (acc ""))
+    (if (null? xs)
+        acc
+        (loop (cdr xs)
+              (string-append acc (if (string=? acc "") "" ",")
+                             (hash-ref (car xs) "id" "?"))))))
+
+(define (perf:sample-text samples)
+  (let loop ((xs (if (list? samples) samples '())) (acc ""))
+    (if (null? xs)
+        acc
+        (loop (cdr xs)
+              (string-append acc (if (string=? acc "") "" ",")
+                             (number->string (car xs)))))))
+
+(define (perf:hotspot-lines profile)
+  (let loop ((xs (perf:hotspots profile)) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (let ((h (car xs)))
+          (loop (cdr xs)
+                (cons (string-append
+                        "hotspot " (hash-ref h "name" "?")
+                        " self-ms=" (number->string (hash-ref h "self-ms" 0))
+                        " calls=" (number->string (hash-ref h "calls" 0))
+                        " share=" (number->string (hash-ref h "share" 0))
+                        " source=" (hash-ref h "source" "")
+                        " stack=" (perf:join (hash-ref h "stack" '()) ">"))
+                      acc))))))
+
+(define (perf:counter-lines profile)
+  (let ((c (perf:counters profile)))
+    (let loop ((ks (if (hash? c) (sort (hash-keys c) string<?) '())) (acc '()))
+      (if (null? ks)
+          (reverse acc)
+          (loop (cdr ks)
+                (cons (string-append "counter " (car ks) "="
+                                     (number->string (hash-ref c (car ks) 0)))
+                      acc))))))
+
+(define (perf:note-lines profile)
+  (let loop ((xs (if (hash? profile) (hash-ref profile "notes" '()) '())) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (loop (cdr xs) (cons (string-append "note " (car xs)) acc)))))
+
+(define (perf:tool-line profile)
+  (let ((t (if (hash? profile) (hash-ref profile "tools" (hash)) (hash))))
+    (string-append "tools perf=" (hash-ref t "perf" "?")
+                   " gprof=" (hash-ref t "gprof" "?")
+                   " gmon=" (hash-ref t "gmon" "?")
+                   " paranoid=" (hash-ref t "paranoid" "?"))))
+
+(define (perf:choose-winner spec results best plan child hottest out buf baseline pct)
+  (if best
+      best
+      (if (perf:any-infra? results)
+          (begin
+            (perf:say buf "strategy ROLLBACK reason=trial-infrastructure")
+            (perf:bump buf "rollback")
+            #f)
+          (let ((failed (perf:failed-ids results baseline pct)))
+            (let ((next (perf:revise-order (perf:order-of plan) failed)))
+              (let ((plan2 (perf:commit-strategy spec next buf)))
+                (if (not plan2)
+                    #f
+                    (let ((ctx2 (hash "plan" plan2
+                                      "hot-child" child
+                                      "hottest" hottest)))
+                      (let ((cands2 (perf:rule-propose (perf:catalog spec) ctx2)))
+                        (perf:say buf (string-append "round 2 candidates " (perf:ids cands2)))
+                        (let ((results2 (perf:trial-round spec cands2 out buf baseline)))
+                          (if (perf:any-infra? results2)
+                              (begin
+                                (perf:say buf "round 2 aborted: trial infrastructure")
+                                #f)
+                              (perf:best-passing results2 baseline pct))))))))))))
+
+(define (perf:say-each buf lines)
+  (let loop ((xs lines))
+    (if (null? xs)
+        #t
+        (begin
+          (perf:say buf (car xs))
+          (loop (cdr xs))))))
+
+(define (perf:finish spec buf profile child out)
+  (let ((after-profile (perf:collect ((hash-ref spec "regions-fn"))
+                                     (hash "repeats" (hash-ref spec "profile-repeats" 3)))))
+    (let ((delta (perf:delta profile after-profile)))
+      (let ((after-ms (hash-ref buf "after-ms" -1)))
+        (let ((before-ms (hash-ref buf "before-ms" -1)))
+          (perf:say buf (string-append "after-heldout-ms " (number->string after-ms)
+                                       " samples=" (perf:sample-text (hash-ref buf "after-samples" '()))))
+          (perf:say buf (string-append "speedup-x " (perf:fmt-x before-ms after-ms)))
+          (perf:say buf (string-append "profile-elapsed-before-ms "
+                                       (number->string (hash-ref delta "elapsed-before-ms" 0))
+                                       " profile-elapsed-after-ms "
+                                       (number->string (hash-ref delta "elapsed-after-ms" 0))))
+          (perf:say-each buf (let loop ((xs (hash-ref delta "hotspots" '())) (acc '()))
+                               (if (null? xs)
+                                   (reverse acc)
+                                   (let ((h (car xs)))
+                                     (loop (cdr xs)
+                                           (cons (string-append
+                                                   "delta " (hash-ref h "name" "?")
+                                                   " before-ms=" (number->string (hash-ref h "before-ms" 0))
+                                                   " after-ms=" (number->string (hash-ref h "after-ms" 0))
+                                                   " delta-ms=" (number->string (hash-ref h "delta-ms" 0)))
+                                                 acc))))))
+          (perf:say buf (string-append "decisions KEEP=" (number->string (hash-ref buf "keep" 0))
+                                       " ROLLBACK=" (number->string (hash-ref buf "rollback" 0))))
+          (perf:say buf (string-append "mutation-records "
+                                       (number->string (length (perf:mutation-records)))))
+          (let ((logn (try (length (evo:records)) (catch (e) -1))))
+            (perf:say buf (string-append "evo-records " (number->string logn))))
+          (perf:write-text (string-append out "/report.txt")
+                           (string-append (perf:join (hash-ref buf "lines" '()) "\n") "\n"))
+          (perf:write-text (string-append out "/summary.json")
+                           (json-encode (hash "before-ms" before-ms
+                                              "after-ms" after-ms
+                                              "keep" (hash-ref buf "keep" 0)
+                                              "rollback" (hash-ref buf "rollback" 0)
+                                              "hot-child" child
+                                              "speedup-x" (perf:fmt-x before-ms after-ms))))
+          (if (not (eq? (hash-ref spec "require-success" #f) #t))
+              buf
+              (let ((expect (hash-ref spec "expect-child" "")))
+                (if (and (or (string=? expect "") (string=? child expect))
+                         (>= (hash-ref buf "keep" 0) 1)
+                         (>= (hash-ref buf "rollback" 0) 1)
+                         (perf:speedup-ok? before-ms after-ms 50))
+                    buf
+                    (error (string-append
+                             "example did not meet the held-out bar: hot-child="
+                             child
+                             " keep=" (number->string (hash-ref buf "keep" 0))
+                             " rollback=" (number->string (hash-ref buf "rollback" 0))
+                             " before=" (number->string before-ms)
+                             " after=" (number->string after-ms)))))))))))
+
+(define (perf:optimize spec)
+  (let ((buf (hash "lines" '() "keep" 0 "rollback" 0 "after-ms" -1))
+        (out (hash-ref spec "out-dir" "out")))
+    (perf:ensure-dirs out)
+    (if (not (perf:install-seed (hash-ref spec "seed-path")))
+        (perf:say buf "error empty-seed")
+        (let* ((profile (perf:collect ((hash-ref spec "regions-fn"))
+                                      (hash "repeats" (hash-ref spec "profile-repeats" 3))))
+               (child (perf:hot-child profile))
+               (hottest (perf:hottest profile))
+               (plan (perf-strategy (hash "hot-child" child "hottest" hottest)))
+               (ctx (hash "plan" plan
+                          "hot-child" child
+                          "hottest" hottest
+                          "hotspots" (perf:hotspots profile)))
+               (llm (perf:llm-propose ctx))
+               (base (perf:baseline spec))
+               (baseline (hash-ref base "median" -1))
+               (pct (hash-ref spec "min-speedup-pct" 20)))
+          (hash-set! buf "before-ms" baseline)
+          (hash-set! buf "before-samples" (hash-ref base "samples" '()))
+          (hash-set! buf "profile" profile)
+          (perf:say buf "aura-perf sum-scan")
+          (perf:say buf (perf:tool-line profile))
+          (let loop ((xs (perf:note-lines profile)))
+            (if (null? xs) #t (begin (perf:say buf (car xs)) (loop (cdr xs)))))
+          (let loop ((xs (perf:hotspot-lines profile)))
+            (if (null? xs) #t (begin (perf:say buf (car xs)) (loop (cdr xs)))))
+          (let loop ((xs (perf:counter-lines profile)))
+            (if (null? xs) #t (begin (perf:say buf (car xs)) (loop (cdr xs)))))
+          (perf:say buf (string-append "hottest " hottest))
+          (perf:say buf (string-append "hot-child " child))
+          (perf:say buf (string-append "strategy-order"
+                                       (perf:join (map (lambda (s) (string-append " " s))
+                                                       (perf:order-of plan))
+                                                  "")))
+          (perf:say buf (string-append "llm-proposer " (hash-ref llm "error" "?")))
+          (perf:say buf (string-append "baseline-heldout-ms " (number->string baseline)
+                                       " samples=" (perf:sample-text (hash-ref base "samples" '()))))
+          (let* ((cands (perf:rule-propose (perf:catalog spec) ctx))
+                 (results (begin
+                            (perf:say buf (string-append "round 1 candidates " (perf:ids cands)))
+                            (perf:trial-round spec cands out buf baseline)))
+                 (best (perf:best-passing results baseline pct)))
+            (let ((winner (perf:choose-winner spec results best plan child hottest out buf baseline pct)))
+              (if (not winner)
+                  (perf:say buf "kernel unchanged")
+                  (let ((entry (perf:entry (perf:catalog spec) (hash-ref winner "id" ""))))
+                    (if entry
+                        (perf:commit-kernel spec entry baseline buf)
+                        (perf:say buf "kernel ROLLBACK reason=missing-catalog-entry"))))
+              (perf:finish spec buf profile child out)))))))

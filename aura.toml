@@ -1,0 +1,9 @@
+name = "aura-perf"
+entry = "examples/sum-scan/main.aura"
+preset = "dev"
+out = "out"
+
+# Release this project was written against. CI runs the same image tag.
+# std/* ships with aura. Project requires resolve from this root.
+[dependencies]
+aura = "0.2.0"

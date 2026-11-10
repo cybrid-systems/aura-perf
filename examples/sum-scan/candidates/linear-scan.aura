@@ -1,0 +1,5 @@
+(define (bench-kernel xs)
+  (let loop ((ys xs) (acc 0))
+    (if (null? ys)
+        acc
+        (loop (cdr ys) (+ acc (car ys))))))

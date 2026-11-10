@@ -1,0 +1,5 @@
+# Overhead  Command  Shared Object     Symbol
+# ........  .......  ................  ....................
+    62.50%  aura     aura              [.] list_ref
+    25.00%  aura     aura              [.] length
+    12.50%  aura     libc.so.6         [.] malloc

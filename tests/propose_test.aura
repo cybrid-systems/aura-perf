@@ -1,0 +1,25 @@
+(require "lib/perf/propose" all:)
+
+(define catalog
+  (list (hash "id" "wrong-scale" "genome" "w")
+        (hash "id" "redundant-pass" "genome" "r")
+        (hash "id" "linear-scan" "genome" "l")))
+
+(define ctx
+  (hash "plan" (hash "order" (list "wrong-scale" "missing" "linear-scan" "redundant-pass")
+                     "per-round" 2)))
+
+(define got (perf:rule-propose catalog ctx))
+(define llm (perf:llm-propose ctx))
+(define revised (perf:revise-order (list "wrong-scale" "redundant-pass" "linear-scan")
+                                   (list "wrong-scale" "redundant-pass")))
+(define src (perf:strategy-source revised 1))
+
+(display (list (hash-ref (car got) "id")
+               (hash-ref (car (cdr got)) "id")
+               (length got)
+               (hash-ref llm "ok")
+               (hash-ref llm "error")
+               (car revised)
+               (if (string? src) 1 0)))
+(newline)

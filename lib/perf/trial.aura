@@ -1,0 +1,81 @@
+; Launch isolated candidate trials.
+; Each trial is a child aura process so orch:parallel does not share a
+; workspace pointer. Inside the child, evo:trial forks a worldline.
+; Child workspaces refuse mutate:rebind under the restricted sandbox
+; (cow-refused), so the child is started with AURA_SANDBOX=off.
+
+(export perf:launch-jobs)
+
+(require "std/process" all:)
+(require "std/orch" all:)
+(require "lib/perf/util" all:)
+
+(define (perf:aura-bin)
+  (let ((b (getenv "AURA_BIN")))
+    (if (and (string? b) (> (string-length b) 0)) b "aura")))
+
+(define (perf:result-or-error result-path id code)
+  (let ((text (perf:read-text result-path)))
+    (if (string=? text "")
+        (hash "id" id
+              "status" "error"
+              "checksum-ok" 0
+              "live-unchanged" 1
+              "mismatches" -1
+              "heldout-ms" -1
+              "error" (string-append "no-result exit=" (number->string code))
+              "exit" code)
+        (let ((v (try (json-parse text) (catch (e) #f))))
+          (if (hash? v)
+              v
+              (hash "id" id
+                    "status" "error"
+                    "checksum-ok" 0
+                    "live-unchanged" 1
+                    "mismatches" -1
+                    "heldout-ms" -1
+                    "error" "bad-json"
+                    "exit" code))))))
+
+; timeout(1) does not invoke a shell, so the env prefix has to sit inside sh -c.
+(define (perf:launch-one worker job-path result-path log-path id)
+  (let* ((inner (string-append
+                  "AURA_SANDBOX=off AURA_EVO_LOG=" log-path
+                  " AURA_PERF_JOB=" job-path
+                  " " (perf:aura-bin)
+                  " --preset dev " worker
+                  " > " job-path ".stdout 2>&1"))
+         (code (shell (string-append "timeout 90 sh -c '" inner "'"))))
+    (perf:result-or-error result-path id code)))
+
+(define (perf:runner worker j)
+  (lambda (ignored)
+    (try (perf:launch-one worker
+                          (hash-ref j "job")
+                          (hash-ref j "result")
+                          (hash-ref j "log")
+                          (hash-ref j "id"))
+         (catch (e)
+           (hash "id" (hash-ref j "id" "")
+                 "status" "error"
+                 "checksum-ok" 0
+                 "live-unchanged" 1
+                 "mismatches" -1
+                 "heldout-ms" -1
+                 "dur-ms" 0
+                 "trial-applied" 0
+                 "error" "fiber-failed")))))
+
+(define (perf:launch-jobs jobs worker)
+  (let ((t0 (monotonic-ms))
+        (fns (let loop ((xs jobs) (acc '()))
+               (if (null? xs)
+                   (reverse acc)
+                   (loop (cdr xs) (cons (perf:runner worker (car xs)) acc)))))
+        (rs (if (null? jobs)
+                '()
+                (orch:parallel fns 0)))
+        (t1 (monotonic-ms)))
+    (hash "results" (if (list? rs) rs '())
+          "wall-ms" (- t1 t0)
+          "jobs" (length jobs))))

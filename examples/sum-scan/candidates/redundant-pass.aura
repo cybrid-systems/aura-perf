@@ -1,0 +1,7 @@
+(define (bench-kernel xs)
+  (let ((n (k-length xs)))
+    (let loop ((i 0) (acc 0))
+      (if (>= i n)
+          acc
+          (loop (+ i 1)
+                (+ acc (k-ref xs i) (k-ref xs i) (- (k-ref xs i))))))))

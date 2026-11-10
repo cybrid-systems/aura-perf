@@ -1,0 +1,4 @@
+  %   cumulative   self              self     total
+ time   seconds   seconds    calls  ms/call  ms/call  name
+ 70.0       0.07     0.07       10     7.00     7.00  slow_fn
+ 30.0       0.10     0.03        4     7.50     7.50  fast_fn

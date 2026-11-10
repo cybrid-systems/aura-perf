@@ -1,0 +1,25 @@
+# Reconstructed from aura-perf issue 15.
+# Header sample count is 324, event cpu-clock.
+# Overheads 17.90 / 16.67 / 8.64 are the rows the old parser named
+# libaura_redis_core.so. The top symbol is ar_entry_set_ex.
+# Sibling names are real libaura_redis_core functions; the issue text
+# did not record the second and third symbols.
+# The +0x20 row must merge into ar_entry_set_ex.
+# list_ref (aura), malloc (libc), and finish_task_switch (kernel)
+# must not become CCT nodes.
+#
+# Total Lost Samples: 0
+#
+# Samples: 324  of event 'cpu-clock'
+# Event count (approx.): 324
+#
+# Overhead  Samples  Symbol                              Shared Object
+# ........  .......  ..................................  ....................
+#
+    17.90%       58  [.] ar_entry_set_ex                 libaura_redis_core.so
+    16.67%       54  [.] ar_find_entry_ex                libaura_redis_core.so
+     8.64%       28  [.] ar_rehash_if_needed             libaura_redis_core.so
+     0.31%        1  [.] ar_entry_set_ex+0x20            libaura_redis_core.so
+     4.01%       13  [.] list_ref                        aura
+     2.47%        8  [.] malloc                          libc.so.6
+     1.23%        4  [k] finish_task_switch              [kernel.kallsyms]

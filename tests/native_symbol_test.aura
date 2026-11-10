@@ -1,0 +1,73 @@
+; DSO column must not become the CCT name, and a native-symbol tree
+; must mine a hypothesis with a bind site, a correctness constraint,
+; and a target counter. Sum-scan coverage stays in cct_test.aura.
+(require "lib/perf/util" all:)
+(require "lib/perf/profile" all:)
+(require "lib/perf/cct" all:)
+
+(define (show v)
+  (display v)
+  (newline))
+
+(define text (perf:read-text "tests/fixtures/perf-report-dso.txt"))
+(define parsed (perf:parse-perf-report text))
+(define rows (perf:report-cct-rows text "libaura_redis_core.so"))
+(define cct (perf:cct-build rows))
+(define mined (perf:mine (hash "cct" cct)))
+(define hyp (car (hash-ref mined "hypotheses" '())))
+
+(define bare (perf:parse-perf-report
+               "    17.90%       58  ar_entry_set_ex  libaura_redis_core.so\n"))
+(define nodso-text
+  "# Samples: 12  of event 'cpu-clock'\n    40.00%       5  ar_entry_set_ex\n")
+(define nodso-rows (perf:report-cct-rows nodso-text ""))
+(define nodso (perf:mine (hash "cct" (perf:cct-build nodso-rows))))
+(define nodso-hyp (car (hash-ref nodso "hypotheses" '())))
+
+(define (names xs)
+  (let loop ((ys xs) (acc '()))
+    (if (null? ys)
+        (reverse acc)
+        (loop (cdr ys) (cons (hash-ref (car ys) "name" "") acc)))))
+
+; No process maps this soname here, so attach must not invent nodes
+; and must not need a perf binary.
+(define absent (perf:profile-targets "/nonexistent/perf"
+                 (list (hash "dso" "libaura_redis_core.so" "workload" #t))))
+
+(show (list (hash-ref (car parsed) "name")
+            (hash-ref (car (cdr parsed)) "name")
+            (hash-ref (car (cdr (cdr parsed))) "name")
+            (hash-ref (car parsed) "dso")
+            (hash-ref (car parsed) "self-ms")))
+(show (list (hash-ref (car bare) "name")
+            (hash-ref (car bare) "dso")))
+(show (list (names rows)
+            (length rows)
+            (hash-ref (car rows) "calls")
+            (perf:select-child rows)
+            (perf:record-samples text)
+            (perf:report-event text)))
+(show (list (hash-ref mined "class")
+            (hash-ref mined "hot-node")
+            (hash-ref mined "site")
+            (hash-ref hyp "id")
+            (hash-ref hyp "constraint")
+            (hash-ref hyp "constraints")
+            (hash-ref hyp "counter")
+            (hash-ref hyp "event")
+            (hash-ref hyp "expect")
+            (hash-ref hyp "dso")
+            (hash-ref (car (cdr (hash-ref mined "hypotheses" '()))) "id")
+            (hash-ref (car (cdr (hash-ref mined "hypotheses" '()))) "expect")))
+(show (list (hash-ref nodso "class")
+            (hash-ref nodso "site")
+            (hash-ref nodso-hyp "counter")
+            (hash-ref nodso-hyp "constraints")
+            (length (hash-ref nodso "hypotheses" '()))))
+(show (list (hash-ref absent "attach-error")
+            (hash-ref absent "record-samples")
+            (length (hash-ref absent "rows" '()))
+            (if (string=? (hash-ref absent "child" "") "")
+                "none"
+                (hash-ref absent "child" ""))))

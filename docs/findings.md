@@ -39,3 +39,9 @@ live workspace 没有被改。aura-perf 的 trial 使用单参数 apply。这是
 ## 5. `std/string` 的 `string-trim` 只去掉空格
 
 `string-trim` 只判断字符码 32。`read-file` 读到的 `/proc/sys/kernel/perf_event_paranoid` 带换行，trim 之后仍会把换行留在字符串里，打进报告就会多出一个空行。aura-perf 自己去掉 `<= 32` 的字符，不依赖这个函数。
+
+## 6. workspace 的 mutate typecheck 看不见宿主绑定
+
+`set-code` 装入的 define 如果直接调用宿主里已经 `require` 的 `perf:mine`，下一步 `mutate:rebind` 的 selective typecheck 会拒绝 mutation，原因是 `unbound variable: perf:mine`。把 `(require …)` 写进被 `set-code` 的源码也不行：`require` 自己被报成未绑定变量。
+
+把查询过程作为值放进调用参数（策略里 `(let ((mine (hash-ref ctx "mine"))) (mine profile))`）可以通过这次 typecheck，rebind 返回 `#t`。aura-perf 的 `perf-strategy` 因此从 `ctx` 取 `mine`，不在 workspace 源码里写宿主函数名。

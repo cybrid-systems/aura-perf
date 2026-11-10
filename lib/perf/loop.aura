@@ -3,7 +3,7 @@
 ; passed the held-out gate in a child process. Strategy rewrites use
 ; ast:snapshot / ast:restore on this process.
 
-(export perf:optimize)
+(export perf:optimize perf:autotune)
 
 (require "std/evo-core" all:)
 (require "std/evo" all:)
@@ -12,6 +12,7 @@
 (require "lib/perf/score" all:)
 (require "lib/perf/gate" all:)
 (require "lib/perf/profile" all:)
+(require "lib/perf/cct" all:)
 (require "lib/perf/query" all:)
 (require "lib/perf/propose" all:)
 (require "lib/perf/audit" all:)
@@ -261,7 +262,10 @@
                 #f)
               (begin
                 (eval-current)
-                (let ((plan (try (perf-strategy (hash "hot-child" "")) (catch (e) #f))))
+                (let ((plan (try (perf-strategy (hash "profile" (hash)
+                                                             "mine" perf:mine
+                                                             "hot-child-fn" perf:hot-child))
+                                 (catch (e) #f))))
                   (if (and (hash? plan)
                            (equal? (perf:order-of plan) order))
                       (begin
@@ -334,6 +338,37 @@
                    " gmon=" (hash-ref t "gmon" "?")
                    " paranoid=" (hash-ref t "paranoid" "?"))))
 
+(define (perf:protected spec)
+  (let ((intend (hash-ref spec "intend" (hash))))
+    (if (hash? intend) (hash-ref intend "protected" '()) '())))
+
+; Propose the whole order, drop protected sites, then honor per-round.
+; Refusals are audit lines. They are not trials.
+(define (perf:round-candidates spec plan buf)
+  (let* ((wide (hash "order" (perf:order-of plan) "per-round" 100))
+         (raw (perf:rule-propose (perf:catalog spec) (hash "plan" wide)))
+         (split (perf:split-protected raw (perf:protected spec)))
+         (k (let ((n (hash-ref plan "per-round" 1)))
+              (if (and (number? n) (> n 0)) n 1))))
+    (let loop ((xs (hash-ref split "refused" '())))
+      (if (null? xs)
+          #t
+          (begin
+            (perf:say buf (string-append "expert-refuse "
+                                         (hash-ref (car xs) "id" "?")
+                                         " site="
+                                         (hash-ref (car xs) "target"
+                                                   (hash-ref (car xs) "site" "?"))))
+            (perf:bump buf "rollback")
+            (perf:audit-decision (hash-ref (car xs) "target" "protected")
+                                 "ROLLBACK" "protected-define"
+                                 (hash "id" (hash-ref (car xs) "id" "")))
+            (hash-set! buf "refused"
+                       (cons (hash-ref (car xs) "id" "")
+                             (hash-ref buf "refused" '())))
+            (loop (cdr xs)))))
+    (perf:take (hash-ref split "ok" '()) k)))
+
 (define (perf:choose-winner spec results best plan child hottest out buf baseline pct)
   (if best
       best
@@ -342,22 +377,22 @@
             (perf:say buf "strategy ROLLBACK reason=trial-infrastructure")
             (perf:bump buf "rollback")
             #f)
-          (let ((failed (perf:failed-ids results baseline pct)))
+          (let ((failed (append (hash-ref buf "refused" '())
+                                (perf:failed-ids results baseline pct))))
             (let ((next (perf:revise-order (perf:order-of plan) failed)))
               (let ((plan2 (perf:commit-strategy spec next buf)))
                 (if (not plan2)
                     #f
-                    (let ((ctx2 (hash "plan" plan2
-                                      "hot-child" child
-                                      "hottest" hottest)))
-                      (let ((cands2 (perf:rule-propose (perf:catalog spec) ctx2)))
-                        (perf:say buf (string-append "round 2 candidates " (perf:ids cands2)))
-                        (let ((results2 (perf:trial-round spec cands2 out buf baseline)))
-                          (if (perf:any-infra? results2)
-                              (begin
-                                (perf:say buf "round 2 aborted: trial infrastructure")
-                                #f)
-                              (perf:best-passing results2 baseline pct))))))))))))
+                    (let ((cands2 (perf:round-candidates spec plan2 buf)))
+                      (perf:say buf (string-append "round 2 candidates " (perf:ids cands2)))
+                      (hash-set! buf "budget"
+                                 (+ (hash-ref buf "budget" 0) (length cands2)))
+                      (let ((results2 (perf:trial-round spec cands2 out buf baseline)))
+                        (if (perf:any-infra? results2)
+                            (begin
+                              (perf:say buf "round 2 aborted: trial infrastructure")
+                              #f)
+                            (perf:best-passing results2 baseline pct)))))))))))
 
 (define (perf:say-each buf lines)
   (let loop ((xs lines))
@@ -366,6 +401,66 @@
         (begin
           (perf:say buf (car xs))
           (loop (cdr xs))))))
+
+(define (perf:run-kernel spec n)
+  (let ((f (hash-ref spec "call"))
+        (xs (perf:range n)))
+    (f xs)
+    (f xs)
+    (f xs)))
+
+(define (perf:confirm spec buf profile)
+  (let ((bin (hash-ref (hash-ref profile "tools" (hash)) "perf" "missing"))
+        (cmd (hash-ref spec "perf-after" "")))
+    (if (or (< (hash-ref buf "keep" 0) 1)
+            (not (string? bin)) (string=? bin "missing")
+            (not (string? cmd)) (string=? cmd ""))
+        #f
+        (let* ((text (perf:stat-text bin cmd "/tmp/aura-perf-after.txt"))
+               (counters (perf:parse-perf-stat text))
+               (after-clock (hash-ref counters "task-clock" -1))
+               (before-node (perf:cct-node (hash-ref profile "cct" (hash)) "bench-kernel"))
+               (before-clock (if (hash? before-node)
+                                 (hash-ref before-node "task-clock" -1)
+                                 -1))
+               (after-cct (perf:cct-build
+                            (list (hash "name" "bench-kernel"
+                                        "task-clock" after-clock
+                                        "page-faults" (hash-ref counters "page-faults" 0)
+                                        "stack" (list "bench-kernel")
+                                        "calls" 1))))
+               (rows (perf:cct-delta (hash-ref profile "cct" (hash)) after-cct))
+               (live (perf:measure-live bin (lambda () (perf:run-kernel spec 4000)))))
+          (perf:say buf (string-append "perf-before-task-clock-ms "
+                                       (number->string before-clock)))
+          (perf:say buf (string-append "perf-after-task-clock-ms "
+                                       (number->string after-clock)))
+          (let loop ((xs rows))
+            (if (null? xs)
+                #t
+                (let ((h (car xs)))
+                  (perf:say buf (string-append
+                                  "cct-delta " (hash-ref h "id" "?")
+                                  " before-ms=" (number->string (hash-ref h "before-ms" 0))
+                                  " after-ms=" (number->string (hash-ref h "after-ms" 0))
+                                  " delta-ms=" (number->string (hash-ref h "delta-ms" 0))))
+                  (loop (cdr xs)))))
+          (perf:say buf (string-append "perf-live-after-task-clock-ms "
+                                       (number->string (hash-ref live "task-clock" -1))))
+          (if (and (number? before-clock) (> before-clock 0)
+                   (number? after-clock) (> after-clock 0)
+                   (< after-clock before-clock))
+              (perf:say buf "hypothesis-confirmed linear-scan lower-task-clock")
+              (perf:say buf "hypothesis-unconfirmed"))))))
+
+(define (perf:say-intend spec buf before-ms after-ms)
+  (let* ((intend (hash-ref spec "intend" (hash)))
+         (pct (hash-ref intend "min-faster-pct" 10))
+         (met (perf:speedup-ok? before-ms after-ms pct)))
+    (perf:say buf (string-append "intend min-faster-pct=" (number->string pct)
+                                 " checksum=1 protected="
+                                 (perf:join (hash-ref intend "protected" '()) ",")))
+    (perf:say buf (string-append "intend-met " (if met "1" "0")))))
 
 (define (perf:finish spec buf profile child out)
   (let ((after-profile (perf:collect ((hash-ref spec "regions-fn"))
@@ -376,6 +471,9 @@
           (perf:say buf (string-append "after-heldout-ms " (number->string after-ms)
                                        " samples=" (perf:sample-text (hash-ref buf "after-samples" '()))))
           (perf:say buf (string-append "speedup-x " (perf:fmt-x before-ms after-ms)))
+          (perf:confirm spec buf profile)
+          (perf:say buf (string-append "budget-used " (number->string (hash-ref buf "budget" 0))))
+          (perf:say-intend spec buf before-ms after-ms)
           (perf:say buf (string-append "profile-elapsed-before-ms "
                                        (number->string (hash-ref delta "elapsed-before-ms" 0))
                                        " profile-elapsed-after-ms "
@@ -429,11 +527,16 @@
     (if (not (perf:install-seed (hash-ref spec "seed-path")))
         (perf:say buf "error empty-seed")
         (let* ((profile (perf:collect ((hash-ref spec "regions-fn"))
-                                      (hash "repeats" (hash-ref spec "profile-repeats" 3))))
+                                      (hash "repeats" (hash-ref spec "profile-repeats" 3)
+                                            "targets" (hash-ref spec "perf-targets" '()))))
                (child (perf:hot-child profile))
                (hottest (perf:hottest profile))
-               (plan (perf-strategy (hash "hot-child" child "hottest" hottest)))
+               (plan (perf-strategy (hash "profile" profile
+                                          "mine" perf:mine
+                                          "hot-child-fn" perf:hot-child
+                                          "failed" '())))
                (ctx (hash "plan" plan
+                          "profile" profile
                           "hot-child" child
                           "hottest" hottest
                           "hotspots" (perf:hotspots profile)))
@@ -454,6 +557,14 @@
             (if (null? xs) #t (begin (perf:say buf (car xs)) (loop (cdr xs)))))
           (perf:say buf (string-append "hottest " hottest))
           (perf:say buf (string-append "hot-child " child))
+          (let ((pinfo (hash-ref profile "perf" (hash))))
+            (perf:say buf (string-append "perf-record-samples "
+                                         (number->string (hash-ref pinfo "record-samples" -1))
+                                         " event=" (hash-ref pinfo "record-event" ""))))
+          (perf:say buf (string-append "mined class=" (hash-ref plan "class" "")
+                                       " hot-node=" (hash-ref plan "hotspot" "")
+                                       " site=" (hash-ref plan "site" "")))
+          (perf:say buf (string-append "prefix " (perf:join (hash-ref plan "prefix" '()) ">")))
           (perf:say buf (string-append "strategy-order"
                                        (perf:join (map (lambda (s) (string-append " " s))
                                                        (perf:order-of plan))
@@ -461,9 +572,17 @@
           (perf:say buf (string-append "llm-proposer " (hash-ref llm "error" "?")))
           (perf:say buf (string-append "baseline-heldout-ms " (number->string baseline)
                                        " samples=" (perf:sample-text (hash-ref base "samples" '()))))
-          (let* ((cands (perf:rule-propose (perf:catalog spec) ctx))
+          (let ((bin (hash-ref (hash-ref profile "tools" (hash)) "perf" "missing")))
+            (if (and (string? bin) (not (string=? bin "missing")))
+                (let ((live (perf:measure-live bin (lambda () (perf:run-kernel spec 4000)))))
+                  (perf:say buf (string-append "perf-live-before-task-clock-ms "
+                                               (number->string (hash-ref live "task-clock" -1)))))
+                #f))
+          (let* ((cands (perf:round-candidates spec plan buf))
                  (results (begin
                             (perf:say buf (string-append "round 1 candidates " (perf:ids cands)))
+                            (hash-set! buf "budget"
+                                       (+ (hash-ref buf "budget" 0) (length cands)))
                             (perf:trial-round spec cands out buf baseline)))
                  (best (perf:best-passing results baseline pct)))
             (let ((winner (perf:choose-winner spec results best plan child hottest out buf baseline pct)))
@@ -474,3 +593,9 @@
                         (perf:commit-kernel spec entry baseline buf)
                         (perf:say buf "kernel ROLLBACK reason=missing-catalog-entry"))))
               (perf:finish spec buf profile child out)))))))
+
+; One entry. The caller supplies an intend and a target. The runtime
+; mines, proposes, trials, and stops when the intend holds or the
+; strategy has no remaining candidate.
+(define (perf:autotune spec)
+  (perf:optimize spec))

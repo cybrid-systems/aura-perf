@@ -1,0 +1,56 @@
+; Target program measured by Linux perf.
+; This is the workload under optimization, not a profile of the Aura runtime.
+; AURA_PERF_REGION selects which user define to run:
+;   bench-kernel | k-ref | k-length | linear
+; AURA_PERF_N and AURA_PERF_REPS control the size (defaults 4000 and 3).
+
+(define (k-length xs)
+  (length xs))
+
+(define (k-ref xs i)
+  (list-ref xs i))
+
+(define (bench-kernel xs)
+  (let ((n (k-length xs)))
+    (let loop ((i 0) (acc 0))
+      (if (>= i n)
+          acc
+          (loop (+ i 1) (+ acc (k-ref xs i)))))))
+
+(define (linear-kernel xs)
+  (let loop ((ys xs) (acc 0))
+    (if (null? ys)
+        acc
+        (loop (cdr ys) (+ acc (car ys))))))
+
+(define (range n)
+  (let loop ((i (- n 1)) (acc ()))
+    (if (< i 0) acc (loop (- i 1) (cons i acc)))))
+
+(define (env-int name default)
+  (let ((v (getenv name)))
+    (if (and (string? v) (number? (string->number v)))
+        (string->number v)
+        default)))
+
+(define region (let ((v (getenv "AURA_PERF_REGION")))
+                 (if (and (string? v) (not (string=? v ""))) v "bench-kernel")))
+(define n (env-int "AURA_PERF_N" 4000))
+(define reps (env-int "AURA_PERF_REPS" 3))
+(define xs (range n))
+
+(define (once)
+  (cond ((string=? region "k-ref")
+         (let loop ((i 0) (acc 0))
+           (if (>= i n) acc (loop (+ i 1) (+ acc (k-ref xs i))))))
+        ((string=? region "k-length")
+         (k-length xs))
+        ((string=? region "linear")
+         (linear-kernel xs))
+        (else
+         (bench-kernel xs))))
+
+(let loop ((i 0) (acc 0))
+  (if (>= i reps)
+      (begin (display acc) (newline))
+      (loop (+ i 1) (+ acc (once)))))

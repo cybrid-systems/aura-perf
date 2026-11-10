@@ -60,9 +60,13 @@
         #f
         (string-append
           "(define (perf-strategy ctx)\n"
-          "  (let ((child (hash-ref ctx \"hot-child\" \"\")))\n"
-          "    (hash \"rank\" \"self-ms\"\n"
-          "          \"hotspot\" child\n"
+          "  (let* ((mine (hash-ref ctx \"mine\"))\n"
+          "         (profile (hash-ref ctx \"profile\" (hash)))\n"
+          "         (mined (mine profile)))\n"
+          "    (hash \"rank\" \"task-clock\"\n"
+          "          \"hotspot\" (hash-ref mined \"hot-node\" \"\")\n"
+          "          \"class\" (hash-ref mined \"class\" \"\")\n"
+          "          \"site\" (hash-ref mined \"site\" \"\")\n"
           "          \"order\" (list" quoted ")\n"
           "          \"per-round\" " (number->string k) ")))\n"))))
 

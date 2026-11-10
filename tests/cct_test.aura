@@ -1,0 +1,38 @@
+(require "lib/perf/cct" all:)
+(require "lib/perf/profile" all:)
+
+(define rows
+  (list (hash "name" "k-length" "task-clock" 54 "page-faults" 10 "calls" 1
+              "stack" (list "bench-kernel" "k-length"))
+        (hash "name" "k-ref" "task-clock" 295 "page-faults" 10 "calls" 4000
+              "stack" (list "bench-kernel" "k-ref"))
+        (hash "name" "bench-kernel" "task-clock" 293 "page-faults" 10 "calls" 1
+              "stack" (list "bench-kernel"))))
+
+(define cct (perf:cct-build rows))
+(define profile (hash "cct" cct "perf-child" (perf:select-child rows)))
+(define mined (perf:mine profile))
+(define after (perf:cct-build
+                (list (hash "name" "bench-kernel" "task-clock" 76 "page-faults" 10
+                            "calls" 1 "stack" (list "bench-kernel")))))
+(define delta (perf:cct-delta cct after))
+(define kernel (let loop ((xs delta))
+                 (if (null? xs) #f
+                     (if (string=? (hash-ref (car xs) "id") "bench-kernel")
+                         (car xs)
+                         (loop (cdr xs))))))
+(define split (perf:split-protected
+                (list (hash "id" "specialize-k-ref" "target" "k-ref")
+                      (hash "id" "linear-scan" "target" "bench-kernel"))
+                (list "k-ref" "k-length")))
+
+(display (list (perf:select-child rows)
+               (hash-ref mined "class")
+               (hash-ref mined "hot-node")
+               (hash-ref mined "site")
+               (hash-ref mined "prefix")
+               (hash-ref kernel "before-ms")
+               (hash-ref kernel "after-ms")
+               (hash-ref (car (hash-ref split "refused")) "id")
+               (hash-ref (car (hash-ref split "ok")) "id")))
+(newline)

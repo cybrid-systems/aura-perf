@@ -1,6 +1,9 @@
-; Mutable workspace seed for the sum-scan example.
-; bench-kernel is the quadratic scan the search rewrites.
-; perf-strategy is itself a workspace define: the loop may rebind it.
+; Target program and the strategy that tunes it.
+; perf-strategy is workspace code. It does not read a report. It calls
+; perf:mine on the CCT value the runtime just measured.
+; Query procedures arrive in ctx. Naming perf:mine inside this
+; workspace makes the trial typecheck reject the define, because
+; that check does not see host bindings.
 
 (define (k-length xs)
   (length xs))
@@ -16,10 +19,23 @@
           (loop (+ i 1) (+ acc (k-ref xs i)))))))
 
 (define (perf-strategy ctx)
-  (let ((child (hash-ref ctx "hot-child" "")))
-    (hash "rank" "self-ms"
-          "hotspot" child
-          "order" (if (string=? child "k-ref")
-                      (list "wrong-scale" "redundant-pass" "linear-scan")
+  (let* ((mine (hash-ref ctx "mine"))
+         (hotfn (hash-ref ctx "hot-child-fn"))
+         (profile (hash-ref ctx "profile" (hash)))
+         (mined (mine profile))
+         (class (hash-ref mined "class" ""))
+         (hot (let ((h (hash-ref mined "hot-node" "")))
+                (if (string=? h "")
+                    (hotfn profile)
+                    h))))
+    (hash "rank" "task-clock"
+          "hotspot" hot
+          "class" class
+          "site" (hash-ref mined "site" "")
+          "prefix" (hash-ref mined "prefix" '())
+          "order" (if (or (string=? class "repeated-index-walk")
+                          (string=? hot "k-ref"))
+                      (list "specialize-k-ref" "wrong-scale"
+                            "redundant-pass" "linear-scan")
                       (list "linear-scan"))
           "per-round" 2)))

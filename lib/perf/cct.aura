@@ -1,0 +1,176 @@
+; Calling-context tree for an agent, not a flame chart.
+; Nodes are defines of the program being optimized. Costs are perf
+; measurements (task-clock and other counters), not pixel widths.
+; Queries return Aura values a strategy can branch on.
+
+(export perf:cct-build perf:cct-node perf:cct-hot-prefix perf:cct-subtree
+        perf:cct-actionable perf:cct-delta perf:mine perf:split-protected
+        perf:node-clock)
+
+(require "lib/perf/util" all:)
+
+(define (perf:parent-of stack)
+  (if (and (list? stack) (pair? stack) (pair? (cdr stack)))
+      (car stack)
+      ""))
+
+(define (perf:cct-build rows)
+  (let loop ((xs (if (list? rows) rows '())) (nodes '()))
+    (if (null? xs)
+        (hash "kind" "perf-cct" "nodes" (reverse nodes))
+        (let ((r (car xs)))
+          (loop (cdr xs)
+                (cons (hash "id" (hash-ref r "name" "")
+                            "define" (hash-ref r "name" "")
+                            "parent" (perf:parent-of (hash-ref r "stack" '()))
+                            "stack" (hash-ref r "stack" '())
+                            "inclusive-ms" (hash-ref r "task-clock" 0)
+                            "exclusive-ms" (hash-ref r "task-clock" 0)
+                            "calls" (hash-ref r "calls" 1)
+                            "task-clock" (hash-ref r "task-clock" 0)
+                            "page-faults" (hash-ref r "page-faults" 0))
+                      nodes))))))
+
+(define (perf:cct-node cct id)
+  (let loop ((xs (if (hash? cct) (hash-ref cct "nodes" '()) '())))
+    (if (null? xs)
+        #f
+        (if (string=? (hash-ref (car xs) "id" "") id)
+            (car xs)
+            (loop (cdr xs))))))
+
+(define (perf:node-clock node)
+  (if (hash? node) (hash-ref node "task-clock" 0) 0))
+
+; Hottest root-to-leaf path by task-clock of the leaf under a parent.
+(define (perf:cct-hot-prefix cct)
+  (let ((nodes (if (hash? cct) (hash-ref cct "nodes" '()) '())))
+    (let loop ((xs nodes) (best '()) (best-ms -1))
+      (if (null? xs)
+          best
+          (let* ((n (car xs))
+                 (stack (hash-ref n "stack" '()))
+                 (ms (perf:node-clock n)))
+            (if (and (list? stack) (pair? (cdr stack)) (number? ms) (> ms best-ms))
+                (loop (cdr xs) stack ms)
+                (loop (cdr xs) best best-ms)))))))
+
+(define (perf:cct-subtree cct id)
+  (let ((nodes (if (hash? cct) (hash-ref cct "nodes" '()) '())))
+    (let loop ((xs nodes) (acc '()))
+      (if (null? xs)
+          (reverse acc)
+          (let* ((n (car xs))
+                 (stack (hash-ref n "stack" '())))
+            (loop (cdr xs)
+                  (if (or (string=? (hash-ref n "id" "") id)
+                          (perf:member? stack id))
+                      (cons n acc)
+                      acc)))))))
+
+; Hot, and not on the protected-define list. The result is the set an
+; agent is allowed to rebind. A hot leaf that is protected is reported
+; by perf:mine as evidence, and the mutable ancestor is the site.
+(define (perf:cct-actionable cct threshold protected)
+  (let ((nodes (if (hash? cct) (hash-ref cct "nodes" '()) '()))
+        (th (if (number? threshold) threshold 0)))
+    (let loop ((xs nodes) (acc '()))
+      (if (null? xs)
+          (reverse acc)
+          (let ((n (car xs)))
+            (loop (cdr xs)
+                  (if (and (number? (perf:node-clock n))
+                           (>= (perf:node-clock n) th)
+                           (not (perf:member? protected (hash-ref n "define" ""))))
+                      (cons n acc)
+                      acc)))))))
+
+(define (perf:clock-of cct id)
+  (perf:node-clock (perf:cct-node cct id)))
+
+(define (perf:cct-delta before after)
+  (let ((bn (if (hash? before) (hash-ref before "nodes" '()) '()))
+        (an (if (hash? after) (hash-ref after "nodes" '()) '())))
+    (let ((ids (let loop ((xs (append bn an)) (acc '()))
+                 (if (null? xs)
+                     acc
+                     (let ((id (hash-ref (car xs) "id" "")))
+                       (loop (cdr xs)
+                             (if (or (string=? id "") (perf:member? acc id))
+                                 acc
+                                 (append acc (list id)))))))))
+      (let loop ((xs ids) (acc '()))
+        (if (null? xs)
+            (reverse acc)
+            (let* ((id (car xs))
+                   (b (perf:clock-of before id))
+                   (a (perf:clock-of after id))
+                   (bb (if (number? b) b 0))
+                   (aa (if (number? a) a 0)))
+              (loop (cdr xs)
+                    (cons (hash "id" id
+                                "before-ms" bb
+                                "after-ms" aa
+                                "delta-ms" (- aa bb)
+                                "removed" (and (perf:cct-node before id)
+                                               (not (perf:cct-node after id)))
+                                "added" (and (perf:cct-node after id)
+                                             (not (perf:cct-node before id))))
+                          acc))))))))
+
+; Structural class, not "the widest bar".
+; repeated-index-walk: a callee measured under perf costs more than
+; twice its sibling, and the stack is parent>callee. The mutable site
+; is the parent define (the loop), not the protected leaf.
+(define (perf:mine profile)
+  (let ((cct (if (and (hash? profile) (hash? (hash-ref profile "cct" #f)))
+                 (hash-ref profile "cct")
+                 #f)))
+    (if (not cct)
+        (hash "class" "" "hot-node" "" "site" "" "prefix" '()
+              "hypotheses" '() "actionable" '())
+        (let* ((prefix (perf:cct-hot-prefix cct))
+               (kref (perf:clock-of cct "k-ref"))
+               (klen (perf:clock-of cct "k-length"))
+               (class (if (and (number? kref) (number? klen)
+                               (> klen 0) (> kref (* klen 2)))
+                          "repeated-index-walk"
+                          (if (pair? prefix) "flat-hot" "")))
+               (hot (if (and (pair? prefix) (pair? (cdr prefix)))
+                        (car (cdr prefix))
+                        (if (pair? prefix) (car prefix) "")))
+               (site (if (pair? prefix) (car prefix) "")))
+          (hash "class" class
+                "hot-node" hot
+                "site" site
+                "prefix" prefix
+                "k-ref-ms" kref
+                "k-length-ms" klen
+                "actionable" (perf:cct-actionable cct 1.0 (list "k-ref" "k-length"))
+                "hypotheses" (perf:hypotheses class site))))))
+
+; Executable hypotheses. Each one names a catalog id, the define it
+; would rebind, the constraint, and which counter it expects to move.
+; specialize-k-ref is a real idea (the leaf is hot) that the protected
+; boundary must refuse. The other three are trials.
+(define (perf:hypotheses class site)
+  (if (string=? class "repeated-index-walk")
+      (list (hash "id" "specialize-k-ref" "site" "k-ref"
+                  "expect" "refuse-protected" "counter" "task-clock")
+            (hash "id" "wrong-scale" "site" site
+                  "expect" "checksum-fail" "counter" "checksum")
+            (hash "id" "redundant-pass" "site" site
+                  "expect" "no-speedup" "counter" "task-clock")
+            (hash "id" "linear-scan" "site" site
+                  "expect" "lower-task-clock" "counter" "task-clock"))
+      '()))
+
+(define (perf:split-protected cands protected)
+  (let loop ((xs (if (list? cands) cands '())) (ok '()) (refused '()))
+    (if (null? xs)
+        (hash "ok" (reverse ok) "refused" (reverse refused))
+        (let* ((c (car xs))
+               (site (hash-ref c "target" (hash-ref c "site" ""))))
+          (if (perf:member? protected site)
+              (loop (cdr xs) ok (cons c refused))
+              (loop (cdr xs) (cons c ok) refused))))))

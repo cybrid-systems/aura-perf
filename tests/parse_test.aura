@@ -27,3 +27,5 @@
 (show (list (hash-ref audit "op")
             (hash-ref audit "seq")
             (hash-ref audit "kind")))
+(show (perf:record-samples
+        "# Total Lost Samples: 0\n# Samples: 57  of event 'cpu-clock'\n"))

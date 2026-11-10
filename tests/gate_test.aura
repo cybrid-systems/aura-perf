@@ -1,0 +1,16 @@
+(require "lib/perf/gate" all:)
+
+(define (row ms checksum live)
+  (hash "status" "ok"
+        "checksum-ok" checksum
+        "live-unchanged" live
+        "mismatches" (if (= checksum 1) 0 2)
+        "heldout-ms" ms))
+
+(display (list (if (perf:accept? 100 (row 70 1 1) 20) 1 0)
+               (if (perf:accept? 100 (row 90 1 1) 20) 1 0)
+               (if (perf:accept? 100 (row 10 0 1) 20) 1 0)
+               (if (perf:accept? 100 (row 10 1 0) 20) 1 0)
+               (if (perf:speedup-ok? 164 12 20) 1 0)
+               (if (perf:speedup-ok? 0 12 20) 1 0)))
+(newline)

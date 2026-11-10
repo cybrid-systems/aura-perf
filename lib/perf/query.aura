@@ -1,0 +1,107 @@
+; Query primitives over a profile value produced by perf:collect
+; or by the perf/gprof parsers. Profiles are plain hashes, so these
+; functions do not touch the workspace.
+
+(export perf:hotspots perf:stacks perf:counters perf:delta)
+
+(require "lib/perf/util" all:)
+
+(define (perf:hotter? a b)
+  (> (hash-ref a "self-ms" 0) (hash-ref b "self-ms" 0)))
+
+(define (perf:hotspots profile . rest)
+  (let ((k (if (and (pair? rest) (number? (car rest))) (car rest) -1))
+        (sorted (if (and (hash? profile) (list? (hash-ref profile "hotspots" '())))
+                    (sort (hash-ref profile "hotspots" '()) perf:hotter?)
+                    '())))
+    (if (< k 0) sorted (perf:take sorted k))))
+
+(define (perf:stacks profile)
+  (if (hash? profile) (hash-ref profile "stacks" '()) '()))
+
+(define (perf:counters profile)
+  (if (hash? profile) (hash-ref profile "counters" (hash)) (hash)))
+
+(define (perf:find-ms hs name)
+  (let loop ((xs (if (list? hs) hs '())))
+    (if (null? xs)
+        #f
+        (let ((h (car xs)))
+          (if (and (hash? h) (string=? (hash-ref h "name" "") name))
+              (hash-ref h "self-ms" 0)
+              (loop (cdr xs)))))))
+
+(define (perf:names-of hs)
+  (let loop ((xs (if (list? hs) hs '())) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (let ((n (hash-ref (car xs) "name" "")))
+          (loop (cdr xs)
+                (if (or (string=? n "") (perf:member? acc n))
+                    acc
+                    (cons n acc)))))))
+
+(define (perf:hotspot-delta before after)
+  (let* ((bn (perf:names-of before))
+         (an (perf:names-of after))
+         (names (let loop ((xs an) (acc bn))
+                  (if (null? xs)
+                      acc
+                      (loop (cdr xs)
+                            (if (perf:member? acc (car xs))
+                                acc
+                                (append acc (list (car xs)))))))))
+    (let loop ((xs names) (acc '()))
+      (if (null? xs)
+          (reverse acc)
+          (let* ((name (car xs))
+                 (b (perf:find-ms before name))
+                 (a (perf:find-ms after name))
+                 (bb (if (number? b) b 0))
+                 (aa (if (number? a) a 0)))
+            (loop (cdr xs)
+                  (cons (hash "name" name
+                              "before-ms" bb
+                              "after-ms" aa
+                              "delta-ms" (- aa bb)
+                              "dropped" (and (number? b) (not (number? a)))
+                              "added" (and (number? a) (not (number? b))))
+                        acc)))))))
+
+(define (perf:counter-names c1 c2)
+  (let ((k1 (if (hash? c1) (sort (hash-keys c1) string<?) '()))
+        (k2 (if (hash? c2) (sort (hash-keys c2) string<?) '())))
+    (let loop ((xs k2) (acc k1))
+      (if (null? xs)
+          acc
+          (loop (cdr xs)
+                (if (perf:member? acc (car xs))
+                    acc
+                    (append acc (list (car xs)))))))))
+
+(define (perf:counter-delta before after)
+  (let ((b (if (hash? before) before (hash)))
+        (a (if (hash? after) after (hash))))
+    (let loop ((ks (perf:counter-names b a)) (acc '()))
+      (if (null? ks)
+          (reverse acc)
+          (let* ((k (car ks))
+                 (bv (hash-ref b k 0))
+                 (av (hash-ref a k 0))
+                 (bn (if (number? bv) bv 0))
+                 (an (if (number? av) av 0)))
+            (loop (cdr ks)
+                  (cons (list k bn an (- an bn)) acc)))))))
+
+(define (perf:delta before after)
+  (let ((b (if (hash? before) before (hash)))
+        (a (if (hash? after) after (hash))))
+    (hash "kind" "perf-delta"
+          "elapsed-before-ms" (hash-ref b "elapsed-ms" 0)
+          "elapsed-after-ms" (hash-ref a "elapsed-ms" 0)
+          "elapsed-delta-ms" (- (hash-ref a "elapsed-ms" 0)
+                                (hash-ref b "elapsed-ms" 0))
+          "hotspots" (perf:hotspot-delta (hash-ref b "hotspots" '())
+                                         (hash-ref a "hotspots" '()))
+          "counters" (perf:counter-delta (hash-ref b "counters" (hash))
+                                         (hash-ref a "counters" (hash))))))

@@ -1,0 +1,67 @@
+; End-to-end CPU example: profile a quadratic list scan, trial
+; mutations on forked worldlines, keep only a held-out speedup.
+; Run from the repository root:
+;   AURA_SANDBOX=off aura --preset dev --grant exec examples/sum-scan/main.aura
+; or: scripts/run-example.sh
+
+(require "lib/perf/loop" all:)
+(require "lib/perf/util" all:)
+(require "lib/perf/score" all:)
+
+(define (call-kernel xs)
+  (bench-kernel xs))
+
+(define (load-candidate id path thought)
+  (hash "id" id
+        "genome" (perf:read-text path)
+        "hotspot" "k-ref"
+        "thought" thought))
+
+; Region timers call the live workspace defines. n is the profile input,
+; distinct from the held-out length used for the score.
+(define (regions)
+  (let ((n 4000)
+        (xs (perf:range 4000)))
+    (list
+      (hash "name" "bench-kernel"
+            "calls" 1
+            "workload" #t
+            "stack" (list "bench-kernel")
+            "thunk" (lambda () (bench-kernel xs)))
+      (hash "name" "k-length"
+            "calls" 1
+            "stack" (list "bench-kernel" "k-length")
+            "thunk" (lambda () (k-length xs)))
+      (hash "name" "k-ref"
+            "calls" n
+            "stack" (list "bench-kernel" "k-ref")
+            "thunk" (lambda ()
+                      (let loop ((i 0))
+                        (if (>= i n)
+                            0
+                            (begin (k-ref xs i) (loop (+ i 1))))))))))
+
+(perf:optimize
+  (hash "seed-path" "examples/sum-scan/seed.aura"
+        "worker" "examples/sum-scan/worker.aura"
+        "target" "bench-kernel"
+        "out-dir" "out"
+        "heldout-n" 6000
+        "repeats" 5
+        "profile-repeats" 3
+        "min-speedup-pct" 20
+        "expect-child" "k-ref"
+        "require-success" #t
+        "call" call-kernel
+        "regions-fn" regions
+        "catalog"
+        (list (load-candidate "wrong-scale"
+                              "examples/sum-scan/candidates/wrong-scale.aura"
+                              "scale each element; changes the sum")
+              (load-candidate "redundant-pass"
+                              "examples/sum-scan/candidates/redundant-pass.aura"
+                              "three indexed reads that cancel back to one")
+              (load-candidate "linear-scan"
+                              "examples/sum-scan/candidates/linear-scan.aura"
+                              "walk the spine once with car/cdr"))))
+(display "done\n")

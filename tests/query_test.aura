@@ -1,0 +1,36 @@
+(require "lib/perf/query" all:)
+
+(define before
+  (hash "kind" "perf-profile"
+        "elapsed-ms" 100
+        "hotspots" (list (hash "name" "k-ref" "self-ms" 80)
+                         (hash "name" "k-length" "self-ms" 5)
+                         (hash "name" "bench-kernel" "self-ms" 90))
+        "counters" (hash "proc.utime-ticks" 4 "eval.hotpath_eval_flat_calls" 10)
+        "stacks" (list (hash "frames" (list "bench-kernel" "k-ref")))))
+
+(define after
+  (hash "kind" "perf-profile"
+        "elapsed-ms" 40
+        "hotspots" (list (hash "name" "k-ref" "self-ms" 80)
+                         (hash "name" "bench-kernel" "self-ms" 12))
+        "counters" (hash "proc.utime-ticks" 7 "eval.hotpath_eval_flat_calls" 14)))
+
+(define top (perf:hotspots before 2))
+(define delta (perf:delta before after))
+(define kernel (let loop ((xs (hash-ref delta "hotspots" '())))
+                 (if (null? xs)
+                     #f
+                     (if (string=? (hash-ref (car xs) "name") "bench-kernel")
+                         (car xs)
+                         (loop (cdr xs))))))
+
+(display (list (hash-ref (car top) "name")
+               (hash-ref (car (cdr top)) "name")
+               (length (perf:stacks before))
+               (hash-ref kernel "before-ms")
+               (hash-ref kernel "after-ms")
+               (hash-ref kernel "delta-ms")
+               (hash-ref delta "elapsed-before-ms")
+               (hash-ref delta "elapsed-after-ms")))
+(newline)

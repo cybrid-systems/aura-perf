@@ -1,0 +1,94 @@
+; One candidate, one process.
+; AURA_PERF_JOB is a JSON file. The trial runs in a forked worldline
+; (evo:trial). This process must be started with AURA_SANDBOX=off or the
+; child workspace refuses mutate:rebind.
+
+(require "std/evo-core" all:)
+(require "lib/perf/util" all:)
+(require "lib/perf/score" all:)
+
+(define (worker-fail why)
+  (display why)
+  (newline)
+  (error why))
+
+(define job-path (getenv "AURA_PERF_JOB"))
+
+(if (or (not (string? job-path)) (string=? job-path ""))
+    (worker-fail "AURA_PERF_JOB is unset")
+    #t)
+
+(define job (json-parse (perf:read-text job-path)))
+
+(if (not (hash? job))
+    (worker-fail "job json is not a hash")
+    #t)
+
+(define seed (perf:read-text (hash-ref job "seed" "")))
+(if (string=? seed "")
+    (worker-fail "seed text is empty")
+    #t)
+
+(set-code seed)
+(eval-current)
+
+(define target (hash-ref job "target" "bench-kernel"))
+(define genome (hash-ref job "genome" ""))
+(define ident (hash-ref job "id" "candidate"))
+(define heldout (perf:range (hash-ref job "heldout-n" 0)))
+(define repeats (hash-ref job "repeats" 3))
+
+(define (apply-candidate c)
+  (let ((rb (mutate:rebind target (hash-ref c "genome" "") "perf-trial")))
+    (if (eq? rb #t)
+        (begin (eval-current) #t)
+        rb)))
+
+(define cand
+  (evo:candidate genome
+                 (hash "target" target "thought" ident)))
+
+(define tr
+  (evo:trial cand
+             (hash "apply" apply-candidate
+                   "timeout-ms" (hash-ref job "timeout-ms" 60000)
+                   "evaluate"
+                   (lambda (c)
+                     (let ((chk (perf:check-kernel bench-kernel (perf:check-inputs))))
+                       (if (> (hash-ref chk "mismatches" 1) 0)
+                           (hash "objectives" (hash "heldout-ms" -1)
+                                 "constraints" (hash "checksum" (hash-ref chk "mismatches"))
+                                 "behavior" (hash "mismatches" (hash-ref chk "mismatches")
+                                                  "samples" '()))
+                           (let ((tm (perf:time-checked repeats bench-kernel heldout)))
+                             (hash "objectives" (hash "heldout-ms" (hash-ref tm "median"))
+                                   "constraints" (hash "checksum" (hash-ref tm "mismatches"))
+                                   "behavior" (hash "mismatches" (hash-ref tm "mismatches")
+                                                    "samples" (hash-ref tm "samples" '()))))))))))
+
+(define objs (hash-ref tr "objectives" (hash)))
+(define beh (hash-ref tr "behavior" (hash)))
+(define constraints (hash-ref tr "constraints" (hash)))
+(define mismatches (hash-ref beh "mismatches" (hash-ref constraints "checksum" -1)))
+(define status (hash-ref tr "status" "error"))
+(define checksum-ok
+  (if (and (string=? status "ok") (number? mismatches) (= mismatches 0)) 1 0))
+
+(define result
+  (hash "id" ident
+        "status" status
+        "checksum-ok" checksum-ok
+        "live-unchanged" (if (eq? (hash-ref tr "live-unchanged" #f) #t) 1 0)
+        "trial-applied" (if (eq? (hash-ref tr "trial-applied" #f) #t) 1 0)
+        "mismatches" (if (number? mismatches) mismatches -1)
+        "heldout-ms" (hash-ref objs "heldout-ms" -1)
+        "samples" (hash-ref beh "samples" '())
+        "dur-ms" (hash-ref tr "dur-ms" 0)
+        "error" (let ((e (hash-ref tr "error" #f)))
+                  (if (string? e) e ""))))
+
+(perf:write-text (hash-ref job "result" "") (json-encode result))
+(display ident)
+(display " ")
+(display status)
+(newline)

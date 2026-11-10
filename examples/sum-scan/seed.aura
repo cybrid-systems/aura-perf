@@ -1,0 +1,25 @@
+; Mutable workspace seed for the sum-scan example.
+; bench-kernel is the quadratic scan the search rewrites.
+; perf-strategy is itself a workspace define: the loop may rebind it.
+
+(define (k-length xs)
+  (length xs))
+
+(define (k-ref xs i)
+  (list-ref xs i))
+
+(define (bench-kernel xs)
+  (let ((n (k-length xs)))
+    (let loop ((i 0) (acc 0))
+      (if (>= i n)
+          acc
+          (loop (+ i 1) (+ acc (k-ref xs i)))))))
+
+(define (perf-strategy ctx)
+  (let ((child (hash-ref ctx "hot-child" "")))
+    (hash "rank" "self-ms"
+          "hotspot" child
+          "order" (if (string=? child "k-ref")
+                      (list "wrong-scale" "redundant-pass" "linear-scan")
+                      (list "linear-scan"))
+          "per-round" 2)))

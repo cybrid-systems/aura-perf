@@ -1,0 +1,78 @@
+; Optimization proposers.
+; perf:rule-propose is deterministic: it materializes the strategy's
+; ordered catalog ids and never reads the held-out input.
+; perf:llm-propose is the plug-in point for a model. It does not open a
+; network connection and does not read an API key.
+
+(export perf:rule-propose perf:llm-propose perf:strategy-source
+        perf:revise-order perf:order-of)
+
+(require "lib/perf/util" all:)
+
+(define (perf:catalog-get catalog id)
+  (let loop ((xs (if (list? catalog) catalog '())))
+    (if (null? xs)
+        #f
+        (if (and (hash? (car xs))
+                 (string=? (hash-ref (car xs) "id" "") id))
+            (car xs)
+            (loop (cdr xs))))))
+
+(define (perf:collect-order catalog order acc)
+  (if (null? order)
+      (reverse acc)
+      (let ((entry (perf:catalog-get catalog (car order))))
+        (perf:collect-order catalog
+                            (cdr order)
+                            (if entry (cons entry acc) acc)))))
+
+(define (perf:rule-propose catalog ctx)
+  (let* ((plan (if (and (hash? ctx) (hash? (hash-ref ctx "plan" #f)))
+                   (hash-ref ctx "plan")
+                   (hash)))
+         (order (let ((o (hash-ref plan "order" '())))
+                  (if (list? o) o '())))
+         (k (let ((n (hash-ref plan "per-round" 1)))
+              (if (and (number? n) (> n 0)) n 1))))
+    (perf:take (perf:collect-order catalog order '()) k)))
+
+(define (perf:llm-propose ctx)
+  (hash "ok" #f
+        "error" "no-provider"
+        "detail" "Plug-in for an external model. The example uses perf:rule-propose and does not call the network."
+        "candidates" '()))
+
+(define (perf:quote-ids ids)
+  (let loop ((xs ids) (acc ""))
+    (if (null? xs)
+        acc
+        (if (perf:safe-id? (car xs))
+            (loop (cdr xs) (string-append acc " \"" (car xs) "\""))
+            #f))))
+
+; New strategy source. Returns #f when an id is not a safe token.
+; The generated function still reads hot-child so the profile remains an
+; input, and the order is the part the search rewrites.
+(define (perf:strategy-source order per-round)
+  (let ((quoted (perf:quote-ids (if (list? order) order '())))
+        (k (if (and (number? per-round) (> per-round 0)) per-round 1)))
+    (if (not (string? quoted))
+        #f
+        (string-append
+          "(define (perf-strategy ctx)\n"
+          "  (let ((child (hash-ref ctx \"hot-child\" \"\")))\n"
+          "    (hash \"rank\" \"self-ms\"\n"
+          "          \"hotspot\" child\n"
+          "          \"order\" (list" quoted ")\n"
+          "          \"per-round\" " (number->string k) ")))\n"))))
+
+(define (perf:revise-order order failed)
+  (let loop ((xs (if (list? order) order '())) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (if (perf:member? failed (car xs))
+            (loop (cdr xs) acc)
+            (loop (cdr xs) (cons (car xs) acc))))))
+
+(define (perf:order-of plan)
+  (if (hash? plan) (hash-ref plan "order" '()) '()))

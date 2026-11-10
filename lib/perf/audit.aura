@@ -1,0 +1,43 @@
+; MutationRecord view over Aura's mutation audit log.
+; stats:get "query:mutation-audit-log" returns lines of the form
+;   seq=N fiber=N op=mutate:rebind target=N ... mutation_id=N ...
+; perf:mutation-records turns those lines into hashes.
+
+(export perf:parse-audit-line perf:mutation-records)
+
+(require "std/stats" all:)
+(require "std/string" all:)
+(require "lib/perf/util" all:)
+
+(define (perf:audit-value s)
+  (let ((n (perf:parse-number s)))
+    (if (number? n) n s)))
+
+(define (perf:parse-audit-line line)
+  (if (or (not (string? line)) (string=? (string-trim line) ""))
+      #f
+      (let ((toks (perf:tokens line)))
+        (if (null? toks)
+            #f
+            (let ((h (hash "kind" "mutation-record" "raw" line)))
+              (let loop ((ts toks))
+                (if (null? ts)
+                    h
+                    (let ((parts (string-split (car ts) "=")))
+                      (if (and (pair? parts) (pair? (cdr parts)))
+                          (hash-set! h (car parts)
+                                     (perf:audit-value (perf:join (cdr parts) "=")))
+                          #f)
+                      (loop (cdr ts))))))))))
+
+(define (perf:mutation-records)
+  (let ((raw (try (stats:get "query:mutation-audit-log") (catch (e) #f))))
+    (if (not (list? raw))
+        '()
+        (let loop ((xs raw) (acc '()))
+          (if (null? xs)
+              (reverse acc)
+              (let ((rec (if (string? (car xs))
+                             (perf:parse-audit-line (car xs))
+                             #f)))
+                (loop (cdr xs) (if rec (cons rec acc) acc))))))))

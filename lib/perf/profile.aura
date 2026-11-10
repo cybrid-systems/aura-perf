@@ -1,0 +1,358 @@
+; Profiler evidence as Aura data.
+; Live collection uses region timers (millisecond monotonic clock),
+; /proc/self/stat ticks, and engine:metrics. Linux perf and gprof are
+; used when they actually produce output; otherwise the tool status
+; records why they were not used. Parsers also run on saved text so the
+; perf/gprof path is testable without the binaries.
+
+(export perf:parse-perf-report perf:parse-perf-stat perf:parse-gprof
+        perf:parse-proc-stat perf:tool-status perf:read-proc
+        perf:engine-snap perf:collect perf:hottest perf:hot-child)
+
+(require "std/string" all:)
+(require "std/process" all:)
+(require "std/engine-metrics" all:)
+(require "lib/perf/util" all:)
+
+(define perf-event-names
+  (list "task-clock" "cycles" "instructions" "cache-references"
+        "cache-misses" "branches" "branch-misses" "context-switches"
+        "cpu-migrations" "page-faults"))
+
+(define (perf:event-name? t)
+  (perf:member? perf-event-names t))
+
+(define (perf:skip-report-line? line)
+  (or (string=? line "")
+      (string-prefix? (string-trim line) "#")))
+
+(define (perf:parse-perf-report text)
+  (if (not (string? text))
+      '()
+      (let loop ((lines (string-split text "\n")) (acc '()))
+        (if (null? lines)
+            (reverse acc)
+            (let ((line (car lines)))
+              (if (perf:skip-report-line? line)
+                  (loop (cdr lines) acc)
+                  (let ((toks (perf:tokens line)))
+                    (if (or (null? toks) (null? (cdr toks)))
+                        (loop (cdr lines) acc)
+                        (let ((pct (perf:parse-number (car toks)))
+                              (name (perf:nth toks (- (length toks) 1))))
+                          (if (and (number? pct) (string? name)
+                                   (not (perf:parse-number name)))
+                              (loop (cdr lines)
+                                    (cons (hash "name" name
+                                                "self-ms" pct
+                                                "incl-ms" pct
+                                                "calls" 0
+                                                "unit" "percent"
+                                                "source" "perf-report")
+                                          acc))
+                              (loop (cdr lines) acc)))))))))))
+
+(define (perf:prev-number toks idx)
+  (let loop ((i (- idx 1)))
+    (if (< i 0)
+        #f
+        (let ((n (perf:parse-number (perf:nth toks i))))
+          (if (number? n) n (loop (- i 1)))))))
+
+(define (perf:parse-perf-stat text)
+  (let ((h (hash)))
+    (if (not (string? text))
+        h
+        (let loop ((lines (string-split text "\n")))
+          (if (null? lines)
+              h
+              (let ((toks (perf:tokens (car lines))))
+                (let scan ((i 0))
+                  (if (< i (length toks))
+                      (begin
+                        (if (perf:event-name? (perf:nth toks i))
+                            (let ((n (perf:prev-number toks i)))
+                              (if (number? n)
+                                  (hash-set! h (perf:nth toks i) n)
+                                  #f))
+                            #f)
+                        (scan (+ i 1)))
+                      #f))
+                (loop (cdr lines))))))))
+
+(define (perf:header-tail? name)
+  (or (string=? name "name")
+      (string=? name "time")
+      (string=? name "self")
+      (string=? name "total")
+      (string=? name "calls")))
+
+(define (perf:symbol-start? name)
+  (and (string? name)
+       (> (string-length name) 0)
+       (let ((c (string-ref name 0)))
+         (or (and (>= c 65) (<= c 90))
+             (and (>= c 97) (<= c 122))))))
+
+(define (perf:parse-gprof text)
+  (if (not (string? text))
+      '()
+      (let loop ((lines (string-split text "\n")) (acc '()))
+        (if (null? lines)
+            (reverse acc)
+            (let ((toks (perf:tokens (car lines))))
+              (if (or (null? toks) (null? (cdr toks)))
+                  (loop (cdr lines) acc)
+                  (let ((name (perf:nth toks (- (length toks) 1)))
+                        (pct (perf:parse-number (car toks))))
+                    (if (and (perf:symbol-start? name)
+                             (not (perf:header-tail? name))
+                             (not (perf:parse-number name))
+                             (number? pct))
+                        (loop (cdr lines)
+                              (cons (hash "name" name
+                                          "self-ms" pct
+                                          "incl-ms" pct
+                                          "calls" 0
+                                          "unit" "percent"
+                                          "source" "gprof")
+                                    acc))
+                        (loop (cdr lines) acc)))))))))
+
+; /proc/self/stat: pid (comm) state ppid ... utime stime
+; utime is the 12th field after the closing paren of comm (0-based index 11).
+(define (perf:rparen text)
+  (let ((n (string-length text)))
+    (let loop ((i 0) (found -1))
+      (if (>= i n)
+          found
+          (loop (+ i 1) (if (= (string-ref text i) 41) i found))))))
+
+(define (perf:parse-proc-stat text)
+  (if (not (string? text))
+      #f
+      (let ((rp (perf:rparen text)))
+        (if (< rp 0)
+            #f
+            (let ((toks (perf:tokens (substring text (+ rp 1) (string-length text)))))
+              (let ((u (perf:parse-number (perf:nth toks 11)))
+                    (s (perf:parse-number (perf:nth toks 12))))
+                (if (and (number? u) (number? s))
+                    (hash "utime" u "stime" s)
+                    #f)))))))
+
+(define (perf:read-proc)
+  (perf:parse-proc-stat (perf:read-text "/proc/self/stat")))
+
+; std/string string-trim only strips ASCII space, not the newline read-file keeps.
+(define (perf:trim-ws s)
+  (if (not (string? s))
+      ""
+      (let ((n (string-length s)))
+        (let lo ((i 0))
+          (if (or (>= i n) (> (string-ref s i) 32))
+              (let hi ((j n))
+                (if (or (<= j i) (> (string-ref s (- j 1)) 32))
+                    (substring s i j)
+                    (hi (- j 1))))
+              (lo (+ i 1)))))))
+
+(define (perf:tool-status)
+  (let ((perf-bin (which "perf"))
+        (gprof-bin (which "gprof"))
+        (gmon (perf:read-text "gmon.out"))
+        (paranoid (perf:trim-ws (perf:read-text "/proc/sys/kernel/perf_event_paranoid"))))
+    (hash "perf" (if (and (string? perf-bin) (not (string=? perf-bin "")))
+                     perf-bin
+                     "missing")
+          "gprof" (if (and (string? gprof-bin) (not (string=? gprof-bin "")))
+                      gprof-bin
+                      "missing")
+          "gmon" (if (string=? gmon "") "no-gmon" "present")
+          "paranoid" paranoid)))
+
+(define (perf:engine-snap)
+  (let ((ev (engine-metrics:group "eval"))
+        (jt (engine-metrics:group "jit"))
+        (mu (engine-metrics:group "mutate")))
+    (hash "eval.hotpath_eval_flat_calls"
+          (hash-ref ev "hotpath_eval_flat_calls" 0)
+          "jit.jit_deopt_on_mutate_total"
+          (hash-ref jt "jit_deopt_on_mutate_total" 0)
+          "mutate.mutate_batches_started_total"
+          (hash-ref mu "mutate_batches_started_total" 0))))
+
+(define (perf:num h k)
+  (let ((v (hash-ref h k 0)))
+    (if (number? v) v 0)))
+
+(define (perf:region-time region repeats)
+  (let ((thunk (hash-ref region "thunk" #f))
+        (n (if (and (number? repeats) (> repeats 0)) repeats 1)))
+    (if (not thunk)
+        -1
+        (begin
+          (try (thunk) (catch (e) #f))
+          (let loop ((i 0) (samples '()))
+            (if (>= i n)
+                (perf:median-samples (reverse samples))
+                (let ((t0 (monotonic-ms)))
+                  (try (thunk) (catch (e) #f))
+                  (loop (+ i 1) (cons (- (monotonic-ms) t0) samples)))))))))
+
+(define (perf:median-samples samples)
+  (if (null? samples)
+      -1
+      (let ((xs (sort samples <)))
+        (list-ref xs (quotient (- (length xs) 1) 2)))))
+
+(define (perf:sum-self hs)
+  (let loop ((xs hs) (acc 0))
+    (if (null? xs)
+        acc
+        (loop (cdr xs) (+ acc (hash-ref (car xs) "self-ms" 0))))))
+
+(define (perf:with-share hs)
+  (let ((total (perf:sum-self hs)))
+    (let loop ((xs hs) (acc '()))
+      (if (null? xs)
+          (reverse acc)
+          (let* ((h (car xs))
+                 (ms (hash-ref h "self-ms" 0))
+                 (share (if (> total 0) (quotient (* ms 100) total) 0)))
+            (hash-set! h "share" share)
+            (loop (cdr xs) (cons h acc)))))))
+
+(define (perf:stacks-of hs)
+  (let loop ((xs hs) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (let ((h (car xs)))
+          (loop (cdr xs)
+                (cons (hash "frames" (hash-ref h "stack" (list (hash-ref h "name" "")))
+                            "self-ms" (hash-ref h "self-ms" 0)
+                            "name" (hash-ref h "name" ""))
+                      acc))))))
+
+(define (perf:counter-hash proc-before proc-after eng-before eng-after stat-counters)
+  (let ((h (hash))
+        (pb (if (hash? proc-before) proc-before (hash)))
+        (pa (if (hash? proc-after) proc-after (hash))))
+    (hash-set! h "proc.utime-ticks"
+               (- (perf:num pa "utime") (perf:num pb "utime")))
+    (hash-set! h "proc.stime-ticks"
+               (- (perf:num pa "stime") (perf:num pb "stime")))
+    (let loop ((ks (hash-keys eng-after)))
+      (if (null? ks)
+          #f
+          (begin
+            (hash-set! h (car ks)
+                       (- (perf:num eng-after (car ks))
+                          (perf:num eng-before (car ks))))
+            (loop (cdr ks)))))
+    (if (hash? stat-counters)
+        (let loop2 ((ks (hash-keys stat-counters)))
+          (if (null? ks)
+              h
+              (begin
+                (hash-set! h (string-append "perf." (car ks))
+                           (hash-ref stat-counters (car ks)))
+                (loop2 (cdr ks)))))
+        h)))
+
+(define (perf:notes tools)
+  (let ((perf-s (hash-ref tools "perf" "missing"))
+        (gprof-s (hash-ref tools "gprof" "missing"))
+        (gmon (hash-ref tools "gmon" "no-gmon")))
+    (list
+      (if (string=? perf-s "missing")
+          "perf: binary not on PATH; workload counters fall back to /proc self stat and engine:metrics"
+          "perf: binary found; perf stat counters are included only when a stat text was parsed")
+      (if (string=? gprof-s "missing")
+          "gprof: binary not on PATH"
+          (if (string=? gmon "no-gmon")
+              "gprof: binary present, no gmon.out in the working directory; gprof was not applied to this run"
+              "gprof: gmon.out present"))
+      "hotspots: independently timed regions (monotonic-ms). Shares are of that sum, not a hardware sample."
+      "stacks: caller chains declared with each region, not a sampled stack trace.")))
+
+(define (perf:maybe-gprof tools)
+  (if (and (string=? (hash-ref tools "gmon" "") "present")
+           (not (string=? (hash-ref tools "gprof" "") "missing")))
+      (let ((path (string-append "/tmp/aura-perf-gprof-" (number->string (monotonic-ms)) ".txt"))
+            (code (shell (string-append (hash-ref tools "gprof") " > " path " 2>/tmp/aura-perf-gprof.err"))))
+        (if (= code 0)
+            (perf:parse-gprof (perf:read-text path))
+            '()))
+      '()))
+
+(define (perf:collect regions opts)
+  (let* ((o (if (hash? opts) opts (hash)))
+         (repeats (let ((n (hash-ref o "repeats" 3)))
+                    (if (and (number? n) (> n 0)) n 3)))
+         (tools (perf:tool-status))
+         (eng-before (perf:engine-snap))
+         (proc-before (perf:read-proc))
+         (t0 (monotonic-ms))
+         (raw (let loop ((xs (if (list? regions) regions '())) (acc '()))
+                (if (null? xs)
+                    (reverse acc)
+                    (let ((r (car xs)))
+                      (loop (cdr xs)
+                            (cons (hash "name" (hash-ref r "name" "region")
+                                        "self-ms" (perf:region-time r repeats)
+                                        "incl-ms" 0
+                                        "calls" (hash-ref r "calls" 1)
+                                        "stack" (hash-ref r "stack" (list (hash-ref r "name" "region")))
+                                        "unit" "ms"
+                                        "source" "region-timer"
+                                        "workload" (eq? (hash-ref r "workload" #f) #t))
+                                  acc))))))
+         (t1 (monotonic-ms))
+         (eng-after (perf:engine-snap))
+         (proc-after (perf:read-proc))
+         (hs (perf:with-share raw))
+         (gprof-hs (perf:maybe-gprof tools))
+         (merged (if (null? gprof-hs) hs (append hs gprof-hs))))
+    (let loop ((xs merged))
+      (if (null? xs)
+          #f
+          (begin
+            (hash-set! (car xs) "incl-ms" (hash-ref (car xs) "self-ms" 0))
+            (loop (cdr xs)))))
+    (hash "kind" "perf-profile"
+          "tool" "region-timer"
+          "tools" tools
+          "hotspots" merged
+          "stacks" (perf:stacks-of merged)
+          "counters" (perf:counter-hash proc-before proc-after eng-before eng-after #f)
+          "elapsed-ms" (- t1 t0)
+          "notes" (perf:notes tools))))
+
+(define (perf:hottest profile)
+  (let ((hs (if (hash? profile) (hash-ref profile "hotspots" '()) '())))
+    (let loop ((xs hs) (best "") (best-ms -1))
+      (if (null? xs)
+          best
+          (let* ((h (car xs))
+                 (ms (hash-ref h "self-ms" 0)))
+            (if (and (string=? (hash-ref h "source" "") "region-timer")
+                     (> ms best-ms))
+                (loop (cdr xs) (hash-ref h "name" "") ms)
+                (loop (cdr xs) best best-ms)))))))
+
+; Hottest region whose declared stack has a caller. This is the child
+; the strategy uses to pick a mutation family.
+(define (perf:hot-child profile)
+  (let ((hs (if (hash? profile) (hash-ref profile "hotspots" '()) '())))
+    (let loop ((xs hs) (best "") (best-ms -1))
+      (if (null? xs)
+          best
+          (let* ((h (car xs))
+                 (stack (hash-ref h "stack" '()))
+                 (ms (hash-ref h "self-ms" 0)))
+            (if (and (string=? (hash-ref h "source" "") "region-timer")
+                     (list? stack) (pair? stack) (pair? (cdr stack))
+                     (> ms best-ms))
+                (loop (cdr xs) (hash-ref h "name" "") ms)
+                (loop (cdr xs) best best-ms)))))))

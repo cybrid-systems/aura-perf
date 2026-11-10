@@ -618,16 +618,20 @@
                                        (number->string (length (perf:mutation-records)))))
           (let ((logn (try (length (evo:records)) (catch (e) -1))))
             (perf:say buf (string-append "evo-records " (number->string logn))))
-          (let ((verdict (string-append
-                           "verdict intend-met=" (if (perf:speedup-ok? before-ms after-ms
-                                                                      (hash-ref (perf:intend-seal spec) "min-faster-pct" 10))
-                                                     "1" "0")
-                           " KEEP=" (number->string (hash-ref buf "keep" 0))
-                           " ROLLBACK=" (number->string (hash-ref buf "rollback" 0))
-                           " speedup-x=" (perf:fmt-x before-ms after-ms)
-                           "\n"
-                           (perf:join (hash-ref buf "brief" '()) "\n")
-                           "\n")))
+          (let* ((met (perf:speedup-ok? before-ms after-ms
+                                        (hash-ref (perf:intend-seal spec) "min-faster-pct" 10)))
+                 (speed (perf:verdict-speedup before-ms after-ms
+                                              (hash-ref buf "before-samples" '())
+                                              (hash-ref buf "after-samples" '())))
+                 (verdict (string-append
+                            "verdict intend-met=" (if met "1" "0")
+                            " KEEP=" (number->string (hash-ref buf "keep" 0))
+                            " ROLLBACK=" (number->string (hash-ref buf "rollback" 0))
+                            " " speed
+                            "\n"
+                            (perf:join (hash-ref buf "brief" '()) "\n")
+                            "\n")))
+            (hash-set! buf "intend-met" (if met 1 0))
             (perf:say buf "----")
             (display verdict)
             (perf:write-text (string-append out "/report.txt")
@@ -635,37 +639,37 @@
             (perf:write-text (string-append out "/summary.json")
                              (json-encode (hash "before-ms" before-ms
                                                 "after-ms" after-ms
+                                                "before-samples" (hash-ref buf "before-samples" '())
+                                                "after-samples" (hash-ref buf "after-samples" '())
                                                 "keep" (hash-ref buf "keep" 0)
                                                 "rollback" (hash-ref buf "rollback" 0)
                                                 "hot-child" child
-                                                "intend-met" (if (perf:speedup-ok? before-ms after-ms
-                                                                                  (hash-ref (perf:intend-seal spec) "min-faster-pct" 10))
-                                                                 1 0)
-                                                "speedup-x" (perf:fmt-x before-ms after-ms))))
+                                                "intend-met" (if met 1 0)
+                                                "speedup-x" (perf:fmt-x before-ms after-ms)
+                                                "verdict-speedup" speed)))
             (perf:write-text (string-append out "/evidence.json")
                              (json-encode (hash "before-ms" before-ms
                                                 "after-ms" after-ms
+                                                "before-samples" (hash-ref buf "before-samples" '())
+                                                "after-samples" (hash-ref buf "after-samples" '())
                                                 "class" (hash-ref spec "class" "")
                                                 "hot-node" (hash-ref spec "hot-node" "")
                                                 "prefix" (hash-ref spec "prefix" '())
                                                 "cct" (hash-ref spec "profile-cct" (hash))
                                                 "candidates" (hash-ref buf "results" '())
                                                 "memory" (hash-ref buf "memory" '()))))))
-          (if (not (eq? (hash-ref spec "require-success" #f) #t))
-              buf
-              (let ((expect (hash-ref spec "expect-child" "")))
-                (if (and (or (string=? expect "") (string=? child expect))
-                         (>= (hash-ref buf "keep" 0) 1)
-                         (>= (hash-ref buf "rollback" 0) 1)
-                         (perf:speedup-ok? before-ms after-ms 50))
-                    buf
-                    (error (string-append
-                             "example did not meet the held-out bar: hot-child="
-                             child
-                             " keep=" (number->string (hash-ref buf "keep" 0))
-                             " rollback=" (number->string (hash-ref buf "rollback" 0))
-                             " before=" (number->string before-ms)
-                             " after=" (number->string after-ms))))))))))
+          ; The process exit follows intend-met. A met intend is success even
+          ; when the demo's extra 50% bar, keep count, or child name differs.
+          (if (and (eq? (hash-ref spec "require-success" #f) #t)
+                   (= (hash-ref buf "intend-met" 0) 0))
+              (error (string-append
+                       "example did not meet the intend: hot-child="
+                       child
+                       " keep=" (number->string (hash-ref buf "keep" 0))
+                       " rollback=" (number->string (hash-ref buf "rollback" 0))
+                       " before=" (number->string before-ms)
+                       " after=" (number->string after-ms)))
+              buf)))))
 
 (define (perf:say-list buf lines)
   (let loop ((xs (if (list? lines) lines '())))

@@ -29,8 +29,8 @@ jobs:
           else
             echo "perf binary not usable on this kernel" | tee perf-unavailable.txt
           fi
-      - name: Parser, query, proposer, gate, and CCT tests
-        run: aura test
+      - name: Parser, query, proposer, gate, CCT, and exit-code tests
+        run: ./run.sh test
       - name: Autotune the sum-scan target
         run: ./run.sh autotune
         env:

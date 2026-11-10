@@ -1,5 +1,14 @@
+(require "lib/perf/util" all:)
 (require "lib/perf/sysinfo" all:)
 (require "lib/perf/layers" all:)
+
+; Gate before the parsers. On Aura main the second named-let call returns
+; the first call's result and a later string-ref walks off the token
+; (https://github.com/cybrid-systems/aura/issues/5116). Failing here names
+; that build. When the probe passes, the assertions below still run.
+(if (perf:named-let-reentrant?)
+    #t
+    (error (perf:named-let-fault-text)))
 
 (define info-text
   "processor\t: 0\n\

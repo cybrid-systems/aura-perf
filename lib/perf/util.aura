@@ -3,9 +3,73 @@
 
 (export perf:tokens perf:parse-number perf:read-text perf:write-text
         perf:join perf:take perf:member? perf:safe-id? perf:fmt-x
-        perf:nth perf:string-ref-ok?)
+        perf:nth perf:string-ref-ok? perf:char-at
+        perf:named-let-reentrant? perf:named-let-fault-text
+        perf:verdict-speedup)
 
 (require "std/string" all:)
+
+; Bounds check used by every parser walk. On Aura main a named let is not
+; reentrant (https://github.com/cybrid-systems/aura/issues/5116): the second
+; call keeps the first call's captured length and string-ref walks off the
+; token. Report that, instead of an index error at the string literal.
+; A real out-of-bounds on a reentrant build stays an index error.
+(define (perf:string-ref-ok? s i)
+  (and (string? s) (number? i) (>= i 0) (< i (string-length s))))
+
+; The detector itself is a named let. Plain recursion is unaffected and
+; would hide the regression. 0+1+2 = 3, 0+..+6 = 21, 0+1 = 1.
+(define (perf:sum-named n)
+  (let loop ((i 0) (acc 0))
+    (if (>= i n) acc (loop (+ i 1) (+ acc i)))))
+
+(define (perf:named-let-status)
+  (let ((a (perf:sum-named 3))
+        (b (perf:sum-named 7))
+        (c (perf:sum-named 2)))
+    (hash "ok" (and (= a 3) (= b 21) (= c 1))
+          "a" a "b" b "c" c)))
+
+; Measured once, at load, outside any other named let. A probe run from
+; inside a stale loop can itself come back clean, and the index error
+; would look like a parser bug again.
+(define perf-named-let-status (perf:named-let-status))
+
+(define (perf:named-let-reentrant?)
+  (eq? (hash-ref perf-named-let-status "ok" #f) #t))
+
+(define (perf:aura-build-text)
+  (let ((v (getenv "AURA_PERF_BUILD")))
+    (if (and (string? v) (> (string-length v) 0))
+        v
+        "unknown")))
+
+(define (perf:named-let-fault-text)
+  (let ((s perf-named-let-status))
+    (string-append
+      "Aura named-let is not reentrant on this build "
+      "(second call returned the first call's result). "
+      "aura build: " (perf:aura-build-text) ". "
+      "supported: Aura v0.2.0 (nightly cf7353373). "
+      "upstream: https://github.com/cybrid-systems/aura/issues/5116. "
+      "got (sum 3) (sum 7) (sum 2) = "
+      (number->string (hash-ref s "a" -1)) " "
+      (number->string (hash-ref s "b" -1)) " "
+      (number->string (hash-ref s "c" -1))
+      ", expected 3 21 1. "
+      "This is an Aura value-semantics regression, not an aura-perf parser bug.")))
+
+(define (perf:char-at s i)
+  (if (perf:string-ref-ok? s i)
+      (string-ref s i)
+      (if (perf:named-let-reentrant?)
+          (error (string-append "string-ref: index out of bounds i="
+                                (number->string (if (number? i) i -1))
+                                " len=" (number->string (if (string? s) (string-length s) -1))))
+          (error (string-append
+                   (perf:named-let-fault-text)
+                   " string-ref i=" (number->string (if (number? i) i -1))
+                   " len=" (number->string (if (string? s) (string-length s) -1)))))))
 
 (define (perf:tokens s)
   (if (string? s) (string-split-words s) '()))
@@ -15,7 +79,7 @@
     (let loop ((i 0) (acc ""))
       (if (>= i n)
           acc
-          (let ((c (string-ref t i)))
+          (let ((c (perf:char-at t i)))
             ; drop commas and a trailing percent sign
             (if (or (= c 44) (= c 37))
                 (loop (+ i 1) acc)
@@ -66,9 +130,6 @@
           ((= n i) (car ys))
           (else (loop (cdr ys) (+ n 1))))))
 
-(define (perf:string-ref-ok? s i)
-  (and (string? s) (>= i 0) (< i (string-length s))))
-
 ; Identifiers we splice into generated Aura source.
 (define (perf:safe-id? s)
   (if (not (string? s))
@@ -79,7 +140,7 @@
             (let loop ((i 0))
               (if (>= i n)
                   #t
-                  (let ((c (string-ref s i)))
+                  (let ((c (perf:char-at s i)))
                     (if (or (and (>= c 48) (<= c 57))
                             (and (>= c 65) (<= c 90))
                             (and (>= c 97) (<= c 122))
@@ -99,3 +160,53 @@
         (string-append (number->string whole) "."
                        (if (< (string-length frac-s) 2) "0" "")
                        frac-s))))
+
+; max(samples) - min(samples). Plain recursion: a named let here would
+; itself be wrong on the Aura main regression this line is meant to show.
+(define (perf:spread-walk ys lo hi)
+  (if (or (not (list? ys)) (null? ys))
+      (- hi lo)
+      (let ((v (car ys)))
+        (if (not (number? v))
+            #f
+            (perf:spread-walk (cdr ys)
+                              (if (< v lo) v lo)
+                              (if (> v hi) v hi))))))
+
+(define (perf:spread xs)
+  (if (or (not (list? xs)) (null? xs) (not (number? (car xs))))
+      #f
+      (perf:spread-walk (cdr xs) (car xs) (car xs))))
+
+(define (perf:sample-n xs)
+  (if (list? xs) (length xs) 0))
+
+; Medians behind the ratio, the sample count, and the max-min spread.
+; before-ms and after-ms are the medians the ratio was computed from.
+(define (perf:speedup-context before-ms after-ms before-samples after-samples)
+  (if (or (not (number? before-ms)) (not (number? after-ms))
+          (< before-ms 0) (< after-ms 0))
+      ""
+      (let ((bn (perf:sample-n before-samples))
+            (an (perf:sample-n after-samples))
+            (bs (perf:spread before-samples))
+            (as (perf:spread after-samples)))
+        (string-append
+          " (" (number->string before-ms) "ms->" (number->string after-ms) "ms"
+          (cond ((and (> bn 0) (= bn an))
+                 (string-append " n=" (number->string bn)))
+                ((and (> bn 0) (> an 0))
+                 (string-append " n=" (number->string bn) "/" (number->string an)))
+                ((> bn 0) (string-append " n=" (number->string bn)))
+                ((> an 0) (string-append " n=" (number->string an)))
+                (else ""))
+          (if (and (number? bs) (number? as))
+              (string-append " spread=" (number->string bs)
+                             "->" (number->string as) "ms")
+              "")
+          ")"))))
+
+(define (perf:verdict-speedup before-ms after-ms before-samples after-samples)
+  (string-append "speedup-x=" (perf:fmt-x before-ms after-ms)
+                 (perf:speedup-context before-ms after-ms
+                                       before-samples after-samples)))

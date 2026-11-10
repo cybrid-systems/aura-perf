@@ -87,5 +87,9 @@
                              (number->string (hash-ref r "intend-met" 0))
                              " KEEP=" (number->string (hash-ref r "keep" 0))
                              " ROLLBACK=" (number->string (hash-ref r "rollback" 0))
-                             " speedup-x=" (hash-ref r "speedup-x" "na"))
+                             " " (perf:verdict-speedup
+                                   (hash-ref evidence "before-ms" -1)
+                                   (hash-ref evidence "after-ms" -1)
+                                   (hash-ref evidence "before-samples" '())
+                                   (hash-ref evidence "after-samples" '())))
               (hash-ref r "lines" '())))))

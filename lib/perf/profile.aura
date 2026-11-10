@@ -142,7 +142,7 @@
 (define (perf:symbol-start? name)
   (and (string? name)
        (> (string-length name) 0)
-       (let ((c (string-ref name 0)))
+       (let ((c (perf:char-at name 0)))
          (or (and (>= c 65) (<= c 90))
              (and (>= c 97) (<= c 122))))))
 
@@ -178,7 +178,7 @@
     (let loop ((i 0) (found -1))
       (if (>= i n)
           found
-          (loop (+ i 1) (if (= (string-ref text i) 41) i found))))))
+          (loop (+ i 1) (if (= (perf:char-at text i) 41) i found))))))
 
 (define (perf:parse-proc-stat text)
   (if (not (string? text))
@@ -202,9 +202,9 @@
       ""
       (let ((n (string-length s)))
         (let lo ((i 0))
-          (if (or (>= i n) (> (string-ref s i) 32))
+          (if (or (>= i n) (> (perf:char-at s i) 32))
               (let hi ((j n))
-                (if (or (<= j i) (> (string-ref s (- j 1)) 32))
+                (if (or (<= j i) (> (perf:char-at s (- j 1)) 32))
                     (substring s i j)
                     (hi (- j 1))))
               (lo (+ i 1)))))))

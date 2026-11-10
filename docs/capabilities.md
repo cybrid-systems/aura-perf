@@ -72,7 +72,7 @@ intend 本身是 hash，不是 prompt 里的愿望：
 
 和 PerfAgent 一类外层脚本的差别：没有第二套 Python 循环在「人盯着」推下一轮。策略顺序、保护边界、门限都在这次进程的 workspace 和 spec 里，审计能回溯。
 
-度量：`intend-met`、`budget-used`、`decisions KEEP/ROLLBACK`、held-out 前后中位。
+度量：`intend-met`、`budget-used`、`decisions KEEP/ROLLBACK`、held-out 前后中位。结论行把两次中位、样本数和极差写在比值后面，例如 `speedup-x=81.25 (325ms->4ms n=5 spread=120->0ms)`。进程退出码跟 `intend-met` 一致：成立是 0，不成立非 0。
 
 依赖：`evo:trial`、`ast:snapshot` / `ast:restore`、`mutate:rebind`、`evo:record!`。
 

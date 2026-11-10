@@ -4,6 +4,8 @@
 (define evidence
   (hash "before-ms" 100
         "after-ms" 40
+        "before-samples" (list 80 90 100 120 130)
+        "after-samples" (list 38 40 40 40 42)
         "cct" (hash "kind" "perf-cct" "nodes" '())
         "candidates"
         (list (hash "id" "wrong-scale" "target" "bench-kernel" "status" "ok"

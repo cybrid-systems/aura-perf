@@ -1,0 +1,10 @@
+; Named-let reentrancy probe. Aura main (regression from #5102) returns
+; the first call's result from every later call of the same loop.
+; https://github.com/cybrid-systems/aura/issues/5116
+; Supported build: Aura v0.2.0, nightly cf7353373.
+
+(require "lib/perf/util" all:)
+
+(if (perf:named-let-reentrant?)
+    (display "named-let-reentrant\n")
+    (error (perf:named-let-fault-text)))

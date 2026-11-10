@@ -8,4 +8,10 @@ cd "$(dirname "$0")/.."
 mkdir -p out/jobs out/trials
 export AURA_SANDBOX=off
 export AURA_EVO_LOG="${AURA_EVO_LOG:-$PWD/out/evo.jsonl}"
+if [ -z "${PERF_BIN:-}" ]; then
+  PERF_BIN="$(sh scripts/find-perf.sh 2>/dev/null || true)"
+  if [ -n "$PERF_BIN" ]; then
+    export PERF_BIN
+  fi
+fi
 exec aura --preset dev --grant exec examples/sum-scan/main.aura

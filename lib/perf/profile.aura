@@ -6,18 +6,21 @@
 ; perf/gprof path is testable without the binaries.
 
 (export perf:parse-perf-report perf:parse-perf-stat perf:parse-gprof
-        perf:parse-proc-stat perf:tool-status perf:read-proc
-        perf:engine-snap perf:collect perf:hottest perf:hot-child)
+        perf:parse-proc-stat perf:unsupported-events perf:record-samples
+        perf:select-child perf:find-bin perf:tool-status perf:read-proc
+        perf:engine-snap perf:collect perf:hottest perf:hot-child
+        perf:measure-live)
 
 (require "std/string" all:)
 (require "std/process" all:)
 (require "std/engine-metrics" all:)
 (require "lib/perf/util" all:)
+(require "lib/perf/cct" all:)
 
 (define perf-event-names
-  (list "task-clock" "cycles" "instructions" "cache-references"
+  (list "task-clock" "cpu-clock" "cycles" "instructions" "cache-references"
         "cache-misses" "branches" "branch-misses" "context-switches"
-        "cpu-migrations" "page-faults"))
+        "cpu-migrations" "page-faults" "minor-faults" "major-faults"))
 
 (define (perf:event-name? t)
   (perf:member? perf-event-names t))
@@ -79,6 +82,55 @@
                         (scan (+ i 1)))
                       #f))
                 (loop (cdr lines))))))))
+
+; Lines like "<not supported>      cycles". The wrapper splits on spaces,
+; so the event name is the last token.
+(define (perf:unsupported-events text)
+  (if (not (string? text))
+      '()
+      (let loop ((lines (string-split text "\n")) (acc '()))
+        (if (null? lines)
+            (reverse acc)
+            (let ((line (car lines)))
+              (if (not (string-contains? line "not supported"))
+                  (loop (cdr lines) acc)
+                  (let ((toks (perf:tokens line)))
+                    (let ((name (if (null? toks) "" (perf:nth toks (- (length toks) 1)))))
+                      (if (and (string? name) (perf:event-name? name)
+                               (not (perf:member? acc name)))
+                          (loop (cdr lines) (append acc (list name)))
+                          (loop (cdr lines) acc))))))))))
+
+; "# Samples: 41  of event 'cpu-clock'"
+; Skip "Total Lost Samples: 0", which also ends in Samples: <number>.
+(define (perf:record-samples text)
+  (if (not (string? text))
+      -1
+      (let loop ((lines (string-split text "\n")))
+        (if (null? lines)
+            -1
+            (let scan ((toks (perf:tokens (car lines))) (prev ""))
+              (cond ((null? toks) (loop (cdr lines)))
+                    ((and (string=? (car toks) "Samples:")
+                          (not (string=? prev "Lost"))
+                          (pair? (cdr toks)))
+                     (let ((n (perf:parse-number (car (cdr toks)))))
+                       (if (number? n) n (loop (cdr lines)))))
+                    (else (scan (cdr toks) (car toks)))))))))
+
+; Among user defines that have a caller, the one with the largest
+; perf task-clock is the hotspot the strategy should edit.
+(define (perf:select-child rows)
+  (let loop ((xs (if (list? rows) rows '())) (best "") (best-ms -1))
+    (if (null? xs)
+        best
+        (let* ((h (car xs))
+               (stack (hash-ref h "stack" '()))
+               (ms (hash-ref h "task-clock" -1)))
+          (if (and (list? stack) (pair? stack) (pair? (cdr stack))
+                   (number? ms) (> ms best-ms))
+              (loop (cdr xs) (hash-ref h "name" "") ms)
+              (loop (cdr xs) best best-ms))))))
 
 (define (perf:header-tail? name)
   (or (string=? name "name")
@@ -157,19 +209,104 @@
                     (hi (- j 1))))
               (lo (+ i 1)))))))
 
+(define perf-stat-events
+  "task-clock,cpu-clock,context-switches,cpu-migrations,page-faults,minor-faults,major-faults,cycles,instructions,cache-references,cache-misses,branches,branch-misses")
+
+(define (perf:find-bin)
+  (let ((out "/tmp/aura-perf-which.txt"))
+    (shell (string-append "sh scripts/find-perf.sh > " out " 2>/dev/null"))
+    (let ((s (perf:trim-ws (perf:read-text out))))
+      (if (string=? s "") #f s))))
+
 (define (perf:tool-status)
-  (let ((perf-bin (which "perf"))
+  (let ((perf-bin (perf:find-bin))
         (gprof-bin (which "gprof"))
         (gmon (perf:read-text "gmon.out"))
         (paranoid (perf:trim-ws (perf:read-text "/proc/sys/kernel/perf_event_paranoid"))))
-    (hash "perf" (if (and (string? perf-bin) (not (string=? perf-bin "")))
-                     perf-bin
-                     "missing")
+    (hash "perf" (if (string? perf-bin) perf-bin "missing")
           "gprof" (if (and (string? gprof-bin) (not (string=? gprof-bin "")))
                       gprof-bin
                       "missing")
           "gmon" (if (string=? gmon "") "no-gmon" "present")
           "paranoid" paranoid)))
+
+(define (perf:stat-text bin command outfile)
+  (shell (string-append bin " stat -e " perf-stat-events
+                        " -o " outfile " -- " command
+                        " >/tmp/aura-perf-stat.stdout 2>/tmp/aura-perf-stat.stderr"))
+  (perf:read-text outfile))
+
+(define (perf:profile-targets bin targets)
+  (let loop ((xs (if (list? targets) targets '())) (rows '()) (unsup '()) (bench #f))
+    (if (null? xs)
+        (let* ((child (perf:select-child rows))
+               (rec (perf:record-target bin targets)))
+          (hash "rows" (reverse rows)
+                "child" child
+                "unsupported" unsup
+                "bench" bench
+                "record-samples" (hash-ref rec "samples" -1)
+                "record-event" (hash-ref rec "event" "")))
+        (let* ((t (car xs))
+               (name (hash-ref t "name" "region"))
+               (outfile (string-append "/tmp/aura-perf-stat-" name ".txt"))
+               (text (perf:stat-text bin (hash-ref t "command" "true") outfile))
+               (counters (perf:parse-perf-stat text))
+               (row (hash "name" name
+                          "task-clock" (hash-ref counters "task-clock" -1)
+                          "cpu-clock" (hash-ref counters "cpu-clock" -1)
+                          "page-faults" (hash-ref counters "page-faults" -1)
+                          "stack" (hash-ref t "stack" (list name))
+                          "calls" (hash-ref t "calls" 1)
+                          "counters" counters)))
+          (loop (cdr xs)
+                (cons row rows)
+                (perf:union-names unsup (perf:unsupported-events text))
+                (if (eq? (hash-ref t "workload" #f) #t) counters bench))))))
+
+(define (perf:union-names a b)
+  (let loop ((xs (if (list? b) b '())) (acc (if (list? a) a '())))
+    (if (null? xs)
+        acc
+        (if (perf:member? acc (car xs))
+            (loop (cdr xs) acc)
+            (loop (cdr xs) (append acc (list (car xs))))))))
+
+(define (perf:record-target bin targets)
+  (let ((cmd (let loop ((xs (if (list? targets) targets '())))
+               (cond ((null? xs) #f)
+                     ((eq? (hash-ref (car xs) "workload" #f) #t)
+                      (hash-ref (car xs) "command" #f))
+                     (else (loop (cdr xs)))))))
+    (if (not (string? cmd))
+        (hash "samples" -1 "event" "")
+        (begin
+          (shell (string-append "mkdir -p out && " bin
+                                " record -e cpu-clock -F 199 -o out/perf.data -- "
+                                cmd
+                                " >/tmp/aura-perf-record.stdout 2>/tmp/aura-perf-record.stderr"))
+          (shell (string-append bin
+                                " report -i out/perf.data --stdio --no-children"
+                                " -F overhead,sample > out/perf-report.txt 2>/tmp/aura-perf-report.stderr"))
+          (hash "samples" (perf:record-samples (perf:read-text "out/perf-report.txt"))
+                "event" "cpu-clock")))))
+
+; Attach perf stat to this process and run thunk while the window is open.
+; task-clock is the target work's CPU time, not a fixed sleep.
+(define (perf:measure-live bin thunk)
+  (if (not (string? bin))
+      (hash)
+      (let ((pid (car (perf:tokens (perf:read-text "/proc/self/stat"))))
+            (outf "/tmp/aura-perf-live.txt"))
+        (shell (string-append "rm -f " outf "; " bin
+                              " stat -p " pid
+                              " -e task-clock,cpu-clock,page-faults,context-switches"
+                              " -o " outf
+                              " -- sleep 1.2 >/tmp/aura-perf-live.err 2>&1 &"))
+        (shell "sleep 0.15")
+        (try (thunk) (catch (e) #f))
+        (shell "sleep 1.2")
+        (perf:parse-perf-stat (perf:read-text outf)))))
 
 (define (perf:engine-snap)
   (let ((ev (engine-metrics:group "eval"))
@@ -260,21 +397,25 @@
                 (loop2 (cdr ks)))))
         h)))
 
-(define (perf:notes tools)
+(define (perf:notes tools perf-info)
   (let ((perf-s (hash-ref tools "perf" "missing"))
         (gprof-s (hash-ref tools "gprof" "missing"))
-        (gmon (hash-ref tools "gmon" "no-gmon")))
+        (gmon (hash-ref tools "gmon" "no-gmon"))
+        (unsup (if (hash? perf-info) (hash-ref perf-info "unsupported" '()) '())))
     (list
       (if (string=? perf-s "missing")
-          "perf: binary not on PATH; workload counters fall back to /proc self stat and engine:metrics"
-          "perf: binary found; perf stat counters are included only when a stat text was parsed")
+          "perf: no usable binary (the /usr/bin/perf wrapper often rejects a newer kernel). Target hotspots fall back to region timers."
+          (string-append "perf: using " perf-s " on the target program, not on the Aura interpreter"))
+      (if (null? unsup)
+          "perf: requested hardware events were accepted"
+          (string-append "perf: events not supported on this kernel: " (perf:join unsup ",")))
       (if (string=? gprof-s "missing")
           "gprof: binary not on PATH"
           (if (string=? gmon "no-gmon")
-              "gprof: binary present, no gmon.out in the working directory; gprof was not applied to this run"
+              "gprof: binary present, no gmon.out; gprof was not applied to this run"
               "gprof: gmon.out present"))
-      "hotspots: independently timed regions (monotonic-ms). Shares are of that sum, not a hardware sample."
-      "stacks: caller chains declared with each region, not a sampled stack trace.")))
+      "hotspots: user defines of the target program. When perf stat ran, the callee with the highest task-clock is the one the strategy edits."
+      "stacks: caller chains of those defines. perf record samples confirm the target process was sampled; interpreter frames are not used as hotspot names.")))
 
 (define (perf:maybe-gprof tools)
   (if (and (string=? (hash-ref tools "gmon" "") "present")
@@ -313,7 +454,16 @@
          (proc-after (perf:read-proc))
          (hs (perf:with-share raw))
          (gprof-hs (perf:maybe-gprof tools))
-         (merged (if (null? gprof-hs) hs (append hs gprof-hs))))
+         (region-hs (if (null? gprof-hs) hs (append hs gprof-hs)))
+         (bin (hash-ref tools "perf" "missing"))
+         (targets (hash-ref o "targets" '()))
+         (pinfo (if (and (string? bin) (not (string=? bin "missing")) (pair? targets))
+                    (perf:profile-targets bin targets)
+                    (hash "rows" '() "child" "" "unsupported" '() "bench" #f
+                          "record-samples" -1 "record-event" "")))
+         (cct (perf:cct-build (hash-ref pinfo "rows" '())))
+         (phs (perf:perf-hotspots (hash-ref pinfo "rows" '())))
+         (merged (append region-hs phs)))
     (let loop ((xs merged))
       (if (null? xs)
           #f
@@ -321,13 +471,35 @@
             (hash-set! (car xs) "incl-ms" (hash-ref (car xs) "self-ms" 0))
             (loop (cdr xs)))))
     (hash "kind" "perf-profile"
-          "tool" "region-timer"
+          "tool" (if (string=? (hash-ref pinfo "child" "") "")
+                     "region-timer"
+                     "perf-stat")
           "tools" tools
           "hotspots" merged
           "stacks" (perf:stacks-of merged)
-          "counters" (perf:counter-hash proc-before proc-after eng-before eng-after #f)
+          "counters" (perf:counter-hash proc-before proc-after eng-before eng-after
+                                       (hash-ref pinfo "bench" #f))
           "elapsed-ms" (- t1 t0)
-          "notes" (perf:notes tools))))
+          "perf-child" (hash-ref pinfo "child" "")
+          "cct" cct
+          "perf" pinfo
+          "notes" (perf:notes tools pinfo))))
+
+(define (perf:perf-hotspots rows)
+  (let loop ((xs (if (list? rows) rows '())) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (let ((r (car xs)))
+          (loop (cdr xs)
+                (cons (hash "name" (hash-ref r "name" "")
+                            "self-ms" (hash-ref r "task-clock" 0)
+                            "incl-ms" (hash-ref r "task-clock" 0)
+                            "calls" (hash-ref r "calls" 1)
+                            "share" 0
+                            "stack" (hash-ref r "stack" '())
+                            "unit" "ms"
+                            "source" "perf-stat")
+                      acc))))))
 
 (define (perf:hottest profile)
   (let ((hs (if (hash? profile) (hash-ref profile "hotspots" '()) '())))
@@ -344,15 +516,18 @@
 ; Hottest region whose declared stack has a caller. This is the child
 ; the strategy uses to pick a mutation family.
 (define (perf:hot-child profile)
-  (let ((hs (if (hash? profile) (hash-ref profile "hotspots" '()) '())))
-    (let loop ((xs hs) (best "") (best-ms -1))
-      (if (null? xs)
-          best
-          (let* ((h (car xs))
-                 (stack (hash-ref h "stack" '()))
-                 (ms (hash-ref h "self-ms" 0)))
-            (if (and (string=? (hash-ref h "source" "") "region-timer")
-                     (list? stack) (pair? stack) (pair? (cdr stack))
-                     (> ms best-ms))
-                (loop (cdr xs) (hash-ref h "name" "") ms)
-                (loop (cdr xs) best best-ms)))))))
+  (let ((chosen (if (hash? profile) (hash-ref profile "perf-child" "") "")))
+    (if (and (string? chosen) (not (string=? chosen "")))
+        chosen
+        (let ((hs (if (hash? profile) (hash-ref profile "hotspots" '()) '())))
+          (let loop ((xs hs) (best "") (best-ms -1))
+            (if (null? xs)
+                best
+                (let* ((h (car xs))
+                       (stack (hash-ref h "stack" '()))
+                       (ms (hash-ref h "self-ms" 0)))
+                  (if (and (string=? (hash-ref h "source" "") "region-timer")
+                           (list? stack) (pair? stack) (pair? (cdr stack))
+                           (> ms best-ms))
+                      (loop (cdr xs) (hash-ref h "name" "") ms)
+                      (loop (cdr xs) best best-ms)))))))))

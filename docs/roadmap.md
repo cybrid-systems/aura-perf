@@ -1,39 +1,30 @@
 # Roadmap
 
-MVP 只做仓库级 CPU 优化：证据进 Aura，搜索和门控跑在 workspace 上，proposer 可替换但不连模型。下面是中期顺序，不把还没跑的东西算进当前结果。
+定位见 [capabilities.md](capabilities.md)。aura-perf 是 agent 的优化运行时：证据、假设、门和审计都是 Aura 值。被优化的是用户的程序（本仓库示例是一个链表扫描），不是 Aura 解释器。
 
-## 1. Evolving Agent Teams 风格的优化团队
+## 现在
 
-接 [aura-harness](https://github.com/cybrid-systems/aura-harness) 和 [hephaestus](https://github.com/cybrid-systems/hephaestus) 已有的分工，而不是再写一套外层循环。
+`perf:autotune` 对示例目标跑完一轮：perf 测量 define 级 task-clock，建成 CCT，策略调用 `perf:mine`，保护边界拒绝改叶子，并行 trial 两条会失败的假设，KEEP 线性扫描，再采一棵树做差分。硬件 PMU 不在的机器上用软件事件，并写明哪些事件 `<not supported>`。
 
-- **Solver**：在 live 策略下跑一批任务，留下轨迹（现在的 sum-scan 只有一条 kernel）。
-- **Proposer**：读失败轨迹和当前策略源码，一次只改一个 `define`。`perf:llm-propose` 留着，默认仍是 `perf:rule-propose` / harness 里那种 `prop:grammar`。
-- **Scope guard**：热点策略、预算、checksum oracle 分开放。Oracle 和 held-out 输入不进可写 workspace。
-- **Forked worldline + held-out 门**：继续用 `evo:trial`（或 harness 验证过的 snapshot 模式）。分数只来自 proposer 没见过的输入。
-- **审计**：沿用 `evo:record!` / `AURA_EVO_LOG`，重启后能用 `aura evo log --lineage` 追到根。
-- **策略演化**：`perf-strategy` 这种 workspace `define` 变成团队的一个角色（选热点、选 mutation 族、分预算），和其他角色一样被 trial，而不是只在 kernel KEEP 之前改一次。
+## 接着做
 
-Hephaestus 这边要接的是它已经在测的东西：热点作为一等对象、负载下的 rebind、性能计数进语义，而不是把数值库搬进来。
+1. 每个 worldline 一棵 CCT。查询「哪次 mutation 去掉了同一条热前缀，且代价没有挪到别的 define」。差分记在该候选的 evo 证据里。
+2. 负例按 `class` + `hot-node` 检索，而不只丢掉同名 id。同一热点不再原样重提。
+3. 分类阈值和 catalog 顺序收成可 trial 的策略基因，和 kernel 走同一套 KEEP / ROLLBACK。
+4. intend 变成运行时规范：checksum、最低加速、protected 都不能被策略改掉。
 
-## 2. Kernel 任务
+## 再往后
 
-CPU 闭环稳定之后再碰 kernel，仍然先隔离评测、再谈设备。
+- 语义火焰：节点可以是策略阶段或规则，agent 用它优化 harness，而不是只看用户 define。
+- 增量编译计数进门控，确认一次 rebind 没有整包重编。
+- KernelBench 式算子和 [aura-kernel-sink](https://github.com/cybrid-systems/aura-kernel-sink) 的 C 下沉，作为一种假设接进 autotune。契约和 checksum 仍然先于计时。没有 GPU 就不报 SOL 分数。
+- Warpline 一类 trace 作为另一种 CCT 来源，填同一套 `perf:cct-*` 查询。不另做给人看的报告。
 
-- **任务**：KernelBench 一类的算子（matmul、softmax、layernorm、reduction），评测协议对齐 [aura-kernel-agents](https://github.com/cybrid-systems/aura-kernel-agents)：契约先于计时、错误输出不算分、最终结果用新输入复测。
-- **表示**：调度 / kernel 继续是 Aura 源码，`mutate:rebind` + `ast:snapshot` / `ast:restore`。文本基线（模型直接写 C）留在 kernel-agents 那种对照里，不混进 aura-perf 的 KEEP 计数。
-- **下沉**：[aura-kernel-sink](https://github.com/cybrid-systems/aura-kernel-sink) 的路径是识别热点之后把函数换成 C `.so` 薄封装。aura-perf 只提供“哪一段值得沉、沉了有没有过 held-out 门”；`aot:reload` / FFI 仍由 sink 负责。
-- **设备**：没有 GPU 的环境不做 SOL-ExecBench 数字。有设备之后再把同一套 gate 接到真实 kernel 计时上。
+[aura-harness](https://github.com/cybrid-systems/aura-harness) / [hephaestus](https://github.com/cybrid-systems/hephaestus) 的多角色循环，是上面第 3 步的宿主，不是另一套外层 Python。
 
-## 3. Warpline 一类的 trace
+## 不做
 
-把采样栈接进现有的 profile 值，而不是换一套优化循环。
-
-- 新的 collector 读 Warpline / 类似的 warp 或指令 trace，填同一套字段：`hotspots`、`stacks`、`counters`。
-- `perf:hotspots` / `perf:delta` 不用改调用方。策略只看见名字、self 时间和栈，不看见 trace 原文。
-- Trace 来源要写进 `tools` 状态。解析失败就记原因，不要用 region timer 的数冒充硬件采样。
-
-## 明确还不做
-
-- 不在这个仓库里改 Aura 本身。v0.2.0 上碰到的行为记在 [findings.md](findings.md)。
-- 不下载、不安装 LLVM。C 侧如果要 `-pg` 或后续的 C kernel，用系统里已有的 C 编译器，并在报告里写清有没有跑到。
-- 不把 LLM 调用做成默认路径。
+- 不在这里改 Aura。v0.2.0 上的行为记在 [findings.md](findings.md)。
+- 不安装 LLVM。
+- 不做火焰图、HTML 报告、审批网页。
+- 不把 perf script 原文交给模型。默认 proposer 是规则；LLM 插口必须返回和规则相同的候选 hash。

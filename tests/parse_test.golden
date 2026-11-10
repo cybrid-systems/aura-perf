@@ -3,3 +3,4 @@
 (slow_fn fast_fn 1 slow)
 (12 3)
 (mutate:rebind 2 mutation-record)
+57

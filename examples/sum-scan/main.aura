@@ -1,8 +1,7 @@
-; End-to-end CPU example: profile a quadratic list scan, trial
-; mutations on forked worldlines, keep only a held-out speedup.
-; Run from the repository root:
-;   AURA_SANDBOX=off aura --preset dev --grant exec examples/sum-scan/main.aura
-; or: scripts/run-example.sh
+; Autotune one target program: a quadratic list scan.
+; The intend, the protected defines, and the catalog are Aura values.
+; perf:autotune mines a CCT, proposes executable hypotheses, and
+; does not return until the intend holds or the catalog is exhausted.
 
 (require "lib/perf/loop" all:)
 (require "lib/perf/util" all:)
@@ -11,37 +10,47 @@
 (define (call-kernel xs)
   (bench-kernel xs))
 
-(define (load-candidate id path thought)
+(define (aura-bin)
+  (let ((b (getenv "AURA_BIN")))
+    (if (and (string? b) (> (string-length b) 0)) b "aura")))
+
+(define (perf-cmd region)
+  (string-append "env AURA_SANDBOX=off AURA_PERF_REGION=" region
+                 " AURA_PERF_N=4000 AURA_PERF_REPS=3 "
+                 (aura-bin) " examples/sum-scan/perf-region.aura"))
+
+(define (load-candidate id path target thought)
   (hash "id" id
+        "target" target
         "genome" (perf:read-text path)
-        "hotspot" "k-ref"
         "thought" thought))
 
-; Region timers call the live workspace defines. n is the profile input,
-; distinct from the held-out length used for the score.
 (define (regions)
   (let ((n 4000)
         (xs (perf:range 4000)))
     (list
-      (hash "name" "bench-kernel"
-            "calls" 1
-            "workload" #t
+      (hash "name" "bench-kernel" "calls" 1 "workload" #t
             "stack" (list "bench-kernel")
             "thunk" (lambda () (bench-kernel xs)))
-      (hash "name" "k-length"
-            "calls" 1
+      (hash "name" "k-length" "calls" 1
             "stack" (list "bench-kernel" "k-length")
             "thunk" (lambda () (k-length xs)))
-      (hash "name" "k-ref"
-            "calls" n
+      (hash "name" "k-ref" "calls" n
             "stack" (list "bench-kernel" "k-ref")
             "thunk" (lambda ()
                       (let loop ((i 0))
-                        (if (>= i n)
-                            0
+                        (if (>= i n) 0
                             (begin (k-ref xs i) (loop (+ i 1))))))))))
 
-(perf:optimize
+; Expert EDSL: hard constraints the autotuner cannot bypass.
+; k-ref and k-length stay put. The mutable site is bench-kernel.
+(define expert-intend
+  (hash "min-faster-pct" 10
+        "checksum" #t
+        "budget" 4
+        "protected" (list "k-ref" "k-length")))
+
+(perf:autotune
   (hash "seed-path" "examples/sum-scan/seed.aura"
         "worker" "examples/sum-scan/worker.aura"
         "target" "bench-kernel"
@@ -52,16 +61,35 @@
         "min-speedup-pct" 20
         "expect-child" "k-ref"
         "require-success" #t
+        "intend" expert-intend
         "call" call-kernel
         "regions-fn" regions
+        "perf-after" (perf-cmd "linear")
+        "perf-targets"
+        (list (hash "name" "k-length" "calls" 1
+                    "stack" (list "bench-kernel" "k-length")
+                    "command" (perf-cmd "k-length"))
+              (hash "name" "k-ref" "calls" 4000
+                    "stack" (list "bench-kernel" "k-ref")
+                    "command" (perf-cmd "k-ref"))
+              (hash "name" "bench-kernel" "calls" 1 "workload" #t
+                    "stack" (list "bench-kernel")
+                    "command" (perf-cmd "bench-kernel")))
         "catalog"
-        (list (load-candidate "wrong-scale"
+        (list (hash "id" "specialize-k-ref"
+                    "target" "k-ref"
+                    "genome" "(define (k-ref xs i) (car xs))"
+                    "thought" "the hot leaf is list-ref; specializing it is the wrong site")
+              (load-candidate "wrong-scale"
                               "examples/sum-scan/candidates/wrong-scale.aura"
-                              "scale each element; changes the sum")
+                              "bench-kernel"
+                              "scale each element; checksum must reject it")
               (load-candidate "redundant-pass"
                               "examples/sum-scan/candidates/redundant-pass.aura"
-                              "three indexed reads that cancel back to one")
+                              "bench-kernel"
+                              "extra index walks; correct but slower")
               (load-candidate "linear-scan"
                               "examples/sum-scan/candidates/linear-scan.aura"
-                              "walk the spine once with car/cdr"))))
+                              "bench-kernel"
+                              "one spine walk; expected to cut task-clock"))))
 (display "done\n")

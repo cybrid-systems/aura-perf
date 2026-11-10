@@ -6,6 +6,8 @@
 (require "std/evo-core" all:)
 (require "lib/perf/util" all:)
 (require "lib/perf/score" all:)
+(require "lib/perf/cct" all:)
+(require "lib/perf/profile" all:)
 
 (define (worker-fail why)
   (display why)

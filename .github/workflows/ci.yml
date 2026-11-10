@@ -3,21 +3,40 @@ on: [push, pull_request]
 jobs:
   smoke:
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/cybrid-systems/aura:0.2.0
     steps:
       - uses: actions/checkout@v4
-      - name: Parser, query, proposer, and gate tests
+      - name: Install Aura 0.2.0
+        run: |
+          curl -fsSL -o /tmp/aura.tgz \
+            https://github.com/cybrid-systems/aura/releases/download/v0.2.0/aura-0.2.0-linux-x86_64.tar.gz
+          mkdir -p /opt/aura
+          tar -xzf /tmp/aura.tgz -C /opt/aura --strip-components=1
+          echo /opt/aura/bin >> "$GITHUB_PATH"
+      - name: Install perf
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-generic linux-tools-common
+          # Software events are enough when the host PMU is missing.
+          # Lower paranoid when the runner allows it; otherwise the example
+          # records why perf did not select a hotspot.
+          sudo sysctl -w kernel.perf_event_paranoid=1 || true
+          if bin="$(sh scripts/find-perf.sh)"; then
+            echo "PERF_BIN=$bin" >> "$GITHUB_ENV"
+            "$bin" --version
+          else
+            echo "perf binary not usable on this kernel" | tee perf-unavailable.txt
+          fi
+      - name: Parser, query, proposer, gate, and CCT tests
         run: aura test
-      - name: Sum-scan example
+      - name: Autotune the sum-scan target
         run: sh scripts/run-example.sh
         env:
           AURA_EVO_LOG: ${{ github.workspace }}/out/evo.jsonl
-      - name: Report mentions a keep and a rollback
+      - name: Report has a keep, a rollback, and an intend result
         run: |
           grep -q 'KEEP' out/report.txt
           grep -q 'ROLLBACK' out/report.txt
-          grep -q 'speedup-x' out/report.txt
+          grep -q 'intend-met' out/report.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:

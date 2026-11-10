@@ -1,0 +1,59 @@
+; The gate has ONE predicate: the run's KEEP decision (perf:accept?),
+; the report's PASS/ROLLBACK label (perf:reason) and the recheck's re-judgement
+; must agree. These cases pin the two ways they used to drift:
+;   - the floor: the run gates at the stricter of the intent and the spec's bar,
+;     the recheck used the intent's request alone;
+;   - the trial isolation: a candidate that changed the live workspace was
+;     rejected by the run and kept by the recheck.
+(require "lib/perf/gate" all:)
+(require "lib/perf/recheck" all:)
+
+(define (row ms checksum live)
+  (hash "status" "ok"
+        "checksum-ok" checksum
+        "live-unchanged" live
+        "mismatches" (if (= checksum 1) 0 2)
+        "heldout-ms" ms))
+
+; the run's own bar is 20%, the intent asks for 10%
+(define spec (hash "intend" (hash "min-faster-pct" 10 "checksum" #t "budget" 4
+                                 "protected" (list "k-ref" "k-length"))
+                   "min-speedup-pct" 20))
+(define seal (perf:intend-seal spec))
+(define floor (hash-ref seal "effective-min-faster-pct" 10))
+(define intent (hash "min-faster-pct" 10 "checksum" #t "protected" '()))
+
+; a saved run at the run's floor: the evidence carries it
+(define evidence
+  (hash "before-ms" 100 "after-ms" 85 "min-faster-pct" 20
+        "cct" (hash "kind" "perf-cct" "nodes" '())
+        "candidates"
+        (list (hash "id" "linear-scan" "target" "bench-kernel" "status" "ok"
+                    "checksum-ok" 1 "mismatches" 0 "heldout-ms" 85
+                    "fidelity" "held-out" "live-unchanged" 1))))
+(define slow (perf:recheck evidence intent '()))
+
+; the same candidate with a broken trial isolation
+(define broken
+  (hash "before-ms" 100 "after-ms" 40 "min-faster-pct" 20
+        "cct" (hash "kind" "perf-cct" "nodes" '())
+        "candidates"
+        (list (hash "id" "linear-scan" "target" "bench-kernel" "status" "ok"
+                    "checksum-ok" 1 "mismatches" 0 "heldout-ms" 40
+                    "fidelity" "held-out" "live-unchanged" 0))))
+(define broken-res (perf:recheck broken intent '()))
+
+; the run's decision and the report's label for the same results
+(define r-ok (row 70 1 1))
+(define r-slow (row 90 1 1))
+(define r-iso (row 10 1 0))
+
+(display (list "floor" floor
+               "slow-intend-met" (hash-ref slow "intend-met" -1)
+               "slow-keep" (hash-ref slow "keep" -1)
+               "slow-lines" (hash-ref slow "lines" '())
+               "broken-lines" (hash-ref broken-res "lines" '())
+               "reason-no-speedup" (perf:reason r-slow 100 floor)
+               "reason-isolation" (perf:reason r-iso 100 floor)
+               "accept-ok" (if (perf:accept? 100 r-ok floor) 1 0)))
+(newline)

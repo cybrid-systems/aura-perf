@@ -20,9 +20,12 @@ jobs:
           # Lower paranoid when the runner allows it; otherwise the example
           # records why perf did not select a hotspot.
           sudo sysctl -w kernel.perf_event_paranoid=1 || true
+          echo "perf candidates:"
+          find /usr/lib/linux-tools /usr/bin /usr/libexec -name perf -type f 2>/dev/null || true
           if bin="$(sh scripts/find-perf.sh)"; then
             echo "PERF_BIN=$bin" >> "$GITHUB_ENV"
-            "$bin" --version
+            "$bin" --version || true
+            "$bin" stat -e task-clock,cycles,instructions,cache-misses -- true || true
           else
             echo "perf binary not usable on this kernel" | tee perf-unavailable.txt
           fi

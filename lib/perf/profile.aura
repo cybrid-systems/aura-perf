@@ -4,9 +4,15 @@
 ; used when they actually produce output; otherwise the tool status
 ; records why they were not used. Parsers also run on saved text so the
 ; perf/gprof path is testable without the binaries.
+;
+; A one-shot target is `perf stat -- <command>`. A live C server is a pid
+; or a soname (`libaura_redis_core.so`): perf attaches, and the CCT node
+; is that process's function, not the DSO filename and not an Aura
+; interpreter symbol. Aura stays the runtime.
 
 (export perf:parse-perf-report perf:parse-perf-stat perf:parse-gprof
         perf:parse-proc-stat perf:unsupported-events perf:record-samples
+        perf:report-event perf:report-cct-rows perf:profile-targets
         perf:select-child perf:find-bin perf:tool-status perf:read-proc
         perf:engine-snap perf:collect perf:hottest perf:hot-child
         perf:measure-live perf:compile-snap perf:compile-delta)
@@ -29,6 +35,127 @@
   (or (string=? line "")
       (string-prefix? (string-trim line) "#")))
 
+; `[.]` / `[k]` annotation, or a bracketed kernel module.
+(define (perf:bracket-token? t)
+  (and (string? t)
+       (>= (string-length t) 3)
+       (= (perf:char-at t 0) 91)
+       (= (perf:char-at t (- (string-length t) 1)) 93)))
+
+; Shared object or kernel image. This is a column, not a CCT node.
+(define (perf:so-name? t)
+  (and (string? t)
+       (or (string-contains? t ".so")
+           (string-prefix? t "[kernel")
+           (string=? t "[vdso]")
+           (string=? t "[vsyscall]"))))
+
+; Overhead and sample counts. `17.90%` parses as a number; so does `58`.
+(define (perf:number-token? t)
+  (and (string? t) (number? (perf:parse-number t))))
+
+; A function token: letter or underscore, and not a DSO or annotation.
+(define (perf:symbol-token? t)
+  (and (string? t)
+       (> (string-length t) 0)
+       (not (perf:bracket-token? t))
+       (not (perf:so-name? t))
+       (not (perf:number-token? t))
+       (let ((c (perf:char-at t 0)))
+         (or (and (>= c 65) (<= c 90))
+             (and (>= c 97) (<= c 122))
+             (= c 95)))))
+
+; `ar_entry_set_ex+0x20` is the function `ar_entry_set_ex`.
+(define (perf:strip-offset name)
+  (if (not (string? name))
+      ""
+      (let ((n (string-length name)))
+        (let loop ((i 0))
+          (if (> (+ i 2) (- n 1))
+              name
+              (if (and (= (perf:char-at name i) 43)
+                       (= (perf:char-at name (+ i 1)) 48)
+                       (or (= (perf:char-at name (+ i 2)) 120)
+                           (= (perf:char-at name (+ i 2)) 88)))
+                  (substring name 0 i)
+                  (loop (+ i 1))))))))
+
+; The interpreter binary is a column named `aura`, not a function.
+(define (perf:interpreter-name? t)
+  (and (string? t)
+       (or (string=? t "aura")
+           (string-suffix? t "/aura"))))
+
+; Last function token. A trailing `aura` column is the interpreter
+; binary (`-F symbol,dso` puts it after the symbol), so the previous
+; function wins.
+(define (perf:choose-symbol toks)
+  (let loop ((xs (if (list? toks) toks '())) (prev #f) (last #f))
+    (if (null? xs)
+        (if (and (string? last) (perf:interpreter-name? last) (string? prev))
+            prev
+            last)
+        (if (perf:symbol-token? (car xs))
+            (loop (cdr xs) last (car xs))
+            (loop (cdr xs) prev last)))))
+
+(define (perf:find-so toks)
+  (let loop ((xs (if (list? toks) toks '())))
+    (if (null? xs)
+        ""
+        (if (perf:so-name? (car xs))
+            (car xs)
+            (loop (cdr xs))))))
+
+; Default `perf report` prints `command  dso  [.]  symbol`. The DSO is the
+; token before the annotation when it is not itself a `.so` (the `aura`
+; interpreter binary). Field order `symbol,dso` puts the `.so` last; that
+; path is perf:find-so.
+(define (perf:dso-before-bracket toks)
+  (let loop ((xs (if (list? toks) toks '())) (prev ""))
+    (if (null? xs)
+        ""
+        (if (perf:bracket-token? (car xs))
+            (if (and (string? prev)
+                     (not (string=? prev ""))
+                     (not (perf:number-token? prev))
+                     (not (perf:bracket-token? prev)))
+                prev
+                "")
+            (loop (cdr xs) (car xs))))))
+
+(define (perf:find-interpreter toks)
+  (let loop ((xs (if (list? toks) toks '())))
+    (if (null? xs)
+        ""
+        (if (perf:interpreter-name? (car xs))
+            (car xs)
+            (loop (cdr xs))))))
+
+(define (perf:row-dso toks)
+  (let ((so (perf:find-so toks)))
+    (if (not (string=? so ""))
+        so
+        (let ((bin (perf:find-interpreter toks)))
+          (if (not (string=? bin ""))
+              bin
+              (perf:dso-before-bracket toks))))))
+
+(define (perf:first-integer toks)
+  (let loop ((xs (if (list? toks) toks '())))
+    (if (null? xs)
+        0
+        (let ((t (car xs)))
+          (if (and (perf:number-token? t)
+                   (not (string-contains? t "."))
+                   (not (string-contains? t "%")))
+              (perf:parse-number t)
+              (loop (cdr xs)))))))
+
+; The name is the target function. A trailing DSO column is not the name.
+; `self-ms` stays the overhead percent, matching the rows this parser
+; already returned for the sum-scan fixture.
 (define (perf:parse-perf-report text)
   (if (not (string? text))
       '()
@@ -42,18 +169,163 @@
                     (if (or (null? toks) (null? (cdr toks)))
                         (loop (cdr lines) acc)
                         (let ((pct (perf:parse-number (car toks)))
-                              (name (perf:nth toks (- (length toks) 1))))
-                          (if (and (number? pct) (string? name)
-                                   (not (perf:parse-number name)))
-                              (loop (cdr lines)
-                                    (cons (hash "name" name
-                                                "self-ms" pct
-                                                "incl-ms" pct
-                                                "calls" 0
-                                                "unit" "percent"
-                                                "source" "perf-report")
-                                          acc))
+                              (raw (perf:choose-symbol toks)))
+                          (if (and (number? pct) (string? raw))
+                              (let ((name (perf:strip-offset raw)))
+                                (if (string=? name "")
+                                    (loop (cdr lines) acc)
+                                    (loop (cdr lines)
+                                          (cons (hash "name" name
+                                                      "dso" (perf:row-dso toks)
+                                                      "self-ms" pct
+                                                      "incl-ms" pct
+                                                      "samples" (perf:first-integer toks)
+                                                      "calls" 0
+                                                      "unit" "percent"
+                                                      "source" "perf-report")
+                                                acc))))
                               (loop (cdr lines) acc)))))))))))
+
+; "# Samples: 324  of event 'cpu-clock'" -> cpu-clock. Header lines are
+; skipped by the row parser; this scan keeps them.
+(define (perf:trim-quotes s)
+  (if (not (string? s))
+      ""
+      (let ((n (string-length s)))
+        (let ((a (if (and (> n 0)
+                          (or (= (perf:char-at s 0) 39)
+                              (= (perf:char-at s 0) 34)))
+                     1 0))
+              (b (if (and (> n 1)
+                          (or (= (perf:char-at s (- n 1)) 39)
+                              (= (perf:char-at s (- n 1)) 34)))
+                     (- n 1) n)))
+          (if (>= b a) (substring s a b) s)))))
+
+; Drop one trailing sentence period so a wrapped event name stays a token.
+(define (perf:strip-trail-dot s)
+  (if (and (string? s)
+           (> (string-length s) 0)
+           (= (perf:char-at s (- (string-length s) 1)) 46))
+      (substring s 0 (- (string-length s) 1))
+      s))
+
+; Only the "# Samples: N of event '...'" line. Other lines can mention
+; the word event (a comment, "Event count").
+(define (perf:report-event text)
+  (if (not (string? text))
+      ""
+      (let loop ((lines (string-split text "\n")))
+        (if (null? lines)
+            ""
+            (if (not (string-contains? (car lines) "Samples:"))
+                (loop (cdr lines))
+                (let scan ((toks (perf:tokens (car lines))) (prev ""))
+                  (cond ((null? toks) (loop (cdr lines)))
+                        ((string=? prev "event")
+                         (perf:strip-trail-dot (perf:trim-quotes (car toks))))
+                        (else (scan (cdr toks) (car toks))))))))))
+
+(define (perf:interpreter-dso? dso)
+  (and (string? dso)
+       (not (string=? dso ""))
+       (or (string=? dso "aura")
+           (string-suffix? dso "/aura")
+           (string-contains? dso "ld-linux")
+           (string-prefix? dso "[vdso]")
+           (string=? dso "[vsyscall]"))))
+
+(define (perf:system-dso? dso)
+  (and (string? dso)
+       (not (string=? dso ""))
+       (or (string-contains? dso "libc.so")
+           (string-contains? dso "libm.so")
+           (string-contains? dso "libpthread")
+           (string-contains? dso "libdl.so")
+           (string-contains? dso "libstdc++")
+           (string-contains? dso "libgcc_s")
+           (string-prefix? dso "[kernel")
+           (string=? dso "[vdso]")
+           (string=? dso "[vsyscall]"))))
+
+(define (perf:skip-symbol-name? name)
+  (or (not (string? name))
+      (string=? name "")
+      (string=? name "aura")
+      (string=? name "[unknown]")
+      (string-prefix? name "[unknown]")
+      (perf:so-name? name)))
+
+; Keep the target program's functions. With a soname, only that object.
+; Without one, drop the Aura interpreter binary, libc, and the kernel.
+; An empty DSO (report without a DSO column) stays: the symbol is all
+; the line gave us.
+(define (perf:keep-symbol? row target)
+  (let ((name (hash-ref row "name" ""))
+        (dso (hash-ref row "dso" "")))
+    (and (not (perf:skip-symbol-name? name))
+         (if (and (string? target) (not (string=? target "")))
+             (and (string? dso)
+                  (not (string=? dso ""))
+                  (string-contains? dso target))
+             (and (not (perf:interpreter-dso? dso))
+                  (not (perf:system-dso? dso)))))))
+
+(define (perf:add-num! h key n)
+  (let ((cur (hash-ref h key 0)))
+    (hash-set! h key (+ (if (number? cur) cur 0) (if (number? n) n 0)))))
+
+; One node per function. `ar_entry_set_ex` and `ar_entry_set_ex+0x20`
+; already share a name; their overhead and samples add.
+(define (perf:merge-symbol-rows rows)
+  (let loop ((xs (if (list? rows) rows '())) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (let* ((row (car xs))
+               (name (hash-ref row "name" ""))
+               (found (let scan ((ys acc))
+                        (if (null? ys)
+                            #f
+                            (if (string=? (hash-ref (car ys) "name" "") name)
+                                (car ys)
+                                (scan (cdr ys)))))))
+          (if (hash? found)
+              (begin
+                (perf:add-num! found "task-clock" (hash-ref row "task-clock" 0))
+                (perf:add-num! found "calls" (hash-ref row "calls" 0))
+                (perf:add-num! found "samples" (hash-ref row "samples" 0))
+                (loop (cdr xs) acc))
+              (loop (cdr xs) (cons row acc)))))))
+
+; CCT rows from a perf report. `task-clock` holds the overhead percent so
+; the miner can rank symbols with the same field as a sum-scan tree.
+; `calls` holds the sample count. `native` marks a target-program symbol.
+(define (perf:report-cct-rows text target)
+  (let ((ev (perf:report-event text))
+        (parsed (perf:parse-perf-report text))
+        (want (if (string? target) target "")))
+    (perf:merge-symbol-rows
+      (let loop ((xs parsed) (acc '()))
+        (if (null? xs)
+            (reverse acc)
+            (let ((row (car xs)))
+              (if (not (perf:keep-symbol? row want))
+                  (loop (cdr xs) acc)
+                  (let ((name (hash-ref row "name" ""))
+                        (samples (hash-ref row "samples" 0)))
+                    (loop (cdr xs)
+                          (cons (hash "name" name
+                                      "dso" (hash-ref row "dso" "")
+                                      "task-clock" (hash-ref row "self-ms" 0)
+                                      "calls" (if (number? samples) samples 0)
+                                      "samples" (if (number? samples) samples 0)
+                                      "page-faults" 0
+                                      "stack" (list name)
+                                      "native" #t
+                                      "source" "perf-report"
+                                      "event" (if (string=? ev "") "cpu-clock" ev)
+                                      "unit" "percent")
+                                acc))))))))))
 
 (define (perf:prev-number toks idx)
   (let loop ((i (- idx 1)))
@@ -120,15 +392,18 @@
 
 ; Among user defines that have a caller, the one with the largest
 ; perf task-clock is the hotspot the strategy should edit.
+; Sum-scan children need a caller on the stack. A native symbol row is
+; already the function to bind, so a one-frame stack still counts.
 (define (perf:select-child rows)
   (let loop ((xs (if (list? rows) rows '())) (best "") (best-ms -1))
     (if (null? xs)
         best
         (let* ((h (car xs))
                (stack (hash-ref h "stack" '()))
-               (ms (hash-ref h "task-clock" -1)))
-          (if (and (list? stack) (pair? stack) (pair? (cdr stack))
-                   (number? ms) (> ms best-ms))
+               (ms (hash-ref h "task-clock" -1))
+               (native (eq? (hash-ref h "native" #f) #t))
+               (child (and (list? stack) (pair? stack) (pair? (cdr stack)))))
+          (if (and (number? ms) (> ms best-ms) (or native child))
               (loop (cdr xs) (hash-ref h "name" "") ms)
               (loop (cdr xs) best best-ms))))))
 
@@ -236,33 +511,183 @@
                         " >/tmp/aura-perf-stat.stdout 2>/tmp/aura-perf-stat.stderr"))
   (perf:read-text outfile))
 
-(define (perf:profile-targets bin targets)
-  (let loop ((xs (if (list? targets) targets '())) (rows '()) (unsup '()) (bench #f))
+(define (perf:digits? s)
+  (and (string? s)
+       (> (string-length s) 0)
+       (let ((n (string-length s)))
+         (let loop ((i 0))
+           (if (>= i n)
+               #t
+               (let ((c (perf:char-at s i)))
+                 (and (>= c 48) (<= c 57) (loop (+ i 1)))))))))
+
+; Soname spliced into a shell command. Dots and underscores only; no slash.
+(define (perf:safe-soname? s)
+  (and (string? s)
+       (string-contains? s ".so")
+       (let ((n (string-length s)))
+         (and (> n 0)
+              (let loop ((i 0))
+                (if (>= i n)
+                    #t
+                    (let ((c (perf:char-at s i)))
+                      (and (or (and (>= c 48) (<= c 57))
+                               (and (>= c 65) (<= c 90))
+                               (and (>= c 97) (<= c 122))
+                               (= c 46) (= c 95) (= c 43) (= c 45))
+                           (loop (+ i 1))))))))))
+
+(define (perf:pid-string t)
+  (let ((p (hash-ref t "pid" #f)))
+    (cond ((and (number? p) (>= p 1))
+           (let ((s (number->string p)))
+             (if (perf:digits? s) s #f)))
+          ((and (string? p) (perf:digits? p)) p)
+          (else #f))))
+
+(define (perf:target-dso t)
+  (let ((d (hash-ref t "dso" "")))
+    (if (perf:safe-soname? d)
+        d
+        (let ((s (hash-ref t "soname" "")))
+          (if (perf:safe-soname? s)
+              s
+              (let ((n (hash-ref t "name" "")))
+                (if (and (perf:safe-soname? n)
+                         (not (string? (hash-ref t "command" #f))))
+                    n
+                    "")))))))
+
+(define (perf:live-target? t)
+  (or (string? (perf:pid-string t))
+      (not (string=? (perf:target-dso t) ""))))
+
+(define (perf:sample-seconds t)
+  (let ((n (hash-ref t "seconds" 1)))
+    (if (and (number? n) (>= n 1) (<= n 30) (perf:digits? (number->string n)))
+        (number->string n)
+        "1")))
+
+(define (perf:pid-for-dso soname)
+  (if (not (perf:safe-soname? soname))
+      #f
+      (begin
+        (shell (string-append "sh scripts/find-pid-by-dso.sh " soname
+                              " > /tmp/aura-perf-pid.txt 2>/dev/null"))
+        (let ((s (perf:trim-ws (perf:read-text "/tmp/aura-perf-pid.txt"))))
+          (if (perf:digits? s) s #f)))))
+
+(define (perf:resolve-pid t)
+  (let ((p (perf:pid-string t)))
+    (if (string? p)
+        p
+        (perf:pid-for-dso (perf:target-dso t)))))
+
+; Attach to a running process. `perf stat -- command` cannot see a server
+; that is already listening. The report's symbol column, limited to the
+; target soname, becomes the CCT rows.
+(define (perf:attach-target bin t)
+  (let ((pid (perf:resolve-pid t))
+        (seconds (perf:sample-seconds t))
+        (dso (perf:target-dso t)))
+    (if (not (string? pid))
+        (hash "rows" '() "unsupported" '() "counters" #f
+              "samples" -1 "event" "" "error" "missing-pid")
+        (begin
+          (shell "rm -f out/perf.data out/perf-report.txt /tmp/aura-perf-stat-live.txt")
+          (shell (string-append "mkdir -p out && " bin
+                                " record -e cpu-clock -F 199 -p " pid
+                                " -o out/perf.data -- sleep " seconds
+                                " >/tmp/aura-perf-record.stdout 2>/tmp/aura-perf-record.stderr"))
+          (shell (string-append bin
+                                " report -i out/perf.data --stdio --no-children"
+                                " -F overhead,sample,symbol,dso"
+                                " > out/perf-report.txt 2>/tmp/aura-perf-report.stderr"))
+          (shell (string-append bin " stat -p " pid " -e " perf-stat-events
+                                " -o /tmp/aura-perf-stat-live.txt -- sleep " seconds
+                                " >/tmp/aura-perf-stat.stdout 2>/tmp/aura-perf-stat.stderr"))
+          (let ((text (perf:read-text "out/perf-report.txt"))
+                (stat (perf:read-text "/tmp/aura-perf-stat-live.txt")))
+            (hash "rows" (perf:report-cct-rows text dso)
+                  "unsupported" (perf:unsupported-events stat)
+                  "counters" (perf:parse-perf-stat stat)
+                  "samples" (perf:record-samples text)
+                  "event" (let ((ev (perf:report-event text)))
+                            (if (string=? ev "") "cpu-clock" ev))
+                  "error" ""))))))
+
+(define (perf:push-rows rows more)
+  (let loop ((ys (if (list? more) more '())) (acc rows))
+    (if (null? ys)
+        acc
+        (loop (cdr ys) (cons (car ys) acc)))))
+
+(define (perf:any-live? targets)
+  (let loop ((xs (if (list? targets) targets '())))
     (if (null? xs)
-        (let* ((child (perf:select-child rows))
-               (rec (perf:record-target bin targets)))
-          (hash "rows" (reverse rows)
-                "child" child
-                "unsupported" unsup
-                "bench" bench
-                "record-samples" (hash-ref rec "samples" -1)
-                "record-event" (hash-ref rec "event" "")))
-        (let* ((t (car xs))
-               (name (hash-ref t "name" "region"))
-               (outfile (string-append "/tmp/aura-perf-stat-" name ".txt"))
-               (text (perf:stat-text bin (hash-ref t "command" "true") outfile))
-               (counters (perf:parse-perf-stat text))
-               (row (hash "name" name
-                          "task-clock" (hash-ref counters "task-clock" -1)
-                          "cpu-clock" (hash-ref counters "cpu-clock" -1)
-                          "page-faults" (hash-ref counters "page-faults" -1)
-                          "stack" (hash-ref t "stack" (list name))
-                          "calls" (hash-ref t "calls" 1)
-                          "counters" counters)))
-          (loop (cdr xs)
-                (cons row rows)
-                (perf:union-names unsup (perf:unsupported-events text))
-                (if (eq? (hash-ref t "workload" #f) #t) counters bench))))))
+        #f
+        (if (perf:live-target? (car xs))
+            #t
+            (loop (cdr xs))))))
+
+(define (perf:profile-targets bin targets)
+  (let loop ((xs (if (list? targets) targets '()))
+             (rows '()) (unsup '()) (bench #f)
+             (samples -1) (event "") (err ""))
+    (if (null? xs)
+        (let ((ordered (reverse rows)))
+          (if (perf:any-live? targets)
+              (hash "rows" ordered
+                    "child" (perf:select-child ordered)
+                    "unsupported" unsup
+                    "bench" bench
+                    "record-samples" samples
+                    "record-event" event
+                    "attach-error" err)
+              (let ((rec (perf:record-target bin targets)))
+                (hash "rows" ordered
+                      "child" (perf:select-child ordered)
+                      "unsupported" unsup
+                      "bench" bench
+                      "record-samples" (hash-ref rec "samples" -1)
+                      "record-event" (hash-ref rec "event" "")
+                      "attach-error" ""))))
+        (let ((t (car xs)))
+          (if (perf:live-target? t)
+              (let ((live (perf:attach-target bin t)))
+                (loop (cdr xs)
+                      (perf:push-rows rows (hash-ref live "rows" '()))
+                      (perf:union-names unsup (hash-ref live "unsupported" '()))
+                      (if (and (eq? (hash-ref t "workload" #f) #t)
+                               (hash? (hash-ref live "counters" #f)))
+                          (hash-ref live "counters")
+                          bench)
+                      (let ((n (hash-ref live "samples" -1)))
+                        (if (and (number? n) (>= n 0)) n samples))
+                      (let ((ev (hash-ref live "event" "")))
+                        (if (string=? ev "") event ev))
+                      (let ((e (hash-ref live "error" "")))
+                        (if (string=? e "")
+                            err
+                            (if (string=? err "") e (string-append err "," e))))))
+              (let* ((name (hash-ref t "name" "region"))
+                     (outfile (string-append "/tmp/aura-perf-stat-" name ".txt"))
+                     (text (perf:stat-text bin (hash-ref t "command" "true") outfile))
+                     (counters (perf:parse-perf-stat text))
+                     (row (hash "name" name
+                                "task-clock" (hash-ref counters "task-clock" -1)
+                                "cpu-clock" (hash-ref counters "cpu-clock" -1)
+                                "page-faults" (hash-ref counters "page-faults" -1)
+                                "stack" (hash-ref t "stack" (list name))
+                                "calls" (hash-ref t "calls" 1)
+                                "counters" counters)))
+                (loop (cdr xs)
+                      (cons row rows)
+                      (perf:union-names unsup (perf:unsupported-events text))
+                      (if (eq? (hash-ref t "workload" #f) #t) counters bench)
+                      samples
+                      event
+                      err)))))))
 
 (define (perf:union-names a b)
   (let loop ((xs (if (list? b) b '())) (acc (if (list? a) a '())))
@@ -287,7 +712,7 @@
                                 " >/tmp/aura-perf-record.stdout 2>/tmp/aura-perf-record.stderr"))
           (shell (string-append bin
                                 " report -i out/perf.data --stdio --no-children"
-                                " -F overhead,sample > out/perf-report.txt 2>/tmp/aura-perf-report.stderr"))
+                                " -F overhead,sample,symbol,dso > out/perf-report.txt 2>/tmp/aura-perf-report.stderr"))
           (hash "samples" (perf:record-samples (perf:read-text "out/perf-report.txt"))
                 "event" "cpu-clock")))))
 
@@ -397,27 +822,44 @@
                 (loop2 (cdr ks)))))
         h)))
 
+(define (perf:rows-native? rows)
+  (let loop ((xs (if (list? rows) rows '())))
+    (if (null? xs)
+        #f
+        (if (eq? (hash-ref (car xs) "native" #f) #t)
+            #t
+            (loop (cdr xs))))))
+
 (define (perf:notes tools perf-info)
   (let ((perf-s (hash-ref tools "perf" "missing"))
         (gprof-s (hash-ref tools "gprof" "missing"))
         (gmon (hash-ref tools "gmon" "no-gmon"))
         (unsup (if (hash? perf-info) (hash-ref perf-info "unsupported" '()) '())))
-    (list
-      (if (string=? perf-s "missing")
-          "perf: no usable binary (the /usr/bin/perf wrapper often rejects a newer kernel). Target hotspots fall back to region timers."
-          (string-append "perf: using " perf-s " on the target program, not on the Aura interpreter"))
-      (if (string=? perf-s "missing")
-          "perf: hardware counters were not read"
-          (if (null? unsup)
-              "perf: requested hardware events were accepted"
-              (string-append "perf: events not supported on this kernel: " (perf:join unsup ","))))
-      (if (string=? gprof-s "missing")
-          "gprof: binary not on PATH"
-          (if (string=? gmon "no-gmon")
-              "gprof: binary present, no gmon.out; gprof was not applied to this run"
-              "gprof: gmon.out present"))
-      "hotspots: user defines of the target program. When perf stat ran, the callee with the highest task-clock is the one the strategy edits."
-      "stacks: caller chains of those defines. perf record samples confirm the target process was sampled; interpreter frames are not used as hotspot names.")))
+    (let ((lines
+            (list
+              (if (string=? perf-s "missing")
+                  "perf: no usable binary (the /usr/bin/perf wrapper often rejects a newer kernel). Target hotspots fall back to region timers."
+                  (string-append "perf: using " perf-s " on the target program, not on the Aura interpreter"))
+              (if (string=? perf-s "missing")
+                  "perf: hardware counters were not read"
+                  (if (null? unsup)
+                      "perf: requested hardware events were accepted"
+                      (string-append "perf: events not supported on this kernel: " (perf:join unsup ","))))
+              (if (string=? gprof-s "missing")
+                  "gprof: binary not on PATH"
+                  (if (string=? gmon "no-gmon")
+                      "gprof: binary present, no gmon.out; gprof was not applied to this run"
+                      "gprof: gmon.out present"))
+              "hotspots: user defines of the target program. When perf stat ran, the callee with the highest task-clock is the one the strategy edits."
+              "stacks: caller chains of those defines. perf record samples confirm the target process was sampled; interpreter frames are not used as hotspot names.")))
+      (let ((err (if (hash? perf-info) (hash-ref perf-info "attach-error" "") ""))
+            (native (perf:rows-native? (if (hash? perf-info) (hash-ref perf-info "rows" '()) '()))))
+        (if (and (string? err) (not (string=? err "")))
+            (append lines (list (string-append "perf: attach failed: " err)))
+            (if native
+                (append lines
+                        (list "hotspots: attached process. CCT nodes are target-program symbols; the DSO filename is not a node."))
+                lines))))))
 
 (define (perf:maybe-gprof tools)
   (if (and (string=? (hash-ref tools "gmon" "") "present")

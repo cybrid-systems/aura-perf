@@ -1,0 +1,6 @@
+(ar_entry_set_ex ar_find_entry_ex ar_rehash_if_needed libaura_redis_core.so 17.9)
+(ar_entry_set_ex libaura_redis_core.so)
+((ar_entry_set_ex ar_find_entry_ex ar_rehash_if_needed) 3 59 ar_entry_set_ex 324 cpu-clock)
+(native-symbol ar_entry_set_ex ar_entry_set_ex bind-native-symbol preserve-observable (preserve-observable checksum resp-reply-unchanged) task-clock cpu-clock lower-task-clock libaura_redis_core.so break-observable checksum-fail)
+(native-symbol ar_entry_set_ex task-clock (preserve-observable checksum) 2)
+(missing-pid -1 0 none)

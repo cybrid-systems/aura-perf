@@ -9,6 +9,7 @@
         perf:count-rows perf:prefix-leaf perf:cct-worldline-query
         perf:cct-cleared perf:should-continue? perf:delta-brief)
 
+(require "std/string" all:)
 (require "lib/perf/util" all:)
 
 (define (perf:parent-of stack)
@@ -30,7 +31,12 @@
                             "exclusive-ms" (hash-ref r "task-clock" 0)
                             "calls" (hash-ref r "calls" 1)
                             "task-clock" (hash-ref r "task-clock" 0)
-                            "page-faults" (hash-ref r "page-faults" 0))
+                            "page-faults" (hash-ref r "page-faults" 0)
+                            "dso" (hash-ref r "dso" "")
+                            "source" (hash-ref r "source" "")
+                            "event" (hash-ref r "event" "")
+                            "samples" (hash-ref r "samples" 0)
+                            "native" (eq? (hash-ref r "native" #f) #t))
                       nodes))))))
 
 (define (perf:cct-node cct id)
@@ -133,6 +139,55 @@
 ; ratio is the classification gene: k-ref is a repeated index walk when
 ; its task-clock exceeds ratio times k-length. actionable-ms drops cold
 ; defines. protected comes from the sealed intend, not from the gene.
+;
+; A native-symbol node is a function from an attached C process (the row
+; carries native=#t). That class does not fire for the sum-scan tree,
+; which has no such rows. repeated-index-walk still wins when k-ref and
+; k-length are both present and the ratio says so.
+(define (perf:hottest-native nodes th)
+  (let loop ((xs (if (list? nodes) nodes '())) (best #f) (best-ms -1))
+    (if (null? xs)
+        best
+        (let ((n (car xs))
+              (ms (perf:node-clock n)))
+          (if (and (eq? (hash-ref n "native" #f) #t)
+                   (number? ms) (> ms 0) (>= ms th) (> ms best-ms))
+              (loop (cdr xs) n ms)
+              (loop (cdr xs) best best-ms))))))
+
+(define (perf:redis-dso? dso)
+  (and (string? dso) (string-contains? dso "libaura_redis_core")))
+
+; Trialable hypothesis for one native function. The bind site is the
+; function. constraints are what a trial must not change. counter is the
+; CCT field the trial is expected to move (overhead from cpu-clock
+; samples is stored there). event is the perf event the samples came from.
+(define (perf:native-constraints dso)
+  (if (perf:redis-dso? dso)
+      (list "preserve-observable" "checksum" "resp-reply-unchanged")
+      (list "preserve-observable" "checksum")))
+
+(define (perf:native-hypotheses site dso event)
+  (let ((constraints (perf:native-constraints dso))
+        (ev (if (and (string? event) (not (string=? event ""))) event "cpu-clock"))
+        (obj (if (string? dso) dso "")))
+    (list (hash "id" "bind-native-symbol"
+                "site" site
+                "dso" obj
+                "constraint" "preserve-observable"
+                "constraints" constraints
+                "expect" "lower-task-clock"
+                "counter" "task-clock"
+                "event" ev)
+          (hash "id" "break-observable"
+                "site" site
+                "dso" obj
+                "constraint" "preserve-observable"
+                "constraints" constraints
+                "expect" "checksum-fail"
+                "counter" "checksum"
+                "event" ev))))
+
 (define (perf:mine-with profile gene protected)
   (let ((cct (if (and (hash? profile) (hash? (hash-ref profile "cct" #f)))
                  (hash-ref profile "cct")
@@ -147,24 +202,39 @@
         (let* ((prefix (perf:cct-hot-prefix cct))
                (kref (perf:clock-of cct "k-ref"))
                (klen (perf:clock-of cct "k-length"))
-               (class (if (and (number? kref) (number? klen)
-                               (> klen 0) (> kref (* klen ratio)))
-                          "repeated-index-walk"
-                          (if (pair? prefix) "flat-hot" "")))
-               (hot (if (and (pair? prefix) (pair? (cdr prefix)))
-                        (car (cdr prefix))
-                        (if (pair? prefix) (car prefix) "")))
-               (site (if (pair? prefix) (car prefix) "")))
+               (native (perf:hottest-native (hash-ref cct "nodes" '()) th))
+               (class (cond ((and (number? kref) (number? klen)
+                                   (> klen 0) (> kref (* klen ratio)))
+                             "repeated-index-walk")
+                            ((hash? native) "native-symbol")
+                            ((pair? prefix) "flat-hot")
+                            (else "")))
+               (hot (if (string=? class "native-symbol")
+                        (hash-ref native "define" "")
+                        (if (and (pair? prefix) (pair? (cdr prefix)))
+                            (car (cdr prefix))
+                            (if (pair? prefix) (car prefix) ""))))
+               (site (if (string=? class "native-symbol")
+                         (hash-ref native "define" "")
+                         (if (pair? prefix) (car prefix) "")))
+               (shown (if (string=? class "native-symbol")
+                          (let ((st (hash-ref native "stack" '())))
+                            (if (and (list? st) (pair? st)) st (list site)))
+                          prefix))
+               (ndso (if (hash? native) (hash-ref native "dso" "") ""))
+               (nev (if (hash? native) (hash-ref native "event" "") "")))
           (hash "class" class
                 "hot-node" hot
                 "site" site
-                "prefix" prefix
+                "prefix" shown
                 "k-ref-ms" kref
                 "k-length-ms" klen
                 "ratio" ratio
                 "actionable-ms" th
                 "actionable" (perf:cct-actionable cct th prot)
-                "hypotheses" (perf:hypotheses class site))))))
+                "hypotheses" (if (string=? class "native-symbol")
+                                 (perf:native-hypotheses site ndso nev)
+                                 (perf:hypotheses class site)))))))
 
 (define (perf:mine profile)
   (perf:mine-with profile (hash "ratio" 2 "actionable-ms" 1)
@@ -175,16 +245,18 @@
 ; specialize-k-ref is a real idea (the leaf is hot) that the protected
 ; boundary must refuse. The other three are trials.
 (define (perf:hypotheses class site)
-  (if (string=? class "repeated-index-walk")
-      (list (hash "id" "specialize-k-ref" "site" "k-ref"
-                  "expect" "refuse-protected" "counter" "task-clock")
-            (hash "id" "wrong-scale" "site" site
-                  "expect" "checksum-fail" "counter" "checksum")
-            (hash "id" "redundant-pass" "site" site
-                  "expect" "no-speedup" "counter" "task-clock")
-            (hash "id" "linear-scan" "site" site
-                  "expect" "lower-task-clock" "counter" "task-clock"))
-      '()))
+  (cond ((string=? class "repeated-index-walk")
+         (list (hash "id" "specialize-k-ref" "site" "k-ref"
+                     "expect" "refuse-protected" "counter" "task-clock")
+               (hash "id" "wrong-scale" "site" site
+                     "expect" "checksum-fail" "counter" "checksum")
+               (hash "id" "redundant-pass" "site" site
+                     "expect" "no-speedup" "counter" "task-clock")
+               (hash "id" "linear-scan" "site" site
+                     "expect" "lower-task-clock" "counter" "task-clock")))
+        ((string=? class "native-symbol")
+         (perf:native-hypotheses site "" "cpu-clock"))
+        (else '())))
 
 (define (perf:split-protected cands protected)
   (let loop ((xs (if (list? cands) cands '())) (ok '()) (refused '()))

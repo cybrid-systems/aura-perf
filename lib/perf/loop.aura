@@ -114,26 +114,10 @@
             (car xs)
             (loop (cdr xs))))))
 
-(define (perf:reason result baseline pct)
-  (cond ((not (hash? result)) "no-result")
-        ((not (string=? (hash-ref result "status" "") "ok"))
-         (let ((e (hash-ref result "error" "")))
-           (if (and (string? e) (not (string=? e "")))
-               e
-               (string-append "trial-" (hash-ref result "status" "error")))))
-        ((or (string=? (hash-ref result "fidelity" "") "checksum")
-             (not (or (eq? (hash-ref result "checksum-ok" 0) 1)
-                      (eq? (hash-ref result "checksum-ok" 0) #t))))
-         (string-append "checksum mismatches="
-                        (number->string (hash-ref result "mismatches" -1))))
-        ((not (or (eq? (hash-ref result "live-unchanged" 0) 1)
-                  (eq? (hash-ref result "live-unchanged" 0) #t)))
-         "isolation-violation")
-        ((string=? (hash-ref result "fidelity" "") "screen-pruned") "screen-pruned")
-        ((not (perf:speedup-ok? baseline (hash-ref result "heldout-ms" -1) pct))
-         "no-speedup")
-        (else "gate-pass")))
 
+
+; perf:reason (the report's PASS/ROLLBACK label) lives in lib/perf/gate.aura,
+; next to the predicate the run and the recheck share.
 (define (perf:format-candidate result baseline pct)
   (string-append
     "candidate " (hash-ref result "id" "?")
@@ -578,7 +562,8 @@
 
 (define (perf:say-intend spec buf before-ms after-ms)
   (let* ((intend (hash-ref spec "intend" (hash)))
-         (pct (hash-ref intend "min-faster-pct" 10))
+         (seal (perf:intend-seal spec))
+         (pct (hash-ref seal "effective-min-faster-pct" 10))
          (met (perf:speedup-ok? before-ms after-ms pct)))
     (perf:say buf (string-append "intend min-faster-pct=" (number->string pct)
                                  " checksum=1 protected="
@@ -619,7 +604,7 @@
           (let ((logn (try (length (evo:records)) (catch (e) -1))))
             (perf:say buf (string-append "evo-records " (number->string logn))))
           (let* ((met (perf:speedup-ok? before-ms after-ms
-                                        (hash-ref (perf:intend-seal spec) "min-faster-pct" 10)))
+                                        (hash-ref (perf:intend-seal spec) "effective-min-faster-pct" 10)))
                  (speed (perf:verdict-speedup before-ms after-ms
                                               (hash-ref buf "before-samples" '())
                                               (hash-ref buf "after-samples" '())))
@@ -650,6 +635,7 @@
             (perf:write-text (string-append out "/evidence.json")
                              (json-encode (hash "before-ms" before-ms
                                                 "after-ms" after-ms
+                                                "min-faster-pct" (hash-ref spec "min-speedup-pct" 20)
                                                 "before-samples" (hash-ref buf "before-samples" '())
                                                 "after-samples" (hash-ref buf "after-samples" '())
                                                 "class" (hash-ref spec "class" "")
@@ -809,8 +795,7 @@
         (out (hash-ref spec "out-dir" "out")))
     (perf:ensure-dirs out)
     (hash-set! spec "min-speedup-pct"
-               (perf:gate-pct (hash-ref spec "min-speedup-pct" 20)
-                              (hash-ref (perf:intend-seal spec) "min-faster-pct" 10)))
+               (hash-ref (perf:intend-seal spec) "effective-min-faster-pct" 20))
     (if (not (perf:install-seed (hash-ref spec "seed-path")))
         (perf:say buf "error empty-seed")
         (let* ((profile (perf:collect ((hash-ref spec "regions-fn"))

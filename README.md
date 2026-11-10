@@ -4,13 +4,17 @@
 
 ## 试一下
 
-一条命令跑完测量、挖掘、试验、门控和报告。不需要虚拟环境，不需要 API key，不需要配置文件。需要 [Aura v0.2.0](https://github.com/cybrid-systems/aura/releases/tag/v0.2.0)。`perf` 可用时用它的 task-clock；没有二进制或没有 PMU 时改用 region timer，并在报告里写明，不把缺的计数器写成 0。
+一条命令跑完测量、挖掘、试验、门控和报告。不需要虚拟环境，不需要 API key，不需要配置文件。需要 [Aura v0.2.0](https://github.com/cybrid-systems/aura/releases/tag/v0.2.0)（nightly `cf7353373`）。`perf` 可用时用它的 task-clock；没有二进制或没有 PMU 时改用 region timer，并在报告里写明，不把缺的计数器写成 0。
+
+这个仓库只保证 v0.2.0。Aura `main` 上命名 `let` 不能重入：同一个循环第二次调用交回第一次的结果，回归来自 [#5102](https://github.com/cybrid-systems/aura/pull/5102)（`6aa43942a`），记在 [aura#5116](https://github.com/cybrid-systems/aura/issues/5116)。`./run.sh test` 会先跑 `tests/runtime_probe.aura`。探测失败时，输出里有这次的 `aura -V`、期望的 `(sum 3) (sum 7) (sum 2) = 3 21 1`，以及上游链接。解析器在下标越界时也报这一段，而不是一句落在字符串字面量上的 `string-ref: index out of bounds`。探测通过之后，其余断言照常跑；真失败仍然失败。
 
 ```sh
 ./run.sh
 ```
 
-`./run.sh` 就是 `./run.sh autotune`。报告在 `out/report.txt`，第一行是结论：`intend-met`、KEEP 数、ROLLBACK 数、加速比，然后每个拒绝一行原因（`checksum`、`protected`、`screen-pruned`、`no-speedup`、`intend-bypass`、`misclassify` 等）。
+`./run.sh` 就是 `./run.sh autotune`。报告在 `out/report.txt`，第一行是结论，例如 `verdict intend-met=1 KEEP=3 ROLLBACK=6 speedup-x=81.25 (325ms->4ms n=5 spread=120->0ms)`。`speedup-x` 是两次 held-out 中位的比值。括号里是这两次中位（毫秒）、样本数 `n`，以及样本极差（最大减最小，`基线->优化后`）。同一台机器上基线中位会漂，极差写在结论行上。后面每个拒绝一行原因（`checksum`、`protected`、`screen-pruned`、`no-speedup`、`intend-bypass`、`misclassify` 等）。
+
+退出码跟结论一致。`autotune` 在 `intend-met=1` 时是 0，否则非 0。`recheck` 没有 `out/evidence.json` 时非 0，并提示先跑 `./run.sh autotune`。未知动词非 0。`help`、`sysinfo`、`check` 是 0。
 
 改 `examples/sum-scan/policy.aura` 里的 intend 或策略基因之后，用上次写下的 `out/evidence.json` 重判门，不重新剖析，也不重建 workspace：
 
@@ -49,7 +53,7 @@ Held-out（`0..5999`，5 次中位）从 311 ms 到 11 ms，**28.27×**。`inten
 
 `linear-scan` 的 worldline：`prefix-removed=1` `cost-moved=0`，`cleared linear-scan`，`continue 0`，`hypothesis-confirmed`。负例查询：同一热点上 `wrong-scale` 被挡住，换一个 hot-node 则不被挡住。KEEP 时 compile 计数 `world-rebuilt=0` `cascade-full=0` `body-only=2` `relower-full=1`。
 
-`./run.sh recheck` 对这份 evidence 重判：`intend-met=1 KEEP=2 ROLLBACK=6`。重判只评基因和保存下来的候选，不重放中途那次策略 rebind，所以 KEEP 比完整运行少 1。
+`./run.sh recheck` 对这份 evidence 重判：`recheck intend-met=1 KEEP=2 ROLLBACK=6 speedup-x=… (前中位ms->后中位ms n=… spread=…)`。重判只评基因和保存下来的候选，不重放中途那次策略 rebind，所以 KEEP 比完整运行少 1。比值后面同样是两次中位、样本数和极差；evidence 里留着 `before-samples` / `after-samples`。
 
 `./run.sh sysinfo`：`arch=x86_64`，4 CPU，1 socket，SMT 关，1 个 NUMA 节点，内存 16387328 KiB，THP `madvise`，大页 0。BIOS `skipped`（`/sys/class/dmi/id` 读不到）。`perf c2c` / `numactl` / `dmidecode` / `bpftrace` 都是 missing。IPI 的 RES / CAL / TLB 来自 `/proc/interrupts` 的实数，不是估计。`./run.sh check` 接着采样 1 秒：`cpu-class=idle`（user 3%，iowait 0%，idle 96%），磁盘扇区增量 0，这一秒的 IPI 增量是 RES=2 CAL=71 TLB=1。没有 cache-to-cache 命中数，也没有 SOL。
 

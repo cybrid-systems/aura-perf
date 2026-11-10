@@ -22,4 +22,6 @@
 
 (perf:write-text "out/recheck.txt"
                  (string-append (perf:join lines "\n") "\n"))
-(display "")
+(if (hash? evidence)
+    (exit 0)
+    (exit 1))

@@ -7,10 +7,10 @@
   (list
     (hash "verb" "autotune"
           "needs" "aura; perf optional (task-clock). No API key."
-          "summary" "Measure the target, mine, trial, gate, write out/report.txt.")
+          "summary" "Measure the target, mine, trial, gate, write out/report.txt. Exits 0 only when intend-met=1.")
     (hash "verb" "recheck"
           "needs" "out/evidence.json from autotune. No perf, no rebuild."
-          "summary" "Re-apply the current intend and strategy genes to the saved run.")
+          "summary" "Re-apply the current intend and strategy genes to the saved run. Exits non-zero when out/evidence.json is missing.")
     (hash "verb" "sysinfo"
           "needs" "read /proc and /sys. Root not required. perf, numactl, dmidecode, bpftrace optional."
           "summary" "Export this machine's inventory to out/sysinfo.txt and out/sysinfo.json.")

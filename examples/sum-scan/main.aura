@@ -45,8 +45,9 @@
 
 ; expert-intend and strategy-genes live in policy.aura.
 
-(perf:autotune
-  (hash "seed-path" "examples/sum-scan/seed.aura"
+(define result
+  (perf:autotune
+   (hash "seed-path" "examples/sum-scan/seed.aura"
         "worker" "examples/sum-scan/worker.aura"
         "target" "bench-kernel"
         "out-dir" "out"
@@ -89,5 +90,8 @@
               (load-candidate "linear-scan"
                               "examples/sum-scan/candidates/linear-scan.aura"
                               "bench-kernel"
-                              "one spine walk; expected to cut task-clock"))))
+                              "one spine walk; expected to cut task-clock")))))
 (display "done\n")
+; 0 when the verdict says intend-met=1. run.sh also checks the report
+; when this process returns 0, so a missed exit still fails the gate.
+(exit (if (and (hash? result) (= (hash-ref result "intend-met" 0) 1)) 0 1))

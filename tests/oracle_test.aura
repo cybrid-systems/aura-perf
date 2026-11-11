@@ -1,0 +1,59 @@
+; A kernel that returns a reply, not the sum of its input.
+; The spec's oracle and the candidate's own target are what the child uses.
+(require "lib/perf/score" all:)
+(require "lib/perf/util" all:)
+(require "lib/perf/loop" all:)
+
+(define (reply xs)
+  (string-append (car xs) "!"))
+
+(define (bad xs)
+  "no")
+
+(define oracle (lambda (xs) (string-append (car xs) "!")))
+(define cases (list (list "a") (list "bb")))
+(define good (perf:check-kernel reply cases oracle))
+(define wrong (perf:check-kernel bad cases oracle))
+(define timed (perf:time-checked 1 reply (list "ping") oracle))
+(define body (perf:extract-define (perf:read-text "examples/echo/seed.aura") "echo-kernel"))
+
+(define spec
+  (hash "seed-path" "examples/echo/seed.aura"
+        "target" "echo-kernel"
+        "kernel" "echo-kernel"
+        "heldout-n" 1
+        "screen-n" 0
+        "repeats" 1
+        "worker" "examples/sum-scan/worker.aura"
+        "inputs" (lambda (n) (list "ping"))
+        "oracle" oracle
+        "check-inputs" cases))
+
+(define job
+  (perf:job-record spec
+                   (hash "id" "baseline" "role" "baseline"
+                         "genome" "" "target" "other-define")
+                   "/tmp/echo-perf"))
+
+(shell "mkdir -p /tmp/echo-perf/jobs /tmp/echo-perf/trials")
+(perf:write-text (hash-ref job "job") (json-encode job))
+
+(define bin (let ((b (getenv "AURA_BIN")))
+              (if (and (string? b) (> (string-length b) 0)) b "aura")))
+(shell (string-append "AURA_SANDBOX=off AURA_PERF_JOB=" (hash-ref job "job")
+                      " " bin " --preset dev examples/sum-scan/worker.aura"
+                      " > /tmp/echo-perf/worker.out 2>&1"))
+(define got (json-parse (perf:read-text (hash-ref job "result"))))
+
+(display (list (hash-ref good "mismatches")
+               (hash-ref wrong "mismatches")
+               (hash-ref timed "mismatches")
+               (hash-ref timed "expected")
+               (if (and (string? body) (>= (string-length body) 20)
+                        (string=? (substring body 0 20) "(define (echo-kernel"))
+                   1 0)
+               (hash-ref job "target")
+               (hash-ref (car (hash-ref job "checks" '())) "expected")
+               (if (hash? got) (hash-ref got "checksum-ok" 0) -1)
+               (if (hash? got) (hash-ref got "status" "missing") "missing")))
+(newline)

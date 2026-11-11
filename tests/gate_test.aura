@@ -7,10 +7,14 @@
         "mismatches" (if (= checksum 1) 0 2)
         "heldout-ms" ms))
 
+(define penalty (row 120 1 1))
+
 (display (list (if (perf:accept? 100 (row 70 1 1) 20) 1 0)
                (if (perf:accept? 100 (row 90 1 1) 20) 1 0)
                (if (perf:accept? 100 (row 10 0 1) 20) 1 0)
                (if (perf:accept? 100 (row 10 1 0) 20) 1 0)
                (if (perf:speedup-ok? 164 12 20) 1 0)
-               (if (perf:speedup-ok? 0 12 20) 1 0)))
+               (if (perf:speedup-ok? 0 12 20) 1 0)
+               (if (perf:accept? 160 penalty 20 100) 1 0)
+               (perf:result-reject penalty 160 20 100)))
 (newline)

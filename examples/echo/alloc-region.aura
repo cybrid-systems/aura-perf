@@ -1,0 +1,27 @@
+; Times one allocating thunk and prints ms / alloc.
+; A fresh process each run, so the parent's heap does not change the number.
+(require "lib/perf/util" all:)
+
+(define (work)
+  (let loop ((i 0) (acc '()))
+    (if (>= i 8000)
+        acc
+        (loop (+ i 1) (cons i acc)))))
+
+(define (resident)
+  (let ((toks (perf:tokens (perf:read-text "/proc/self/statm"))))
+    (let ((n (perf:parse-number (if (and (pair? toks) (pair? (cdr toks)))
+                                    (car (cdr toks))
+                                    ""))))
+      (if (number? n) n 0))))
+
+(define before (resident))
+(define t0 (monotonic-ms))
+(work)
+(define ms (- (monotonic-ms) t0))
+(display "ms ")
+(display ms)
+(newline)
+(display "alloc ")
+(display (- (resident) before))
+(newline)

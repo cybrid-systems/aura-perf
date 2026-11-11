@@ -3,7 +3,7 @@
 ; passed the held-out gate in a child process. Strategy rewrites use
 ; ast:snapshot / ast:restore on this process.
 
-(export perf:optimize perf:autotune)
+(export perf:optimize perf:autotune perf:job-record)
 
 (require "std/evo-core" all:)
 (require "std/evo" all:)
@@ -44,6 +44,9 @@
         ((string=? reason "gate-pass") "gate-pass")
         ((string=? reason "screen-pruned") "screen-pruned")
         ((string=? reason "no-speedup") "no-speedup")
+        ((and (string? reason) (>= (string-length reason) 15)
+              (string=? (substring reason 0 15) "rebind-penalty"))
+         "rebind-penalty")
         ((string=? reason "held-out gate") "held-out gate")
         (else (if (string? reason) reason "error"))))
 
@@ -65,11 +68,46 @@
           (eval-current)
           #t))))
 
+(define (perf:inputs-fn spec)
+  (let ((f (hash-ref spec "inputs" #f)))
+    (if (procedure? f) f perf:range)))
+
+(define (perf:oracle-fn spec)
+  (let ((f (hash-ref spec "oracle" #f)))
+    (if (procedure? f) f perf:sum-ref)))
+
+(define (perf:check-cases spec)
+  (let ((c (hash-ref spec "check-inputs" #f)))
+    (if (list? c) c (perf:check-inputs))))
+
+(define (perf:run-check spec kernel)
+  (let ((c (hash-ref spec "check" #f)))
+    (if (procedure? c)
+        (c kernel)
+        (perf:check-kernel kernel (perf:check-cases spec) (perf:oracle-fn spec)))))
+
 (define (perf:baseline spec)
-  (let ((xs (perf:range (hash-ref spec "heldout-n" 0))))
+  (let ((xs ((perf:inputs-fn spec) (hash-ref spec "heldout-n" 0))))
     (perf:time-checked (hash-ref spec "repeats" 3)
                        (hash-ref spec "call")
-                       xs)))
+                       xs
+                       (perf:oracle-fn spec))))
+
+(define (perf:bake-one spec n)
+  (if (or (not (number? n)) (<= n 0))
+      (hash)
+      (let ((xs ((perf:inputs-fn spec) n)))
+        (hash "input" xs "expected" ((perf:oracle-fn spec) xs)))))
+
+(define (perf:bake-checks spec)
+  (let ((oracle (perf:oracle-fn spec)))
+    (let loop ((xs (perf:check-cases spec)) (acc '()))
+      (if (null? xs)
+          (reverse acc)
+          (loop (cdr xs)
+                (cons (hash "input" (car xs)
+                            "expected" (oracle (car xs)))
+                      acc))))))
 
 (define (perf:catalog spec)
   (hash-ref spec "catalog" '()))
@@ -82,13 +120,29 @@
             (car xs)
             (loop (cdr xs))))))
 
+(define (perf:cand-target spec cand)
+  (let ((t (hash-ref cand "target" "")))
+    (if (and (string? t) (not (string=? t "")))
+        t
+        (hash-ref spec "target" "bench-kernel"))))
+
+; The job carries the candidate's own target, so one catalog can rebind
+; more than one define. checks/heldout/screen are values the parent
+; oracle already produced; the child cannot rewrite that oracle.
 (define (perf:job-record spec cand out)
-  (let ((id (hash-ref cand "id" "candidate")))
+  (let ((id (hash-ref cand "id" "candidate"))
+        (target (perf:cand-target spec cand)))
     (hash "id" id
           "seed" (hash-ref spec "seed-path")
-          "target" (hash-ref spec "target" "bench-kernel")
+          "target" target
+          "kernel" (hash-ref spec "kernel" (hash-ref spec "target" "bench-kernel"))
+          "role" (hash-ref cand "role" "candidate")
           "genome" (hash-ref cand "genome" "")
           "heldout-n" (hash-ref spec "heldout-n")
+          "heldout" (perf:bake-one spec (hash-ref spec "heldout-n" 0))
+          "screen" (perf:bake-one spec (hash-ref spec "screen-n" 0))
+          "checks" (perf:bake-checks spec)
+          "count-defines" (if (eq? (hash-ref spec "count-defines" #f) #t) 1 0)
           "repeats" (hash-ref spec "repeats" 3)
           "timeout-ms" 60000
           "screen-n" (hash-ref spec "screen-n" 0)
@@ -118,16 +172,23 @@
 
 ; perf:reason (the report's PASS/ROLLBACK label) lives in lib/perf/gate.aura,
 ; next to the predicate the run and the recheck share.
-(define (perf:format-candidate result baseline pct)
+(define (perf:raw-of spec)
+  (let ((n (hash-ref spec "raw-baseline-ms" #f)))
+    (if (and (number? n) (> n 0)) n #f)))
+
+(define (perf:format-candidate result baseline pct raw)
+  (let ((reason (if raw
+                    (perf:reason result baseline pct raw)
+                    (perf:reason result baseline pct))))
   (string-append
     "candidate " (hash-ref result "id" "?")
-    " " (if (string=? (perf:reason result baseline pct) "gate-pass") "PASS" "ROLLBACK")
-    " reason=" (perf:reason result baseline pct)
+    " " (if (string=? reason "gate-pass") "PASS" "ROLLBACK")
+    " reason=" reason
     " heldout-ms=" (number->string (hash-ref result "heldout-ms" -1))
     " mismatches=" (number->string (hash-ref result "mismatches" -1))
     " live-unchanged=" (number->string (hash-ref result "live-unchanged" 0))
     " trial-applied=" (number->string (hash-ref result "trial-applied" 0))
-    " dur-ms=" (number->string (hash-ref result "dur-ms" 0))))
+    " dur-ms=" (number->string (hash-ref result "dur-ms" 0)))))
 
 (define (perf:sum-dur results)
   (let loop ((xs results) (acc 0))
@@ -164,9 +225,12 @@
                     (perf:say buf (string-append "candidate " id " ROLLBACK reason=missing-result"))
                     (perf:note buf "reject" id "missing-result")
                     (perf:bump buf "rollback")
-                    (perf:audit-decision (hash-ref spec "target" "bench-kernel")
+                    (perf:audit-decision (perf:cand-target spec (car xs))
                                          "ROLLBACK" "missing-result" (hash "id" id)))
-                  (let* ((reason (perf:reason result baseline pct))
+                  (let* ((raw (perf:raw-of spec))
+                         (reason (if raw
+                                     (perf:reason result baseline pct raw)
+                                     (perf:reason result baseline pct)))
                          (q (perf:cct-worldline-query
                               (hash-ref spec "profile-cct" #f)
                               (hash-ref result "cct" #f)
@@ -178,7 +242,7 @@
                     (hash-set! result "moved-to" (perf:join (hash-ref q "moved-to" '()) ","))
                     (hash-set! result "target" (hash-ref (car xs) "target" ""))
                     (hash-set! buf "results" (append (hash-ref buf "results" '()) (list result)))
-                    (perf:say buf (perf:format-candidate result baseline pct))
+                    (perf:say buf (perf:format-candidate result baseline pct raw))
                     (perf:say buf (string-append "worldline " id
                                                  " measured=" (number->string (hash-ref result "measured" 0))
                                                  " prefix-removed=" (number->string (hash-ref result "prefix-removed" 0))
@@ -187,7 +251,7 @@
                                                  " fidelity=" (hash-ref result "fidelity" "")))
                     (perf:note buf (if pass "pass" "reject") id (perf:short-reason reason))
                     (perf:audit-decision
-                      (hash-ref spec "target" "bench-kernel")
+                      (perf:cand-target spec (car xs))
                       (if pass "PROPOSE" "ROLLBACK")
                       reason
                       (hash "id" id
@@ -212,18 +276,22 @@
                                                         (perf:short-reason reason))))))))
               (loop (cdr xs)))))))
 
-(define (perf:best-passing results baseline pct)
+(define (perf:best-passing results baseline pct . rest)
+  (let ((raw (if (pair? rest) (car rest) #f)))
   (let loop ((xs results) (best #f))
     (if (null? xs)
         best
         (let ((r (car xs)))
-          (if (and (hash? r) (perf:accept? baseline r pct))
+          (if (and (hash? r)
+                   (if raw
+                       (perf:accept? baseline r pct raw)
+                       (perf:accept? baseline r pct)))
               (if (or (not best)
                       (< (hash-ref r "heldout-ms" 999999999)
                          (hash-ref best "heldout-ms" 999999999)))
                   (loop (cdr xs) r)
                   (loop (cdr xs) best))
-              (loop (cdr xs) best))))))
+              (loop (cdr xs) best)))))))
 
 (define (perf:any-infra? results)
   (let loop ((xs (if (list? results) results '())))
@@ -234,20 +302,25 @@
             #t
             (loop (cdr xs))))))
 
-(define (perf:failed-ids results baseline pct)
+(define (perf:failed-ids results baseline pct . rest)
+  (let ((raw (if (pair? rest) (car rest) #f)))
   (let loop ((xs results) (acc '()))
     (if (null? xs)
         (reverse acc)
         (let ((r (car xs)))
-          (if (and (hash? r) (not (perf:accept? baseline r pct)))
+          (if (and (hash? r)
+                   (not (if raw
+                            (perf:accept? baseline r pct raw)
+                            (perf:accept? baseline r pct))))
               (loop (cdr xs) (cons (hash-ref r "id" "") acc))
-              (loop (cdr xs) acc))))))
+              (loop (cdr xs) acc)))))))
 
 (define (perf:commit-kernel spec entry baseline buf)
   ; Snapshot first. A parallel let could rebind before the snapshot.
   (let* ((snap (mutate :snapshot "perf-kernel"))
          (compile-before (perf:compile-snap))
-         (rb (mutate:rebind (hash-ref spec "target" "bench-kernel")
+         (rb (mutate:rebind (hash-ref entry "target"
+                                          (hash-ref spec "target" "bench-kernel"))
                             (hash-ref entry "genome" "")
                             "perf-keep")))
     (if (not (eq? rb #t))
@@ -262,10 +335,11 @@
           (eval-current)
           (let* ((compile-after (perf:compile-snap))
                  (cd (perf:compile-delta compile-before compile-after))
-                 (chk (perf:check-kernel (hash-ref spec "call") (perf:check-inputs)))
+                 (chk (perf:run-check spec (hash-ref spec "call")))
                  (tm (perf:time-checked (hash-ref spec "repeats" 3)
                                         (hash-ref spec "call")
-                                        (perf:range (hash-ref spec "heldout-n"))))
+                                        ((perf:inputs-fn spec) (hash-ref spec "heldout-n" 0))
+                                        (perf:oracle-fn spec)))
                  (pct (hash-ref spec "min-speedup-pct" 20))
                  (ok (and (eq? (hash-ref chk "ok" #f) #t)
                           (= (hash-ref tm "mismatches" 1) 0)
@@ -375,6 +449,8 @@
                         " self-ms=" (number->string (hash-ref h "self-ms" 0))
                         " calls=" (number->string (hash-ref h "calls" 0))
                         " share=" (number->string (hash-ref h "share" 0))
+                        " alloc-pages=" (number->string (hash-ref h "alloc-pages" 0))
+                        " measure=" (hash-ref h "measure" "")
                         " source=" (hash-ref h "source" "")
                         " stack=" (perf:join (hash-ref h "stack" '()) ">"))
                       acc))))))
@@ -484,8 +560,8 @@
             (perf:say buf "strategy ROLLBACK reason=trial-infrastructure")
             (perf:bump buf "rollback")
             #f)
-          (let ((failed (append (hash-ref buf "refused" '())
-                                (perf:failed-ids results baseline pct))))
+            (let ((failed (append (hash-ref buf "refused" '())
+                                (perf:failed-ids results baseline pct (perf:raw-of spec)))))
             (let ((next (perf:revise-order (perf:order-of plan) failed)))
               (let ((plan2 (perf:commit-strategy spec next buf)))
                 (if (not plan2)
@@ -499,7 +575,7 @@
                             (begin
                               (perf:say buf "round 2 aborted: trial infrastructure")
                               #f)
-                            (perf:best-passing results2 baseline pct)))))))))))
+                            (perf:best-passing results2 baseline pct (perf:raw-of spec))))))))))))
 
 (define (perf:say-each buf lines)
   (let loop ((xs lines))
@@ -711,15 +787,82 @@
                                "mine" (hash-ref spec "gene-mine" perf:mine)
                                "hot-child-fn" perf:hot-child))))))
 
-(define (perf:measure-screen spec buf)
-  (let ((n (hash-ref spec "screen-n" 0)))
-    (if (and (number? n) (> n 0))
-        (let ((tm (perf:time-checked 1 (hash-ref spec "call") (perf:range n))))
-          (hash-set! spec "screen-baseline-ms" (hash-ref tm "median" -1))
+(define (perf:usable-ms result)
+  (and (hash? result)
+       (string=? (hash-ref result "status" "") "ok")
+       (= (hash-ref result "checksum-ok" 0) 1)
+       (number? (hash-ref result "heldout-ms" -1))
+       (>= (hash-ref result "heldout-ms" -1) 0)))
+
+; Un-rebound baseline and null candidate, both in children. The gate
+; reference is the null (own body, rebound). The un-rebound child is the
+; number the verdict compares against, and the penalty is their gap.
+(define (perf:measure-references spec buf out)
+  (let* ((target (hash-ref spec "target" "bench-kernel"))
+         (null-body (perf:extract-define (perf:read-text (hash-ref spec "seed-path" ""))
+                                        target))
+         (base-rec (perf:job-record spec
+                                    (hash "id" "baseline" "role" "baseline"
+                                          "genome" "" "target" target)
+                                    out))
+         (null-rec (if (string=? null-body "")
+                       #f
+                       (perf:job-record spec
+                                        (hash "id" "null" "role" "null"
+                                              "genome" null-body "target" target)
+                                        out)))
+         (jobs (if null-rec (list base-rec null-rec) (list base-rec))))
+    (perf:write-jobs jobs)
+    (let* ((batch (perf:launch-jobs jobs (hash-ref spec "worker")))
+           (raw (perf:find-result (hash-ref batch "results" '()) "baseline"))
+           (nul (if null-rec
+                    (perf:find-result (hash-ref batch "results" '()) "null")
+                    #f))
+           (raw-ok (perf:usable-ms raw))
+           (null-ok (perf:usable-ms nul))
+           (parent (if raw-ok #f (perf:baseline spec)))
+           (raw-ms (if raw-ok
+                       (hash-ref raw "heldout-ms")
+                       (if (hash? parent) (hash-ref parent "median" -1) -1)))
+           (raw-samples (if raw-ok
+                            (hash-ref raw "samples" '())
+                            (if (hash? parent) (hash-ref parent "samples" '()) '())))
+           (gate-ms (if null-ok (hash-ref nul "heldout-ms") raw-ms))
+           (gate-source (cond (null-ok "null-candidate")
+                              (raw-ok "unrebound-child")
+                              (else "parent-fallback"))))
+      (if (and raw-ok
+               (number? (hash-ref raw "screen-ms" -1))
+               (>= (hash-ref raw "screen-ms" -1) 0))
+          (hash-set! spec "screen-baseline-ms" (hash-ref raw "screen-ms"))
+          #f)
+      (hash-set! spec "raw-baseline-ms" (if (and (number? raw-ms) (> raw-ms 0)) raw-ms #f))
+      (hash-set! spec "gate-baseline-ms" gate-ms)
+      (perf:say buf (string-append "baseline-heldout-ms " (number->string raw-ms)
+                                   " source=" (if raw-ok "unrebound-child" "parent-fallback")
+                                   " samples=" (perf:sample-text raw-samples)))
+      (perf:say buf (string-append "null-candidate heldout-ms "
+                                   (number->string (if null-ok
+                                                       (hash-ref nul "heldout-ms")
+                                                       -1))
+                                   " rebound=1 target=" target
+                                   (if (string=? null-body "") " genome=missing" "")))
+      (perf:say buf (string-append "gate-baseline-ms " (number->string gate-ms)
+                                   " source=" gate-source))
+      (if (and null-ok raw-ok)
+          (perf:say buf (string-append "rebind-penalty-ms "
+                                       (number->string (- (hash-ref nul "heldout-ms") raw-ms))))
+          #f)
+      (if (and raw-ok (number? (hash-ref raw "screen-ms" -1)))
           (perf:say buf (string-append "screen-baseline-ms "
-                                       (number->string (hash-ref tm "median" -1))
-                                       " n=" (number->string n))))
-        #f)))
+                                       (number->string (hash-ref raw "screen-ms" -1))
+                                       " n=" (number->string (hash-ref spec "screen-n" 0))
+                                       " source=unrebound-child"))
+          #f)
+      (hash "raw-ms" raw-ms
+            "raw-samples" raw-samples
+            "gate-ms" gate-ms
+            "gate-source" gate-source))))
 
 (define (perf:say-machine buf)
   (let ((info (try (perf:sysinfo) (catch (e) #f))))
@@ -811,11 +954,11 @@
                           "hottest" hottest
                           "hotspots" (perf:hotspots profile)))
                (llm (perf:llm-propose ctx))
-               (base (perf:baseline spec))
-               (baseline (hash-ref base "median" -1))
+               (refs (perf:measure-references spec buf out))
+               (baseline (hash-ref refs "gate-ms" -1))
                (pct (hash-ref spec "min-speedup-pct" 20)))
-          (hash-set! buf "before-ms" baseline)
-          (hash-set! buf "before-samples" (hash-ref base "samples" '()))
+          (hash-set! buf "before-ms" (hash-ref refs "raw-ms" -1))
+          (hash-set! buf "before-samples" (hash-ref refs "raw-samples" '()))
           (hash-set! buf "profile" profile)
           (perf:say buf "aura-perf sum-scan")
           (perf:say buf (perf:tool-line profile))
@@ -840,10 +983,10 @@
                                                        (perf:order-of plan))
                                                   "")))
           (perf:say buf (string-append "llm-proposer " (hash-ref llm "error" "?")))
-          (perf:say buf (string-append "baseline-heldout-ms " (number->string baseline)
-                                       " samples=" (perf:sample-text (hash-ref base "samples" '()))))
+          (perf:say buf (string-append "process-state region="
+                                       (hash-ref profile "region-measure" "in-process")
+                                       " held-out=trial-child comparable=0"))
           (perf:say-machine buf)
-          (perf:measure-screen spec buf)
           (let ((bin (hash-ref (hash-ref profile "tools" (hash)) "perf" "missing")))
             (if (and (string? bin) (not (string=? bin "missing")))
                 (let ((live (perf:measure-live bin (lambda () (perf:run-kernel spec 4000)))))
@@ -856,7 +999,7 @@
                             (hash-set! buf "budget"
                                        (+ (hash-ref buf "budget" 0) (length cands)))
                             (perf:trial-round spec cands out buf baseline)))
-                 (best (perf:best-passing results baseline pct)))
+                 (best (perf:best-passing results baseline pct (perf:raw-of spec))))
             (let ((winner (perf:choose-winner spec results best plan child hottest out buf baseline pct)))
               (if (not winner)
                   (perf:say buf "kernel unchanged")

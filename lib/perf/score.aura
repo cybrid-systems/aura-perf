@@ -38,31 +38,41 @@
 
 (define (perf:check-inputs) perf-check-inputs)
 
-(define (perf:check-kernel kernel cases)
-  (let loop ((cs (if (list? cases) cases '())) (bad 0) (n 0))
-    (if (null? cs)
-        (hash "ok" (= bad 0) "mismatches" bad "cases" n)
-        (let* ((xs (car cs))
-               (got (try (kernel xs) (catch (e) 'perf-error)))
-               (exp (perf:sum-ref xs)))
-          (loop (cdr cs)
-                (+ bad (if (equal? got exp) 0 1))
-                (+ n 1))))))
+; Optional trailing oracle. The default sums the input, which is the
+; sum-scan target. A kernel that returns something else passes its own
+; procedure; it stays outside the mutable workspace.
+(define (perf:oracle-of rest)
+  (if (and (pair? rest) (procedure? (car rest)))
+      (car rest)
+      perf:sum-ref))
+
+(define (perf:check-kernel kernel cases . rest)
+  (let ((oracle (perf:oracle-of rest)))
+    (let loop ((cs (if (list? cases) cases '())) (bad 0) (n 0))
+      (if (null? cs)
+          (hash "ok" (= bad 0) "mismatches" bad "cases" n)
+          (let* ((xs (car cs))
+                 (got (try (kernel xs) (catch (e) 'perf-error)))
+                 (exp (oracle xs)))
+            (loop (cdr cs)
+                  (+ bad (if (equal? got exp) 0 1))
+                  (+ n 1)))))))
 
 ; Warm up once, then time `repeats` calls. Every sample must equal the oracle.
-(define (perf:time-checked repeats kernel xs)
-  (let ((exp (perf:sum-ref xs))
-        (n (if (and (number? repeats) (> repeats 0)) repeats 1)))
-    (try (kernel xs) (catch (e) #f))
-    (let loop ((i 0) (samples '()) (bad 0))
-      (if (>= i n)
-          (let ((ss (reverse samples)))
-            (hash "median" (perf:median ss)
-                  "samples" ss
-                  "mismatches" bad
-                  "expected" exp))
-          (let ((t0 (monotonic-ms)))
-            (let ((got (try (kernel xs) (catch (e) 'perf-error))))
-              (loop (+ i 1)
-                    (cons (- (monotonic-ms) t0) samples)
-                    (+ bad (if (equal? got exp) 0 1)))))))))
+(define (perf:time-checked repeats kernel xs . rest)
+  (let ((oracle (perf:oracle-of rest)))
+    (let ((exp (oracle xs))
+          (n (if (and (number? repeats) (> repeats 0)) repeats 1)))
+      (try (kernel xs) (catch (e) #f))
+      (let loop ((i 0) (samples '()) (bad 0))
+        (if (>= i n)
+            (let ((ss (reverse samples)))
+              (hash "median" (perf:median ss)
+                    "samples" ss
+                    "mismatches" bad
+                    "expected" exp))
+            (let ((t0 (monotonic-ms)))
+              (let ((got (try (kernel xs) (catch (e) 'perf-error))))
+                (loop (+ i 1)
+                      (cons (- (monotonic-ms) t0) samples)
+                      (+ bad (if (equal? got exp) 0 1))))))))))

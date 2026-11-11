@@ -1,0 +1,3 @@
+; A target that returns a reply string, not the sum of its input.
+(define (echo-kernel xs)
+  (string-append (car xs) "!"))

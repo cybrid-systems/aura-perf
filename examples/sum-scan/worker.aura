@@ -4,6 +4,7 @@
 ; child workspace refuses mutate:rebind.
 
 (require "std/evo-core" all:)
+(require "std/string" all:)
 (require "lib/perf/util" all:)
 (require "lib/perf/score" all:)
 (require "lib/perf/cct" all:)
@@ -36,16 +37,46 @@
 (eval-current)
 
 (define target (hash-ref job "target" "bench-kernel"))
+(define kernel-name (hash-ref job "kernel" target))
 (define genome (hash-ref job "genome" ""))
 (define ident (hash-ref job "id" "candidate"))
-(define heldout (perf:range (hash-ref job "heldout-n" 0)))
+(define role (hash-ref job "role" "candidate"))
 (define repeats (hash-ref job "repeats" 3))
 
+; An empty genome is the un-rebound baseline: same child shape as a
+; candidate, but mutate:rebind is not applied. The null candidate passes
+; the target's own define text and does rebind.
 (define (apply-candidate c)
-  (let ((rb (mutate:rebind target (hash-ref c "genome" "") "perf-trial")))
-    (if (eq? rb #t)
-        (begin (eval-current) #t)
-        rb)))
+  (let ((g (hash-ref c "genome" "")))
+    (if (or (string=? role "baseline")
+            (not (string? g))
+            (string=? g ""))
+        #t
+        (let ((rb (mutate:rebind target g "perf-trial")))
+          (if (eq? rb #t)
+              (begin (eval-current) #t)
+              rb)))))
+
+(define (run-kernel xs)
+  (let ((fn (try (eval (string->symbol kernel-name)) (catch (e) #f))))
+    (if (procedure? fn)
+        (fn xs)
+        'perf-error)))
+
+(define (baked-oracle cases)
+  (lambda (xs)
+    (let loop ((cs (if (list? cases) cases '())))
+      (if (null? cs)
+          'perf-missing
+          (if (equal? (hash-ref (car cs) "input" #f) xs)
+              (hash-ref (car cs) "expected" #f)
+              (loop (cdr cs)))))))
+
+(define (case-inputs cases)
+  (let loop ((cs (if (list? cases) cases '())) (acc '()))
+    (if (null? cs)
+        (reverse acc)
+        (loop (cdr cs) (cons (hash-ref (car cs) "input" '()) acc)))))
 
 (define cand
   (evo:candidate genome
@@ -94,35 +125,67 @@
                          "screen-ms" screen-ms
                          "cct" cct)))
 
+(define (heldout-of)
+  (let ((baked (hash-ref job "heldout" #f)))
+    (if (and (hash? baked) (not (eq? (hash-ref baked "input" 'missing) 'missing)))
+        (hash "input" (hash-ref baked "input" '())
+              "oracle" (lambda (ys) (hash-ref baked "expected" #f)))
+        (hash "input" (perf:range (hash-ref job "heldout-n" 0))
+              "oracle" perf:sum-ref))))
+
+(define (screen-of)
+  (let ((baked (hash-ref job "screen" #f)))
+    (if (and (hash? baked) (not (eq? (hash-ref baked "input" 'missing) 'missing)))
+        (hash "input" (hash-ref baked "input" '())
+              "oracle" (lambda (ys) (hash-ref baked "expected" #f)))
+        (let ((n (hash-ref job "screen-n" 0)))
+          (if (and (number? n) (> n 0))
+              (hash "input" (perf:range n) "oracle" perf:sum-ref)
+              #f)))))
+
+(define (check-of)
+  (let ((baked (hash-ref job "checks" #f)))
+    (if (and (list? baked) (pair? baked))
+        (perf:check-kernel run-kernel (case-inputs baked) (baked-oracle baked))
+        (perf:check-kernel run-kernel (perf:check-inputs)))))
+
 (define tr
   (evo:trial cand
              (hash "apply" apply-candidate
                    "timeout-ms" (hash-ref job "timeout-ms" 60000)
                    "evaluate"
                    (lambda (c)
-                     (let ((chk (perf:check-kernel bench-kernel (perf:check-inputs))))
+                     (let ((chk (check-of)))
                        (if (> (hash-ref chk "mismatches" 1) 0)
                            (screen-result -1
                                           (hash "kind" "perf-cct" "nodes" '())
                                           "checksum" -1
                                           (hash-ref chk "mismatches")
                                           '())
-                           (let* ((n (hash-ref job "screen-n" 0))
-                                  (screen-xs (if (and (number? n) (> n 0)) (perf:range n) '()))
-                                  (screen (if (null? screen-xs)
+                           (let* ((screen-spec (screen-of))
+                                  (screen (if (not screen-spec)
                                               (hash "median" -1)
-                                              (perf:time-checked 1 bench-kernel screen-xs)))
+                                              (perf:time-checked 1 run-kernel
+                                                                 (hash-ref screen-spec "input" '())
+                                                                 (hash-ref screen-spec "oracle" perf:sum-ref))))
                                   (screen-ms (hash-ref screen "median" -1))
-                                  (cct (if (null? screen-xs)
+                                  (screen-xs (if screen-spec (hash-ref screen-spec "input" '()) '()))
+                                  (cct (if (or (not screen-spec)
+                                               (not (= (hash-ref job "count-defines" 0) 1)))
                                            (hash "kind" "perf-cct" "nodes" '())
-                                           (worldline-cct bench-kernel screen-xs screen-ms)))
-                                  (prune (perf:screen-prune?
-                                           (hash-ref job "screen-baseline-ms" -1)
-                                           screen-ms
-                                           (hash-ref job "screen-slack-ms" 5))))
-                             (if prune
+                                           (worldline-cct run-kernel screen-xs screen-ms)))
+                                  (hold (and (not (string=? role "null"))
+                                             (not (string=? role "baseline"))
+                                             (perf:screen-prune?
+                                               (hash-ref job "screen-baseline-ms" -1)
+                                               screen-ms
+                                               (hash-ref job "screen-slack-ms" 5)))))
+                             (if hold
                                  (screen-result screen-ms cct "screen-pruned" -1 0 '())
-                                 (let ((tm (perf:time-checked repeats bench-kernel heldout)))
+                                 (let* ((ho (heldout-of))
+                                        (tm (perf:time-checked repeats run-kernel
+                                                               (hash-ref ho "input" '())
+                                                               (hash-ref ho "oracle" perf:sum-ref))))
                                    (screen-result screen-ms cct "held-out"
                                                   (hash-ref tm "median")
                                                   (hash-ref tm "mismatches")

@@ -23,37 +23,60 @@
 ; KEEP is a KEEP for all of them.
 ; Returns the reject reason (the short canonical one), or "" when the
 ; result passes. The report adds the detail it has always printed.
-(define (perf:result-reject result baseline-ms pct)
-  (cond
-    ((not (hash? result)) "no-result")
-    ((not (string=? (hash-ref result "status" "") "ok"))
-     (let ((e (hash-ref result "error" "")))
-       (if (and (string? e) (not (string=? e "")))
-           e
-           (string-append "trial-" (hash-ref result "status" "error")))))
-    ((or (string=? (hash-ref result "fidelity" "") "checksum")
-         (not (perf:flag-on? result "checksum-ok"))
-         (> (hash-ref result "mismatches" 0) 0))
-     "checksum")
-    ((not (perf:flag-on? result "live-unchanged")) "isolation-violation")
-    ((string=? (hash-ref result "fidelity" "") "screen-pruned") "screen-pruned")
-    ((not (perf:speedup-ok? baseline-ms (hash-ref result "heldout-ms" -1) pct))
-     "no-speedup")
-    (else "")))
+; `baseline-ms` is the gate reference (the null candidate: the target's
+; own body, rebound). An optional raw-ms is the un-rebound baseline.
+; A candidate that clears the null but not the un-rebound time is a
+; rebind-penalty, not a silent no-speedup and not a win.
+(define (perf:raw-ms rest)
+  (if (and (pair? rest) (number? (car rest)) (> (car rest) 0))
+      (car rest)
+      #f))
 
-(define (perf:accept? baseline-ms result pct)
-  (string=? (perf:result-reject result baseline-ms pct) ""))
+(define (perf:result-reject result baseline-ms pct . rest)
+  (let ((raw (perf:raw-ms rest))
+        (held (if (hash? result) (hash-ref result "heldout-ms" -1) -1)))
+    (cond
+      ((not (hash? result)) "no-result")
+      ((not (string=? (hash-ref result "status" "") "ok"))
+       (let ((e (hash-ref result "error" "")))
+         (if (and (string? e) (not (string=? e "")))
+             e
+             (string-append "trial-" (hash-ref result "status" "error")))))
+      ((or (string=? (hash-ref result "fidelity" "") "checksum")
+           (not (perf:flag-on? result "checksum-ok"))
+           (> (hash-ref result "mismatches" 0) 0))
+       "checksum")
+      ((not (perf:flag-on? result "live-unchanged")) "isolation-violation")
+      ((string=? (hash-ref result "fidelity" "") "screen-pruned") "screen-pruned")
+      ((not (perf:speedup-ok? baseline-ms held pct))
+       "no-speedup")
+      ((and raw (not (perf:speedup-ok? raw held pct)))
+       "rebind-penalty")
+      (else ""))))
+
+(define (perf:accept? baseline-ms result pct . rest)
+  (if (pair? rest)
+      (string=? (perf:result-reject result baseline-ms pct (car rest)) "")
+      (string=? (perf:result-reject result baseline-ms pct) "")))
 
 ; The report's PASS/ROLLBACK label for one trial result. The conditions are
 ; the gate's conditions (perf:result-reject), so the label and the KEEP
 ; decision cannot disagree. The checksum reason keeps the mismatch count
 ; the report has always printed.
-(define (perf:reason result baseline pct)
-  (let ((r (perf:result-reject result baseline pct)))
+(define (perf:reason result baseline pct . rest)
+  (let ((r (if (pair? rest)
+               (perf:result-reject result baseline pct (car rest))
+               (perf:result-reject result baseline pct)))
+        (raw (perf:raw-ms rest)))
     (cond ((string=? r "") "gate-pass")
           ((string=? r "checksum")
            (string-append "checksum mismatches="
                           (number->string (hash-ref result "mismatches" -1))))
+          ((string=? r "rebind-penalty")
+           (string-append "rebind-penalty heldout-ms="
+                          (number->string (hash-ref result "heldout-ms" -1))
+                          " gate-ms=" (number->string baseline)
+                          " raw-ms=" (number->string (if raw raw -1))))
           (else r))))
 
 ; The intend is a value the strategy cannot rewrite. A gene that asks

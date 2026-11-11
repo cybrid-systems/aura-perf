@@ -26,18 +26,28 @@
         "genome" (perf:read-text path)
         "thought" thought))
 
+; Each region is timed in its own process. The in-process thunk is only
+; the fallback if that command does not print a median.
+(define (region-cmd name)
+  (string-append "env AURA_SANDBOX=off AURA_PERF_TIME=1 AURA_PERF_REGION=" name
+                 " AURA_PERF_N=4000 AURA_PERF_REPS=3 "
+                 (aura-bin) " examples/sum-scan/perf-region.aura"))
+
 (define (regions)
   (let ((n 4000)
         (xs (perf:range 4000)))
     (list
       (hash "name" "bench-kernel" "calls" 1 "workload" #t
             "stack" (list "bench-kernel")
+            "command" (region-cmd "bench-kernel")
             "thunk" (lambda () (bench-kernel xs)))
       (hash "name" "k-length" "calls" 1
             "stack" (list "bench-kernel" "k-length")
+            "command" (region-cmd "k-length")
             "thunk" (lambda () (k-length xs)))
       (hash "name" "k-ref" "calls" n
             "stack" (list "bench-kernel" "k-ref")
+            "command" (region-cmd "k-ref")
             "thunk" (lambda ()
                       (let loop ((i 0))
                         (if (>= i n) 0
@@ -62,6 +72,8 @@
         "require-success" #t
         "intend" expert-intend
         "call" call-kernel
+        "kernel" "bench-kernel"
+        "count-defines" #t
         "regions-fn" regions
         "perf-after" (perf-cmd "linear")
         "perf-targets"

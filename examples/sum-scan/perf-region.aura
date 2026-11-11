@@ -1,3 +1,5 @@
+(require "lib/perf/util" all:)
+
 ; Target program measured by Linux perf.
 ; This is the workload under optimization, not a profile of the Aura runtime.
 ; AURA_PERF_REGION selects which user define to run:
@@ -39,6 +41,19 @@
 (define reps (env-int "AURA_PERF_REPS" 3))
 (define xs (range n))
 
+(define (resident)
+  (let ((toks (perf:tokens (perf:read-text "/proc/self/statm"))))
+    (let ((n (perf:parse-number (if (and (pair? toks) (pair? (cdr toks)))
+                                    (car (cdr toks))
+                                    ""))))
+      (if (number? n) n 0))))
+
+(define (median samples)
+  (if (null? samples)
+      -1
+      (let ((xs (sort samples <)))
+        (list-ref xs (quotient (- (length xs) 1) 2)))))
+
 (define (once)
   (cond ((string=? region "k-ref")
          (let loop ((i 0) (acc 0))
@@ -50,7 +65,31 @@
         (else
          (bench-kernel xs))))
 
-(let loop ((i 0) (acc 0))
-  (if (>= i reps)
-      (begin (display acc) (newline))
-      (loop (+ i 1) (+ acc (once)))))
+(define timing (let ((v (getenv "AURA_PERF_TIME")))
+                 (and (string? v) (string=? v "1"))))
+
+(define (print-time)
+  (let ((before (resident)))
+    (once)
+    (let loop ((i 0) (samples '()))
+      (if (>= i reps)
+          (begin
+            (display "ms ")
+            (display (median (reverse samples)))
+            (newline)
+            (display "alloc ")
+            (display (- (resident) before))
+            (newline))
+          (let ((t0 (monotonic-ms)))
+            (once)
+            (loop (+ i 1) (cons (- (monotonic-ms) t0) samples)))))))
+
+(define (print-sum)
+  (let loop ((i 0) (acc 0))
+    (if (>= i reps)
+        (begin (display acc) (newline))
+        (loop (+ i 1) (+ acc (once))))))
+
+(if timing
+    (print-time)
+    (print-sum))

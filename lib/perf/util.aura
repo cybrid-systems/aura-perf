@@ -6,7 +6,7 @@
         perf:nth perf:string-ref-ok? perf:char-at
         perf:named-let-reentrant? perf:named-let-fault-text
         perf:mutate-ops-present? perf:mutate-ops-fault-text
-        perf:verdict-speedup)
+        perf:verdict-speedup perf:extract-define)
 
 (require "std/string" all:)
 
@@ -228,6 +228,75 @@
                              "->" (number->string as) "ms")
               "")
           ")"))))
+
+; Source text of `(define name ...)` or `(define (name ...) ...)`.
+; The null candidate rebinds the target to this form, so the body is the
+; seed's, not a later mutation.
+(define (perf:starts-at? s i prefix)
+  (let ((m (string-length prefix))
+        (n (string-length s)))
+    (and (<= (+ i m) n)
+         (string=? (substring s i (+ i m)) prefix))))
+
+(define (perf:skip-ws s i)
+  (let ((n (string-length s)))
+    (let loop ((j i))
+      (if (>= j n)
+          j
+          (if (<= (perf:char-at s j) 32)
+              (loop (+ j 1))
+              j)))))
+
+(define (perf:name-boundary? s i name)
+  (let ((m (string-length name))
+        (n (string-length s)))
+    (and (perf:starts-at? s i name)
+         (or (>= (+ i m) n)
+             (let ((c (perf:char-at s (+ i m))))
+               (or (<= c 32) (= c 40) (= c 41)))))))
+
+(define (perf:define-at? s i name)
+  (if (not (perf:starts-at? s i "(define"))
+      #f
+      (let ((k (perf:skip-ws s (+ i 7))))
+        (if (and (< k (string-length s)) (= (perf:char-at s k) 40))
+            (perf:name-boundary? s (perf:skip-ws s (+ k 1)) name)
+            (perf:name-boundary? s k name)))))
+
+(define (perf:skip-string s i)
+  (let ((n (string-length s)))
+    (let loop ((j (+ i 1)))
+      (if (>= j n)
+          n
+          (let ((c (perf:char-at s j)))
+            (cond ((= c 92) (loop (+ j 2)))
+                  ((= c 34) (+ j 1))
+                  (else (loop (+ j 1)))))))))
+
+(define (perf:balanced-form s start)
+  (let ((n (string-length s)))
+    (let loop ((i start) (depth 0))
+      (if (>= i n)
+          ""
+          (let ((c (perf:char-at s i)))
+            (cond ((= c 34) (loop (perf:skip-string s i) depth))
+                  ((= c 40) (loop (+ i 1) (+ depth 1)))
+                  ((= c 41)
+                   (if (= depth 1)
+                       (substring s start (+ i 1))
+                       (loop (+ i 1) (- depth 1))))
+                  (else (loop (+ i 1) depth))))))))
+
+(define (perf:extract-define source name)
+  (if (or (not (string? source)) (not (string? name)) (string=? name ""))
+      ""
+      (let ((n (string-length source)))
+        (let loop ((i 0))
+          (if (>= i n)
+              ""
+              (if (perf:define-at? source i name)
+                  (perf:balanced-form source i)
+                  (loop (+ i 1))))))))
 
 (define (perf:verdict-speedup before-ms after-ms before-samples after-samples)
   (string-append "speedup-x=" (perf:fmt-x before-ms after-ms)

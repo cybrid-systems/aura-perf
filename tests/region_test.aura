@@ -1,0 +1,44 @@
+; The same allocating thunk, timed in a fresh child before and after
+; this process has allocated. The two medians stay in the same band.
+(require "lib/perf/profile" all:)
+(require "lib/perf/util" all:)
+
+(define bin (let ((b (getenv "AURA_BIN")))
+              (if (and (string? b) (> (string-length b) 0)) b "aura")))
+
+(define cmd
+  (string-append "env AURA_SANDBOX=off " bin
+                 " examples/echo/alloc-region.aura"))
+
+(define (sample)
+  (hash-ref (perf:region-sample (hash "command" cmd) 1) "ms" -1))
+
+(define (churn)
+  (let loop ((k 0))
+    (if (>= k 30)
+        #t
+        (begin
+          (let build ((i 0) (acc '()))
+            (if (>= i 4000)
+                acc
+                (build (+ i 1) (cons i acc))))
+          (loop (+ k 1))))))
+
+(define before (sample))
+(churn)
+(define after (sample))
+(define local (perf:region-sample
+                (hash "thunk" (lambda ()
+                                (let loop ((i 0) (acc '()))
+                                  (if (>= i 2000) acc (loop (+ i 1) (cons i acc))))))
+                1))
+
+(define (near a b)
+  (and (number? a) (number? b) (> a 0) (> b 0)
+       (< a (* b 5))
+       (< b (* a 5))))
+
+(display (list (if (near before after) 1 0)
+               (hash-ref local "measure" "")
+               (if (number? (hash-ref local "alloc-pages" 0)) 1 0)))
+(newline)

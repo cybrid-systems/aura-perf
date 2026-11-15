@@ -417,6 +417,9 @@
                               (perf:site-ok? site)))))
             (if ok
                 (begin
+                  ; The site the floor was measured on, so the verdict
+                  ; asks the same question the gate asked.
+                  (hash-set! buf "site" site)
                   (hash-set! buf "after-ms" (hash-ref tm "median"))
                   (hash-set! buf "after-samples" (hash-ref tm "samples" '()))
                   (perf:bump buf "keep")
@@ -751,6 +754,7 @@
           (let ((logn (try (length (evo:records)) (catch (e) -1))))
             (perf:say buf (string-append "evo-records " (number->string logn))))
           (let* ((site (hash-ref buf "site" (hash)))
+
                  ; The verdict asks the question the gate asked: the
                  ; program floor, or the site floor for a candidate that
                  ; won its own define.

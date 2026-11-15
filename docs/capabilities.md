@@ -26,6 +26,7 @@ spec 是目标项目和运行时之间的那份约定，运行时按它工作：
 | `intend` | 最低加速、checksum、预算、protected | 无 |
 | `genes` | 策略基因 | 无 |
 | `count-defines` | 要不要每条 worldline 的树（`#t` 或 define 名字的列表） | `#f` |
+| `null-genome` | null 候选的源码（目标 rebind 成自己）；目标的 define 不在 seed 里时用 | 从 seed 的文本里取 |
 | `label` | 报告第一行的名字 | `sum-scan` |
 | `worker` | 跑一个候选的子进程脚本 | `examples/sum-scan/worker.aura` |
 

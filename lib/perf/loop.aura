@@ -875,10 +875,21 @@
 ; Un-rebound baseline and null candidate, both in children. The gate
 ; reference is the null (own body, rebound). The un-rebound child is the
 ; number the verdict compares against, and the penalty is their gap.
+; The null candidate's genome: the target's own body, so the gate
+; compares a candidate against the same code with the rebind's tax
+; paid. The seed's text carries it when the target is defined in the
+; seed. A target whose defines live in another module (aura-redis's own
+; src/ ✗) needs the spec to say where the body is, with
+; "null-genome".
+(define (perf:null-genome spec target)
+  (let ((given (hash-ref spec "null-genome" "")))
+    (if (and (string? given) (> (string-length given) 0))
+        given
+        (perf:extract-define (perf:read-text (hash-ref spec "seed-path" "")) target))))
+
 (define (perf:measure-references spec buf out)
   (let* ((target (hash-ref spec "target" "bench-kernel"))
-         (null-body (perf:extract-define (perf:read-text (hash-ref spec "seed-path" ""))
-                                        target))
+         (null-body (perf:null-genome spec target))
          (base-rec (perf:job-record spec
                                     (hash "id" "baseline" "role" "baseline"
                                           "genome" "" "target" target)

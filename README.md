@@ -103,6 +103,9 @@ spec 就是一个普通的 Aura 文件。它 require 运行时（仓库根目录
   值，`check-inputs` 是 checksum 用的那几组。`check-inputs` 可以是一个过程：
   外部目标的输入常常要用目标自己的 define 造，而那些 define 只有 seed 装好之后
   才在 workspace 里。
+- **门比的是 null 候选。** null 候选把目标 rebind 成它自己的原样，所以参照和候选
+  付的是同一笔 rebind 的税（report 里是 `rebind-penalty-ms`）。目标的 define 如果不在
+  seed 里而在别的 module（aura-redis 的 `src/` ✓），spec 用 `null-genome` 给出那段源码 ✓。
 - **每条 worldline 的树由目标自己量。** seed 可以定义
   `(perf-worldline-measure kernel xs)`：它知道自己的 define 的元数，所以能装上
   计数器、跑一次 kernel、把每个 define 的调用次数和毫秒连同自己的 stack 报回来。

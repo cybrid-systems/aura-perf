@@ -142,6 +142,10 @@ Trial 子进程在 checksum 通过之后，量出那条 worldline 的树。**树
 `memory-loaded 3`，`negative-skip wrong-scale`、`negative-skip redundant-pass`，
 `budget-used` 从 3 降到 1，结论不变。
 
+键是**位点**（热叶子）和想法，不是 class。class 是矿工的结果，会跟着机器的噪声动：
+同一个目标两次跑可能被分成不同的 class，按 class 记的负例就漏了。记录里仍然留着
+当时的 class，报告里看得到。
+
 ### 9. 策略基因走同一条 KEEP / ROLLBACK
 
 分类比（默认 2）、`actionable-ms`、catalog 顺序是基因。`(perf:select-gene profile genes seal)` 逐个给 KEEP 或 ROLLBACK：`intend-bypass`、`misclassify`、`no-actionable-site`、`no-signal`、`empty-order`，胜者才 `mutate:rebind` `perf-strategy`。输家不改 live 定义。基因不能把 checksum 关掉、不能把最低加速调低、不能缩短 protected。

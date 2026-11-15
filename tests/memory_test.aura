@@ -17,6 +17,7 @@
 
 (display (list (if (perf:neg-blocked? mem "repeated-index-walk" "k-ref" "wrong-scale") 1 0)
                (if (perf:neg-blocked? mem "repeated-index-walk" "other" "wrong-scale") 1 0)
+               ; the class moves with the machine, so it is not part of the key
                (if (perf:neg-blocked? mem "flat-hot" "k-ref" "wrong-scale") 1 0)
                (length mem)
                (length again)

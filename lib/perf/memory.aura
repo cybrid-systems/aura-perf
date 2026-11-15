@@ -1,7 +1,12 @@
-; Negative memory keyed by mined class and hot node.
+; Negative memory keyed by the hot node (the site) and the idea.
 ; Dropping a candidate id is not enough: the same idea must not be
 ; proposed again for the same hotspot, and may be proposed again when
 ; the hotspot changes.
+;
+; The class is not part of the key. The class is a mining result and it
+; moves with the machine: the same target can be classified differently
+; on two runs, and a memory keyed by it would miss. The record keeps the
+; class it was made under, for the report.
 
 (export perf:neg-remember perf:neg-blocked? perf:neg-query
         perf:neg-ideas perf:filter-negative
@@ -30,7 +35,6 @@
 
 (define (perf:neg-same? rec class hot idea)
   (and (hash? rec)
-       (string=? (hash-ref rec "class" "") class)
        (string=? (hash-ref rec "hot-node" "") hot)
        (string=? (hash-ref rec "idea" "") idea)))
 
@@ -59,7 +63,6 @@
         (let ((r (car xs)))
           (loop (cdr xs)
                 (if (and (hash? r)
-                         (string=? (hash-ref r "class" "") class)
                          (string=? (hash-ref r "hot-node" "") hot))
                     (cons r acc)
                     acc))))))

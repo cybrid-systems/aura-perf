@@ -6,6 +6,116 @@
 
 `aura-perf autotune` 跑完一轮。每个 worldline 有一棵 CCT，可以查询哪次 mutation 去掉了同一条热前缀且没有把代价挪走。负例按 `class` + `hot-node` 记住。分类阈值和 catalog 顺序是策略基因，走 KEEP / ROLLBACK。intend 封在门里。没有 perf 二进制时 CCT 用 region timer 的毫秒，并写明硬件计数器没有读。`aura-perf sysinfo` 和 `aura-perf check` 把这台机器的 CPU、内存、NUMA、中断和工具有无收成可查询的值。
 
+`autotune` 和 `recheck` 也可以带一个外部项目的 spec，目标和 region 都由目标项目自己给（见 README 的「外部目标」）。
+
+## 业务要什么
+
+下面这些数字是在 [aura-runner](https://github.com/cybrid-systems/aura-runner) 的物理路径上量到的（`perf/` 里的两个 spec，aarch64，没有 perf binary，走 region timer）。
+
+**服务器 tick 和公平性门走的是同一段物理。** 物理那条路：
+
+```
+hotspot bench-kernel self-ms=636 calls=1     share=47
+hotspot collide      self-ms=373 calls=600   share=27
+hotspot step-poppers self-ms=94 calls=600   share=6
+hotspot nudge-flyers self-ms=91 calls=600    share=6
+hotspot over-gap?    self-ms=73 calls=600    share=5
+hotspot pxs          self-ms=45 calls=18000  share=3
+hotspot pset         self-ms=41 calls=7800   share=3
+```
+
+autopilot（公平性门那条路）：
+
+```
+hotspot autopilot-kernel self-ms=6858 calls=1   share=77
+hotspot step             self-ms=872  calls=900 share=9
+hotspot autopilot-press  self-ms=336  calls=900 share=3
+hotspot collide          self-ms=280  calls=900 share=3
+hotspot next-hazard      self-ms=157  calls=900 share=1
+hotspot dodge-flyer      self-ms=82   calls=900 share=0
+hotspot dodge-block      self-ms=81   calls=900 share=0
+hotspot flyer-blocking?  self-ms=72   calls=900 share=0
+hotspot block-ahead?     self-ms=67   calls=900 share=0
+```
+
+三件事是业务要的：
+
+1. **一处改动，两条路都赚。** autopilot 的时间有大约六成在 `step` 里（`collide` 是里面最热的一块），服务器 tick 也是同一段代码。改 `collide` / `step` 一次，tick 和公平性门一起快。aura-perf 现在按「目标程序」分 spec，看不出这种共享。
+2. **一个 define 的改动最多只能赢目标的一小块。** 上面物理那条路里，最热的单点 `collide` 占 27%；收紧窗口这种改法最多赢它的一部分，也就是个位数百分比。现在 `intend` 的 `min-faster-pct` 是**整个目标**的地板（20%），所以这类改动永远过不了门 —— 门把「改对了地方」判成「没赢」。
+3. **行为不变要由目标自己的门来证。** aura-runner 的门是 `aura test` 的 golden（物理轨迹逐字节相同），不是「输入求和」。aura-perf 的 oracle 已经交给目标给（`inputs` / `oracle` / `check-inputs`），但门还是只能比对一个自定义的摘要；目标自己的测试命令（`aura test`）应该能直接当 checksum 用。
+
+## 工具：aura 有、aura-perf 还没用上的
+
+- **类型门当便宜的预筛。** `mutate:rebind` 自己过 selective typecheck，类型不过的候选连计时都不该跑。现在候选是直接进 trial 的。
+- **JIT 的预热税。** 一次 rebind 会让 JIT 重编译，实测 40–60% 的税（见 findings 的历史条目）。held-out 的第一个样本带着这段税，中位数能盖住，但报告会应该把「null 候选的时间」和「mutation 自己的效果」分开写：候选时间 − null 时间 = mutation 的效果，null 时间 − 基线 = rebind 的税。现在 null 候选已经在跑，门也用它，但报告没有把三段拆开。
+- **稳态而不是第一个样本。** held-out 应该丢掉第一次（预热）再取中位，并把丢掉的那次写在报告里。
+- **目标自己的测试命令当 checksum。** spec 可以给一条命令（`aura test`），运行时的门跑它、读它的退出码和 golden 差异。
+- **`ast:snapshot` / `ast:restore`** 已经在用（回滚 ✓）；**`evo:trial`** 已经在用（worldline ✓）；**`orch:parallel`** 已经在用（一轮候选并行 ✓）；**`engine:metrics`** 已经在用（KEEP 的编译计数 ✓）。
+- **fiber**：LLM proposer 那一路（`perf:llm-propose` 现在是 `no-provider` 的插口）应该跑在 fiber 上，不占门的时间。
+- **`ast:unparse` / `current-source`** 的 round trip 现在是坏的（findings 9、10）：那是 Aura 的两条 P0，aura-perf 不改 Aura，但目标程序要知道（目标可以把会写成科学计数法的字面量换掉）。
+
+## 策略：aura-perf 该怎么变
+
+按「能不能让上面那三件业务要求成立」排。
+
+### 1. 地板按位点算，不按整个目标算
+
+`intend` 的 `min-faster-pct` 现在比的是整个目标的 held-out 时间。候选改的是一个 define，能赢的是那个位点的一小片。报告里已经有每个 region 的毫秒（就是位点的时间 ✓），所以门可以问「这个位点快了多少」：候选的位点时间 ≤ 基线的位点时间 × (1 − 地板)。整个目标的门留成第二道（更松的）数字，两道都过才 KEEP。
+
+验收：aura-runner 的物理目标上，收紧 `collide` 窗口这种个位数百分比的改动能被门判成「这个位点快了 25%」，而不是「没赢」；sum-scan 的例子 verdict 不变。
+
+### 2. 一个候选可以是一组改动
+
+catalog 里现在一条候选改一个 define。业务上的「让游戏更快」常常是几处一起改（`collide` 的窗口 + 每帧重建列表的两处 = 物理那条路的一半）。候选的 genome 应该是一组 `(target, genome)`，worker 一起 apply，回滚也一起回。
+
+验收：a 条候选能同时改几个 define；sum-scan 的例子 KEEP / ROLLBACK 构成不变。
+
+### 3. 天花板探针：先量「这个位点最多能快多少」
+
+把一个 define 换成空实现，跑一次 trial，得到的差值就是这个位点能拿到的**上限**。策略据此决定预算花在哪：上限小的位点不值得试，负例里也该记「这个位点没有余量」（现在负例只记「这个想法在这个热点上失败过」）。
+
+这是 aura-perf 现在最缺的一样东西：它能说「这个想法失败了」，不能说「这个位点没救了」。
+
+验收：报告里每个候选带一个上限数字；策略能用上限排序；上限低于某个阈值的位点不进候选。
+
+### 4. 便宜的 screen 量位点，不量整个目标
+
+screen 现在量整个 kernel，位点上 25% 的赢在噪声里看不见。screen 应该量热叶子的那个 region（region timer 已经按 define 分开了 ✓），于是「这个位点快了 25%」在便宜的一轮就能看见。
+
+验收：screen 的毫秒是位点的毫秒，报告写明是哪个 region；sum-scan 的 screen 结论不变。
+
+### 5. 门把三段时间拆开
+
+基线（未 rebind）、null 候选（rebind 到自身）、候选（rebind 到新写法）三段时间都在报告里，并写明：mutation 的效果 = 候选 − null，rebind 的税 = null − 基线。用户在 aura-runner 上看到的正是这个区分：`pxs-listref` 那个候选「慢 35%」其实全是 rebind 的税。
+
+### 6. checksum 走目标自己的门
+
+spec 给一条命令和它的 golden，运行时跑它、读退出码。aura-runner 的门是 `aura test`（物理轨迹逐字节相同）；现在的做法是目标自己写一份摘要当 oracle，等于把门重写一遍。
+
+验收：一个 spec 只给命令就能有 checksum；oracle 的形式（摘要）仍然是备选。
+
+### 7. 假设从 catalog 来
+
+`perf:hypotheses` 现在返回的是 sum-scan 那四个 id。catalog 的每一条本来就可以带自己的 `expect`（门会怎么判、要动哪个计数器），假设应该就是 catalog 的那些条目，class 只决定顺序。
+
+验收：外部目标的 class 不是 sum-scan 的假设 id；sum-scan 的报告不变。
+
+### 8. 负例按位点记
+
+class 现在是结构判定的 ✓，但位点更准：同一个 class 在不同位点上的失败不是一回事。负例的键从 `(class, hot-node)` 换成 `(site, hot-node)`。
+
+### 9. LLM proposer 的契约扩到一组改动
+
+`perf:llm-propose` 的插口在 ✓，但契约还假设一个候选一个 define。模型提的往往是「这几处一起改」，所以候选 hash 要能带一组，模型返回的也要是同一份 hash（现在的要求 ✓，扩到一组 ✓）。
+
+## 顺序
+
+1. 地板按位点算（1）+ screen 量位点（4）：这两条让「改对了地方」能被门认出来。
+2. 天花板探针（3）+ 负例按位点（8）：让策略知道预算该花在哪。
+3. 候选是一组改动（2）+ 门拆三段时间（5）：让「几处一起改」这种真实形态可判。
+4. checksum 走目标自己的门（6）+ 假设从 catalog 来（7）：让目标和运行时的约定只写一遍。
+5. LLM proposer（9）。
+
 ## 接着做
 
 - 语义火焰：节点可以是策略阶段或规则。
@@ -25,3 +135,4 @@
 - 不安装 LLVM。
 - 不做火焰图、HTML 报告、审批网页。
 - 不把 perf script 原文交给模型。默认 proposer 是规则；LLM 插口必须返回和规则相同的候选 hash。
+- 不替目标程序发明业务指标。门槛、oracle、protected、catalog 都由目标给；运行时只负责量、判、记、留证据。

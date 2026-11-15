@@ -59,3 +59,67 @@ Aura `main` 从 [#5102](https://github.com/cybrid-systems/aura/pull/5102)（`6aa
 上游：https://github.com/cybrid-systems/aura/issues/5116
 
 aura-perf 不改 Aura。`tests/runtime_probe.aura` 用上面的三次 `sum` 做探测。v0.2.0 上打印 `named-let-reentrant`。坏的构建上，错误文本带这次的 `aura -V`（`AURA_PERF_BUILD`）、三次调用的实际值、支持的版本和上游链接。解析器的 `perf:char-at` 在下标越界且探测失败时抛同一段文本；探测通过时，越界仍是带下标和长度的 `string-ref: index out of bounds`。`aura-perf test` 在 `aura test` 非 0 时再打一行构建号。探测失败不会把别的失败记成通过，suite 继续跑完。
+
+## 9. 工作区源码里的科学计数法浮点字面量被写成非法文本
+
+`(current-source :workspace)` 把最短写法是科学计数法的浮点写成 `<科学计数法>.0`：
+
+| 值 | 最短写法 | unparse 写出来的 |
+|---|---|---|
+| `0.0001` | `1e-04` | `1e-04.0` |
+| `0.00001` | `1e-05` | `1e-05.0` |
+| `1e20` | `1e+20` | `1e+20.0` |
+
+`1e-04.0` 不是一个数：reader 读出 `1e-04`，再读出 `.0` 两个 literal，form 的元数就变了。
+
+```sh
+cat > /tmp/aurashow.aura <<'EOF'
+(set-code "(define (f x) (<= x 0.0001))")
+(eval-current)
+(display (f 0.0))
+(display (current-source :workspace))
+EOF
+AURA_SANDBOX=off aura --preset dev /tmp/aurashow.aura
+```
+
+```
+#f
+(define f (lambda (x) (<= x 1e-04.0)))
+```
+
+同一个程序写成文件（不 set-code）答案是 `#t`。`(<= 0.0 0.0001)` 在 round trip 之后从 `#t` 变成 `#f`，`(list 1.0 0.0001)` 变成三个元素。
+
+`AURA_SANDBOX=off` 时 mutation 路径自己会重新 parse 这段文本，于是 `set-code` 装进去的程序算出来的值和源码不一样，而且不报错。round trip 在任何 sandbox 模式下都是坏的。
+
+上游：https://github.com/cybrid-systems/aura/issues/5295
+
+aura-perf 不改 Aura。目标程序自己带 oracle 时，这条是目标自己的事：把会写成科学计数法的字面量换成位相同的写法即可（`0.0001` 写成 `(/ 1.0 10000.0)`，`(equal? 0.0001 (/ 1.0 10000.0))` 是 `#t`）。
+
+## 10. `evo:trial` 里的 `mutate:rebind` 把变参 define 变成定参
+
+```sh
+cat > /tmp/auravar.aura <<'EOF'
+(require "std/evo-core" all:)
+(set-code "(define (f a . rest) (list a rest)) (define (g x) (+ x 1))")
+(eval-current)
+(define body "(define (g x) (+ x 2))")
+(define cand (evo:candidate body (hash "target" "g" "thought" "x")))
+(define evaluate (lambda (c) (hash "status" "ok" "objectives" (hash "heldout-ms" 1) "constraints" (hash "checksum" 0) "behavior" (hash "mismatches" 0))))
+(define apply-candidate (lambda (c) (let ((rb (mutate:rebind "g" body "t"))) (if (eq? rb #t) (begin (eval-current) #t) rb))))
+(define tr (evo:trial cand (hash "apply" apply-candidate "timeout-ms" 60000 "evaluate" evaluate)))
+(display (f 1 2 3))
+EOF
+AURA_SANDBOX=off aura --preset dev /tmp/auravar.aura
+```
+
+```
+arity mismatch: f expects 2 arguments, got 3
+```
+
+变参标记丢了：`(define (f a . rest) ...)` 之后 `f` 只收两个参数。trial 的 status 还是 `ok`，报错出现在之后调用 `f` 的时候，而且 outlives 这个 trial：父 workspace 也坏了。
+
+同一个 rebind 在 trial 之外是好的，`AURA_SANDBOX` 不是 `off` 时 trial 也是好的。
+
+上游：https://github.com/cybrid-systems/aura/issues/5296
+
+这条挡住了 aura-perf 对带变参函数的目标：每个候选的 checksum 都以 `car: not a pair` 失败，看起来像候选写错了，其实不是。aura-runner 的 `lib/phys.aura` 有 `(define (piece k x w h y . rest) ...)`，所以它的每个候选都这样失败。

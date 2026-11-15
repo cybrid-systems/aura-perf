@@ -7,7 +7,7 @@
         perf:cct-actionable perf:cct-delta perf:mine perf:mine-with
         perf:hypotheses perf:split-protected perf:node-clock
         perf:count-rows perf:prefix-leaf perf:cct-worldline-query
-        perf:cct-cleared perf:should-continue? perf:delta-brief)
+        perf:cct-cleared perf:should-continue? perf:delta-brief perf:site-ms)
 
 (require "std/string" all:)
 (require "lib/perf/util" all:)
@@ -49,6 +49,14 @@
 
 (define (perf:node-clock node)
   (if (hash? node) (hash-ref node "task-clock" 0) 0))
+
+; The measured time of one define in a tree. -1 when the tree does not
+; carry that define: the site was not counted in that worldline.
+(define (perf:site-ms cct name)
+  (if (or (not (hash? cct)) (not (string? name)) (string=? name ""))
+      -1
+      (let ((n (perf:cct-node cct name)))
+        (if (hash? n) (hash-ref n "task-clock" -1) -1))))
 
 ; Hottest root-to-leaf path by task-clock of the leaf under a parent.
 (define (perf:cct-hot-prefix cct)

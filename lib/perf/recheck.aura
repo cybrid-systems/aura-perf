@@ -17,7 +17,19 @@
 ; recheck cannot keep a candidate the run would have rolled back.
 ; A candidate that was never tried (refused) and one whose site is
 ; protected are rejected before the shared predicate.
-(define (perf:recheck-one cand seal before-ms pct)
+; The site floor, re-judged from the saved run: the baseline's tree and
+; the candidate's tree are both in the evidence.
+(define (perf:recheck-site cand seal baseline-cct)
+  (let* ((name (hash-ref cand "site" (hash-ref cand "target" "")))
+         (pct (hash-ref seal "site-min-faster-pct" #f)))
+    (if (or (not (number? pct)) (not (string? name)) (string=? name ""))
+        (hash)
+        (hash "site" name
+              "base" (perf:site-ms baseline-cct name)
+              "cand" (perf:site-ms (hash-ref cand "cct" (hash)) name)
+              "pct" pct))))
+
+(define (perf:recheck-one cand seal before-ms pct baseline-cct)
   (let ((id (hash-ref cand "id" "?"))
         (site (hash-ref cand "target" (hash-ref cand "site" ""))))
     (cond ((perf:member? (hash-ref seal "protected" '()) site)
@@ -25,7 +37,8 @@
           ((string=? (hash-ref cand "status" "") "refused")
            (hash "id" id "decision" "reject" "reason" "not-tried"))
           (else
-           (let ((why (perf:result-reject cand before-ms pct)))
+           (let ((why (perf:result-reject cand before-ms pct
+                                          (perf:recheck-site cand seal baseline-cct))))
              (if (string=? why "")
                  (hash "id" id "decision" "keep" "reason" "gate-pass")
                  (hash "id" id "decision" "reject" "reason" why)))))))
@@ -55,7 +68,9 @@
                        (if (null? xs)
                            (reverse acc)
                            (loop (cdr xs)
-                                 (cons (perf:recheck-one (car xs) seal before-ms pct) acc)))))
+                                 (cons (perf:recheck-one (car xs) seal before-ms pct
+                                                        (hash-ref evidence "baseline-cct" (hash)))
+                                       acc)))))
              (met (and (number? before-ms) (number? after-ms)
                        (perf:speedup-ok? before-ms after-ms pct))))
         (let score ((xs (append (hash-ref picked "verdicts" '()) scored))

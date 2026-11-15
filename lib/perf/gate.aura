@@ -32,6 +32,31 @@
       (car rest)
       #f))
 
+; The site context travels with the trailing arguments: the baseline's
+; time on one define and the candidate's own time on it, both measured
+; in a worldline tree.
+(define (perf:site-of rest)
+  (let loop ((xs (if (list? rest) rest '())) (acc (hash)))
+    (if (null? xs)
+        acc
+        (if (hash? (car xs))
+            (car xs)
+            (loop (cdr xs) acc)))))
+
+; The site floor. A candidate that rebinds one define can only win the
+; slice of the program that define owns, so the floor is measured
+; against the define, not against the whole target.
+(define (perf:site-ok? site)
+  (if (hash? site)
+      (let* ((base (hash-ref site "base" -1))
+             (cand (hash-ref site "cand" -1))
+             (pct (hash-ref site "pct" #f)))
+        (and (number? base) (> base 0)
+             (number? cand) (>= cand 0)
+             (number? pct) (>= pct 0) (< pct 100)
+             (<= (* cand 100) (* base (- 100 pct)))))
+      #f))
+
 (define (perf:result-reject result baseline-ms pct . rest)
   (let ((raw (perf:raw-ms rest))
         (held (if (hash? result) (hash-ref result "heldout-ms" -1) -1)))
@@ -48,25 +73,31 @@
        "checksum")
       ((not (perf:flag-on? result "live-unchanged")) "isolation-violation")
       ((string=? (hash-ref result "fidelity" "") "screen-pruned") "screen-pruned")
-      ((not (perf:speedup-ok? baseline-ms held pct))
+      ((and (not (perf:speedup-ok? baseline-ms held pct))
+            (not (perf:site-ok? (perf:site-of rest))))
        "no-speedup")
       ((and raw (not (perf:speedup-ok? raw held pct)))
        "rebind-penalty")
       (else ""))))
 
 (define (perf:accept? baseline-ms result pct . rest)
-  (if (pair? rest)
-      (string=? (perf:result-reject result baseline-ms pct (car rest)) "")
-      (string=? (perf:result-reject result baseline-ms pct) "")))
+  (string=? (perf:reject-with result baseline-ms pct rest) ""))
 
 ; The report's PASS/ROLLBACK label for one trial result. The conditions are
 ; the gate's conditions (perf:result-reject), so the label and the KEEP
 ; decision cannot disagree. The checksum reason keeps the mismatch count
 ; the report has always printed.
+; The trailing arguments travel on: the raw (un-rebound) time and the
+; site context.
+(define (perf:reject-with result baseline-ms pct rest)
+  (if (pair? rest)
+      (perf:result-reject result baseline-ms pct
+                           (car rest)
+                           (if (pair? (cdr rest)) (car (cdr rest)) (hash)))
+      (perf:result-reject result baseline-ms pct)))
+
 (define (perf:reason result baseline pct . rest)
-  (let ((r (if (pair? rest)
-               (perf:result-reject result baseline pct (car rest))
-               (perf:result-reject result baseline pct)))
+  (let ((r (perf:reject-with result baseline pct rest))
         (raw (perf:raw-ms rest)))
     (cond ((string=? r "") "gate-pass")
           ((string=? r "checksum")
@@ -107,6 +138,11 @@
             "checksum" (not (eq? (hash-ref i "checksum" #t) #f))
             "protected" (let ((p (hash-ref i "protected" '())))
                           (if (list? p) p '()))
+            ; The site floor: a per-define floor, measured against the
+            ; define the candidate rebinds. Absent means the program
+            ; floor is the only one.
+            "site-min-faster-pct" (let ((v (hash-ref i "site-min-faster-pct" #f)))
+                                    (if (number? v) v #f))
             "budget" (let ((b (hash-ref i "budget" 0)))
                        (if (number? b) b 0))))))
 

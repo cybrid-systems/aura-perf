@@ -219,6 +219,28 @@
         acc
         (loop (cdr xs) (+ acc (hash-ref (car xs) "dur-ms" 0))))))
 
+; The site of one candidate: the define whose time the site floor is
+; measured on. It is the define the candidate rebinds, unless the
+; catalog entry names another one (a candidate that changes a predicate
+; wins in the caller, not in the predicate).
+(define (perf:candidate-site cand)
+  (let ((s (hash-ref cand "site" "")))
+    (if (and (string? s) (> (string-length s) 0))
+        s
+        (hash-ref cand "target" ""))))
+
+; The site's two times: the baseline's and the candidate's, both from
+; the worldline trees, and the floor the intend asks for.
+(define (perf:site-context spec cand result)
+  (let* ((site (perf:candidate-site cand))
+         (pct (hash-ref (perf:intend-seal spec) "site-min-faster-pct" #f)))
+    (if (or (not (number? pct)) (string=? site ""))
+        (hash)
+        (hash "site" site
+              "base" (perf:site-ms (hash-ref spec "baseline-cct" (hash)) site)
+              "cand" (perf:site-ms (hash-ref result "cct" (hash)) site)
+              "pct" pct))))
+
 (define (perf:trial-round spec cands out buf baseline)
   (let ((records (let loop ((xs cands) (acc '()))
                    (if (null? xs)
@@ -251,9 +273,10 @@
                     (perf:audit-decision (perf:cand-target spec (car xs))
                                          "ROLLBACK" "missing-result" (hash "id" id)))
                   (let* ((raw (perf:raw-of spec))
+                         (site (perf:site-context spec (car xs) result))
                          (reason (if raw
-                                     (perf:reason result baseline pct raw)
-                                     (perf:reason result baseline pct)))
+                                     (perf:reason result baseline pct raw site)
+                                     (perf:reason result baseline pct site)))
                          (q (perf:cct-worldline-query
                               (hash-ref spec "profile-cct" #f)
                               (hash-ref result "cct" #f)
@@ -264,8 +287,17 @@
                     (hash-set! result "measured" (if (eq? (hash-ref q "measured" #f) #t) 1 0))
                     (hash-set! result "moved-to" (perf:join (hash-ref q "moved-to" '()) ","))
                     (hash-set! result "target" (hash-ref (car xs) "target" ""))
+                    (hash-set! result "site" (perf:candidate-site (car xs)))
                     (hash-set! buf "results" (append (hash-ref buf "results" '()) (list result)))
                     (perf:say buf (perf:format-candidate result baseline pct raw))
+                    (if (and (hash? site)
+                             (string? (hash-ref site "site" ""))
+                             (> (string-length (hash-ref site "site" "")) 0))
+                        (perf:say buf (string-append "site " (hash-ref site "site" "")
+                                                       " base-ms=" (number->string (hash-ref site "base" -1))
+                                                       " cand-ms=" (number->string (hash-ref site "cand" -1))
+                                                       " floor-pct=" (number->string (hash-ref site "pct" -1))))
+                        #f)
                     (perf:say buf (string-append "worldline " id
                                                  " measured=" (number->string (hash-ref result "measured" 0))
                                                  " prefix-removed=" (number->string (hash-ref result "prefix-removed" 0))
@@ -741,6 +773,7 @@
                                                 "hot-node" (hash-ref spec "hot-node" "")
                                                 "prefix" (hash-ref spec "prefix" '())
                                                 "cct" (hash-ref spec "profile-cct" (hash))
+                                                "baseline-cct" (hash-ref spec "baseline-cct" (hash))
                                                 "candidates" (hash-ref buf "results" '())
                                                 "memory" (hash-ref buf "memory" '()))))))
           ; The process exit follows intend-met. A met intend is success even
@@ -861,6 +894,10 @@
           #f)
       (hash-set! spec "raw-baseline-ms" (if (and (number? raw-ms) (> raw-ms 0)) raw-ms #f))
       (hash-set! spec "gate-baseline-ms" gate-ms)
+      ; The baseline's worldline tree: the per-define times the site
+      ; floor is measured against.
+      (hash-set! spec "baseline-cct"
+                    (if (hash? raw) (hash-ref raw "cct" (hash)) (hash)))
       (perf:say buf (string-append "baseline-heldout-ms " (number->string raw-ms)
                                    " source=" (if raw-ok "unrebound-child" "parent-fallback")
                                    " samples=" (perf:sample-text raw-samples)))

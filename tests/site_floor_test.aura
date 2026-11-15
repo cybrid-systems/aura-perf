@@ -1,0 +1,40 @@
+; A candidate that rebinds one define can only win the slice of the
+; program that define owns. The site floor judges it on the define: the
+; program floor alone would call a change on the right place a loss.
+(require "lib/perf/gate" all:)
+
+(define spec
+  (hash "intend" (hash "min-faster-pct" 10
+                       "site-min-faster-pct" 20
+                       "checksum" #t "budget" 4 "protected" '())
+         "min-speedup-pct" 20))
+
+(define seal (perf:intend-seal spec))
+
+(define (row ms)
+  (hash "status" "ok" "checksum-ok" 1 "live-unchanged" 1
+        "mismatches" 0 "heldout-ms" ms))
+
+; The program did not get twenty percent faster ...
+(define slow (row 95))
+
+; ... but the define the candidate changed got thirty percent faster.
+(define site (hash "site" "collide" "base" 100 "cand" 70 "pct" 20))
+
+; The same site, not fast enough.
+(define site-slow (hash "site" "collide" "base" 100 "cand" 85 "pct" 20))
+
+; A site that was not counted in that worldline.
+(define site-gone (hash "site" "collide" "base" 100 "cand" -1 "pct" 20))
+
+(display (list (hash-ref seal "site-min-faster-pct" #f)
+               (perf:reason slow 100 20 site)
+               (if (perf:accept? 100 slow 20 site) 1 0)
+               (perf:reason slow 100 20 site-slow)
+               (if (perf:accept? 100 slow 20 site-slow) 1 0)
+               (perf:reason slow 100 20 site-gone)
+               (if (perf:accept? 100 slow 20 site-gone) 1 0)
+               (perf:reason slow 100 20)
+               (if (perf:accept? 100 slow 20) 1 0)
+               (perf:reason (row 70) 100 20 site)))
+(newline)

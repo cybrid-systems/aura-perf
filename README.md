@@ -109,6 +109,11 @@ spec 就是一个普通的 Aura 文件。它 require 运行时（仓库根目录
   没有这个约定的目标没有这张树，报告写 `measured=0`。
 - **矿工不认名字。** `repeated-index-walk` 的判据是「热叶子比它同一个父节点下的
   兄弟加起来还贵 `ratio` 倍」，`protected` 来自 spec 的 intend。
+- **地板可以按位点算。** 候选改的是一个 define，能赢的是那个 define 的一小片。
+  intend 里的 `site-min-faster-pct` 是**按位点**的地板：候选改的那个 define（或
+  catalog 条目里的 `site`）在自己的 worldline 树上快过这个百分比，门就认。整
+  个目标的地板（`min-faster-pct`）仍然是第二道。报告里有一行 `site ... base-ms=
+  ... cand-ms=... floor-pct=...`。
 
 ## 这次实测
 

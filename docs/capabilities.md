@@ -145,6 +145,12 @@ Trial 子进程在 checksum 通过之后，量出那条 worldline 的树。**树
 
 `(perf:intend-seal spec)` 取出 checksum、`min-faster-pct`、protected、budget。试验用的百分比是 seal 和 spec 里更严的那个。`force-keep` 不参与 `perf:accept?`。预算是实际 launch 的 kernel trial 数，基因判定不占这份预算。
 
+intend 还可以带一个**按位点的地板** `site-min-faster-pct`。候选改的是一个 define，
+它能赢的是那个 define 拥有的一小片；整个目标的地板会把「改对了地方」判成「没赢」。
+位点的两段时间都来自 worldline 树：基线那棵和候选那棵，所以两边是同一种量。候选
+catalog 条目可以写 `site`（默认是它 rebind 的那个 define）：改一个谓词的候选，赢的
+是调用方的时间。报告里有一行 `site <name> base-ms=… cand-ms=… floor-pct=…`。
+
 ### 11. 便宜筛选，再花 held-out
 
 Checksum 失败的候选不做 held-out。正确的候选先在 `screen-n` 上计一次。只有屏幕时间明显更差（慢过两倍，并且慢过 baseline 加 slack）才 `screen-pruned`。活下来的才跑 held-out。屏幕读数是 0 时放行，交给 held-out 门拒绝更慢的结果。

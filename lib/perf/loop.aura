@@ -3,7 +3,7 @@
 ; passed the held-out gate in a child process. Strategy rewrites use
 ; ast:snapshot / ast:restore on this process.
 
-(export perf:optimize perf:autotune perf:job-record)
+(export perf:optimize perf:autotune perf:job-record perf:site-context)
 
 (require "std/evo-core" all:)
 (require "std/evo" all:)
@@ -109,16 +109,25 @@
         (perf:check-kernel kernel (perf:check-cases spec) (perf:oracle-fn spec)))))
 
 (define (perf:baseline spec)
-  (let ((xs ((perf:inputs-fn spec) (hash-ref spec "heldout-n" 0))))
+  (let ((xs (perf:json-value ((perf:inputs-fn spec) (hash-ref spec "heldout-n" 0)))))
     (perf:time-checked (hash-ref spec "repeats" 3)
                        (hash-ref spec "call")
                        xs
                        (perf:oracle-fn spec))))
 
+; The child reads the job as JSON, so the input goes through the same
+; round trip here. A value JSON does not keep (a float that reads back
+; as an integer) must not make the checksum compare two different
+; programs: the parent's expected value and the child's input have to be
+; the same value.
+(define (perf:json-value v)
+  (let ((back (try (json-parse (json-encode v)) (catch (e) #f))))
+    (if (eq? back #f) v back)))
+
 (define (perf:bake-one spec n)
   (if (or (not (number? n)) (<= n 0))
       (hash)
-      (let ((xs ((perf:inputs-fn spec) n)))
+      (let ((xs (perf:json-value ((perf:inputs-fn spec) n))))
         (hash "input" xs "expected" ((perf:oracle-fn spec) xs)))))
 
 (define (perf:bake-checks spec)
@@ -126,10 +135,11 @@
     (let loop ((xs (perf:check-cases spec)) (acc '()))
       (if (null? xs)
           (reverse acc)
-          (loop (cdr xs)
-                (cons (hash "input" (car xs)
-                            "expected" (oracle (car xs)))
-                      acc))))))
+          (let ((one (perf:json-value (car xs))))
+            (loop (cdr xs)
+                  (cons (hash "input" one
+                              "expected" (oracle one))
+                        acc)))))))
 
 (define (perf:catalog spec)
   (hash-ref spec "catalog" '()))
@@ -199,10 +209,10 @@
   (let ((n (hash-ref spec "raw-baseline-ms" #f)))
     (if (and (number? n) (> n 0)) n #f)))
 
-(define (perf:format-candidate result baseline pct raw)
+(define (perf:format-candidate result baseline pct raw site)
   (let ((reason (if raw
-                    (perf:reason result baseline pct raw)
-                    (perf:reason result baseline pct))))
+                    (perf:reason result baseline pct raw site)
+                    (perf:reason result baseline pct site))))
   (string-append
     "candidate " (hash-ref result "id" "?")
     " " (if (string=? reason "gate-pass") "PASS" "ROLLBACK")
@@ -230,11 +240,12 @@
         (hash-ref cand "target" ""))))
 
 ; The site's two times: the baseline's and the candidate's, both from
-; the worldline trees, and the floor the intend asks for.
-(define (perf:site-context spec cand result)
-  (let* ((site (perf:candidate-site cand))
+; the worldline trees, and the floor the intend asks for. The result
+; carries the site's name (the trial round set it).
+(define (perf:site-context spec result)
+  (let* ((site (hash-ref result "site" ""))
          (pct (hash-ref (perf:intend-seal spec) "site-min-faster-pct" #f)))
-    (if (or (not (number? pct)) (string=? site ""))
+    (if (or (not (number? pct)) (not (string? site)) (string=? site ""))
         (hash)
         (hash "site" site
               "base" (perf:site-ms (hash-ref spec "baseline-cct" (hash)) site)
@@ -272,8 +283,9 @@
                     (perf:bump buf "rollback")
                     (perf:audit-decision (perf:cand-target spec (car xs))
                                          "ROLLBACK" "missing-result" (hash "id" id)))
+                  (hash-set! result "site" (perf:candidate-site (car xs)))
                   (let* ((raw (perf:raw-of spec))
-                         (site (perf:site-context spec (car xs) result))
+                         (site (perf:site-context spec result))
                          (reason (if raw
                                      (perf:reason result baseline pct raw site)
                                      (perf:reason result baseline pct site)))
@@ -287,9 +299,8 @@
                     (hash-set! result "measured" (if (eq? (hash-ref q "measured" #f) #t) 1 0))
                     (hash-set! result "moved-to" (perf:join (hash-ref q "moved-to" '()) ","))
                     (hash-set! result "target" (hash-ref (car xs) "target" ""))
-                    (hash-set! result "site" (perf:candidate-site (car xs)))
                     (hash-set! buf "results" (append (hash-ref buf "results" '()) (list result)))
-                    (perf:say buf (perf:format-candidate result baseline pct raw))
+                    (perf:say buf (perf:format-candidate result baseline pct raw site))
                     (if (and (hash? site)
                              (string? (hash-ref site "site" ""))
                              (> (string-length (hash-ref site "site" "")) 0))
@@ -331,7 +342,7 @@
                                                         (perf:short-reason reason))))))))
               (loop (cdr xs)))))))
 
-(define (perf:best-passing results baseline pct . rest)
+(define (perf:best-passing spec results baseline pct . rest)
   (let ((raw (if (pair? rest) (car rest) #f)))
   (let loop ((xs results) (best #f))
     (if (null? xs)
@@ -339,8 +350,8 @@
         (let ((r (car xs)))
           (if (and (hash? r)
                    (if raw
-                       (perf:accept? baseline r pct raw)
-                       (perf:accept? baseline r pct)))
+                       (perf:accept? baseline r pct raw (perf:site-context spec r))
+                       (perf:accept? baseline r pct (perf:site-context spec r))))
               (if (or (not best)
                       (< (hash-ref r "heldout-ms" 999999999)
                          (hash-ref best "heldout-ms" 999999999)))
@@ -357,7 +368,7 @@
             #t
             (loop (cdr xs))))))
 
-(define (perf:failed-ids results baseline pct . rest)
+(define (perf:failed-ids spec results baseline pct . rest)
   (let ((raw (if (pair? rest) (car rest) #f)))
   (let loop ((xs results) (acc '()))
     (if (null? xs)
@@ -365,12 +376,12 @@
         (let ((r (car xs)))
           (if (and (hash? r)
                    (not (if raw
-                            (perf:accept? baseline r pct raw)
-                            (perf:accept? baseline r pct))))
+                            (perf:accept? baseline r pct raw (perf:site-context spec r))
+                            (perf:accept? baseline r pct (perf:site-context spec r)))))
               (loop (cdr xs) (cons (hash-ref r "id" "") acc))
               (loop (cdr xs) acc)))))))
 
-(define (perf:commit-kernel spec entry baseline buf)
+(define (perf:commit-kernel spec entry baseline buf winner)
   ; Snapshot first. A parallel let could rebind before the snapshot.
   (let* ((snap (mutate :snapshot "perf-kernel"))
          (compile-before (perf:compile-snap))
@@ -396,9 +407,14 @@
                                         ((perf:inputs-fn spec) (hash-ref spec "heldout-n" 0))
                                         (perf:oracle-fn spec)))
                  (pct (hash-ref spec "min-speedup-pct" 20))
+                 ; The site floor answers here too: a candidate that won
+                 ; its own define is not a loss, even when the program
+                 ; as a whole moved less than the program floor.
+                 (site (if (hash? winner) (perf:site-context spec winner) (hash)))
                  (ok (and (eq? (hash-ref chk "ok" #f) #t)
                           (= (hash-ref tm "mismatches" 1) 0)
-                          (perf:speedup-ok? baseline (hash-ref tm "median" -1) pct))))
+                          (or (perf:speedup-ok? baseline (hash-ref tm "median" -1) pct)
+                              (perf:site-ok? site)))))
             (if ok
                 (begin
                   (hash-set! buf "after-ms" (hash-ref tm "median"))
@@ -616,7 +632,7 @@
             (perf:bump buf "rollback")
             #f)
             (let ((failed (append (hash-ref buf "refused" '())
-                                (perf:failed-ids results baseline pct (perf:raw-of spec)))))
+                                (perf:failed-ids spec results baseline pct (perf:raw-of spec)))))
             (let ((next (perf:revise-order (perf:order-of plan) failed)))
               (let ((plan2 (perf:commit-strategy spec next buf)))
                 (if (not plan2)
@@ -630,7 +646,7 @@
                             (begin
                               (perf:say buf "round 2 aborted: trial infrastructure")
                               #f)
-                            (perf:best-passing results2 baseline pct (perf:raw-of spec))))))))))))
+                            (perf:best-passing spec results2 baseline pct (perf:raw-of spec))))))))))))
 
 (define (perf:say-each buf lines)
   (let loop ((xs lines))
@@ -734,8 +750,13 @@
                                        (number->string (length (perf:mutation-records)))))
           (let ((logn (try (length (evo:records)) (catch (e) -1))))
             (perf:say buf (string-append "evo-records " (number->string logn))))
-          (let* ((met (perf:speedup-ok? before-ms after-ms
-                                        (hash-ref (perf:intend-seal spec) "effective-min-faster-pct" 10)))
+          (let* ((site (hash-ref buf "site" (hash)))
+                 ; The verdict asks the question the gate asked: the
+                 ; program floor, or the site floor for a candidate that
+                 ; won its own define.
+                 (met (or (perf:speedup-ok? before-ms after-ms
+                                         (hash-ref (perf:intend-seal spec) "effective-min-faster-pct" 10))
+                          (perf:site-ok? site)))
                  (speed (perf:verdict-speedup before-ms after-ms
                                               (hash-ref buf "before-samples" '())
                                               (hash-ref buf "after-samples" '())))
@@ -1065,13 +1086,13 @@
                             (hash-set! buf "budget"
                                        (+ (hash-ref buf "budget" 0) (length cands)))
                             (perf:trial-round spec cands out buf baseline)))
-                 (best (perf:best-passing results baseline pct (perf:raw-of spec))))
+                 (best (perf:best-passing spec results baseline pct (perf:raw-of spec))))
             (let ((winner (perf:choose-winner spec results best plan child hottest out buf baseline pct)))
               (if (not winner)
                   (perf:say buf "kernel unchanged")
                   (let ((entry (perf:entry (perf:catalog spec) (hash-ref winner "id" ""))))
                     (if entry
-                        (perf:commit-kernel spec entry baseline buf)
+                        (perf:commit-kernel spec entry baseline buf winner)
                         (perf:say buf "kernel ROLLBACK reason=missing-catalog-entry"))))
               (perf:report-worldlines spec buf)
               (perf:after-keep spec buf winner baseline out)

@@ -26,11 +26,13 @@
 ;
 ; The rows carry the stack of each define, so the tree is the target's
 ; own calling shape and not a name the runtime guessed.
-(define saved-k-ref k-ref)
-(define saved-k-length k-length)
-
+; The wrappers go around the defines as they are now: a candidate has
+; already rebound them when the worldline is measured, and measuring the
+; pre-candidate code would not see the candidate.
 (define (perf-worldline-measure kernel xs)
-  (let ((box (hash "k-ref" 0 "k-length" 0 "k-ref-ms" 0 "k-length-ms" 0)))
+  (let* ((saved-k-ref k-ref)
+         (saved-k-length k-length)
+         (box (hash "k-ref" 0 "k-length" 0 "k-ref-ms" 0 "k-length-ms" 0)))
     (set! k-ref
       (lambda (a i)
         (let ((t0 (monotonic-ms)))

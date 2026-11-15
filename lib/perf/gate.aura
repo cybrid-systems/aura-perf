@@ -4,7 +4,7 @@
 
 (export perf:speedup-ok? perf:accept? perf:intend-seal perf:gate-pct
         perf:gene-bypasses? perf:screen-prune? perf:covers?
-        perf:result-reject perf:effective-pct perf:reason)
+        perf:result-reject perf:effective-pct perf:reason perf:site-ok?)
 
 (define (perf:speedup-ok? baseline-ms cand-ms pct)
   (and (number? baseline-ms) (> baseline-ms 0)
@@ -76,7 +76,10 @@
       ((and (not (perf:speedup-ok? baseline-ms held pct))
             (not (perf:site-ok? (perf:site-of rest))))
        "no-speedup")
-      ((and raw (not (perf:speedup-ok? raw held pct)))
+      ; The rebind tax is a program level artefact: a candidate that
+      ; wins on its own site paid it. The same site floor answers here.
+      ((and raw (not (perf:speedup-ok? raw held pct))
+            (not (perf:site-ok? (perf:site-of rest))))
        "rebind-penalty")
       (else ""))))
 

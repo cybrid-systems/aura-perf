@@ -133,9 +133,14 @@ Trial 子进程在 checksum 通过之后，量出那条 worldline 的树。**树
 
 度量：`cleared` 行点名候选；`worldline` 行给出 measured / prefix-removed / cost-moved。空树是 `measured=0`，不算「前缀被删掉」。没有实现 `perf-worldline-measure` 的目标没有这张树，报告如实写 `measured=0`。
 
-### 8. 负例按 class + hot-node
+### 8. 负例按 class + hot-node，跨次累积
 
 `(perf:neg-remember mem class hot idea reason)` 记下失败的想法。`(perf:neg-blocked? …)` 在同一热点上拒绝原样重提；热点或 class 变了，同一 id 可以再提。`perf:round-candidates` 会过滤，并打印 `negative-skip`。这和「从 order 里删掉 id」同时存在，过滤才是按热点的那一层。
+
+负例**跨次**累积：跑完写在 `<out-dir>/memory.json`（spec 可以用 `memory-path` 换位置），
+下一次跑先读回来。于是第二次跑同一个目标，不再把预算花在已经失败过的想法上：
+`memory-loaded 3`，`negative-skip wrong-scale`、`negative-skip redundant-pass`，
+`budget-used` 从 3 降到 1，结论不变。
 
 ### 9. 策略基因走同一条 KEEP / ROLLBACK
 

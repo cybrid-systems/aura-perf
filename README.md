@@ -107,6 +107,10 @@ spec 就是一个普通的 Aura 文件。它 require 运行时（仓库根目录
   `(perf-worldline-measure kernel xs)`：它知道自己的 define 的元数，所以能装上
   计数器、跑一次 kernel、把每个 define 的调用次数和毫秒连同自己的 stack 报回来。
   没有这个约定的目标没有这张树，报告写 `measured=0`。
+- **上一次跑过的东西，这一次不重试。** 每次跑完，失败的负例（哪个想法在哪个热点上
+  失败过）写到 `<out-dir>/memory.json`；下一次跑先读它，同一个热点上已经失败的想法
+  直接跳过（报告里的 `negative-skip`），预算留给还没试过的。spec 可以用 `memory-path`
+  换一个位置。
 - **矿工不认名字。** `repeated-index-walk` 的判据是「热叶子比它同一个父节点下的
   兄弟加起来还贵 `ratio` 倍」，`protected` 来自 spec 的 intend。
 - **地板可以按位点算。** 候选改的是一个 define，能赢的是那个 define 的一小片。

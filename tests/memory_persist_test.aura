@@ -1,0 +1,37 @@
+; The negative memory carries over: a run that failed an idea on a
+; hotspot does not spend its budget on it again.
+(require "lib/perf/memory" all:)
+(require "lib/perf/util" all:)
+
+(define path "/tmp/aura-perf-memory-test.json")
+
+(define mem '())
+
+; First run: two ideas fail on the same hotspot.
+(set! mem (perf:neg-remember mem "repeated-index-walk" "collide" "wrong-scale" "checksum"))
+(set! mem (perf:neg-remember mem "repeated-index-walk" "collide" "noop" "no-speedup"))
+
+; The memory is written where the next run will look.
+(define saved (perf:memory-save path mem))
+
+; The next run reads it back.
+(define loaded (perf:memory-load path))
+
+(define (blocked? mem idea)
+  (if (perf:neg-blocked? mem "repeated-index-walk" "collide" idea) 1 0))
+
+; A candidate on the same hotspot is filtered out; the same idea on
+; another hotspot is not.
+(define filtered
+  (perf:filter-negative
+    (list (hash "id" "wrong-scale" "target" "collide")
+          (hash "id" "other-idea" "target" "collide"))
+    loaded "repeated-index-walk" "collide"))
+
+(display (list (length loaded)
+               (blocked? loaded "wrong-scale")
+               (blocked? loaded "other-idea")
+               (length (hash-ref filtered "ok" '()))
+               (length (hash-ref filtered "skipped" '()))
+               (hash-ref (car (hash-ref filtered "skipped" '())) "id" "")))
+(newline)

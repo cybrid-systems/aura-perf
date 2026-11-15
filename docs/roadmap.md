@@ -104,9 +104,12 @@ spec 给一条命令和它的 golden，运行时跑它、读退出码。aura-run
 
 验收：外部目标的 class 不是 sum-scan 的假设 id；sum-scan 的报告不变。
 
-### 8. 负例按位点记
+### 8. 负例按位点记 —— 一半做了
 
-class 现在是结构判定的 ✓，但位点更准：同一个 class 在不同位点上的失败不是一回事。负例的键从 `(class, hot-node)` 换成 `(site, hot-node)`。
+class 现在是结构判定的 ✓，所以它跨次也稳定 ✓；负例也**跨次**累积了（每次跑完写
+`<out-dir>/memory.json`，下一次跑先读回来，已经失败过的想法直接跳过，预算留给没试过
+的 ✓）。还差的是把键从 `(class, hot-node)` 换成 `(site, hot-node)`：同一个 class 在
+不同位点上的失败不是一回事。
 
 ### 9. LLM proposer 的契约扩到一组改动
 

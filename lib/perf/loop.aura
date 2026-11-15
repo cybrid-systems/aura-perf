@@ -776,6 +776,7 @@
                                                 "baseline-cct" (hash-ref spec "baseline-cct" (hash))
                                                 "candidates" (hash-ref buf "results" '())
                                                 "memory" (hash-ref buf "memory" '()))))))
+            (perf:memory-save (perf:memory-path spec) (hash-ref buf "memory" '()))
           ; The process exit follows intend-met. A met intend is success even
           ; when the demo's extra 50% bar, keep count, or child name differs.
           (if (and (eq? (hash-ref spec "require-success" #f) #t)
@@ -993,8 +994,10 @@
                   (perf:trial-round spec cands out buf baseline))))))))
 
 (define (perf:optimize spec)
-  (let ((buf (hash "lines" '() "brief" '() "memory" '() "results" '()
-                   "keep" 0 "rollback" 0 "after-ms" -1 "budget" 0))
+  (let* ((memory-path (perf:memory-path spec))
+         (buf (hash "lines" '() "brief" '()
+                    "memory" (perf:memory-load memory-path) "results" '()
+                    "keep" 0 "rollback" 0 "after-ms" -1 "budget" 0))
         (out (hash-ref spec "out-dir" "out")))
     (perf:ensure-dirs out)
     (hash-set! spec "min-speedup-pct"
@@ -1021,6 +1024,9 @@
           (hash-set! buf "before-samples" (hash-ref refs "raw-samples" '()))
           (hash-set! buf "profile" profile)
           (perf:say buf (string-append "aura-perf " (hash-ref spec "label" "sum-scan")))
+          (perf:say buf (string-append "memory-loaded "
+                                         (number->string (length (hash-ref buf "memory" '())))
+                                         " path=" (perf:memory-path spec)))
           (perf:say buf (perf:tool-line profile))
           (let loop ((xs (perf:note-lines profile)))
             (if (null? xs) #t (begin (perf:say buf (car xs)) (loop (cdr xs)))))

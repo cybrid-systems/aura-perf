@@ -4,7 +4,29 @@
 ; the hotspot changes.
 
 (export perf:neg-remember perf:neg-blocked? perf:neg-query
-        perf:neg-ideas perf:filter-negative)
+        perf:neg-ideas perf:filter-negative
+        perf:memory-path perf:memory-load perf:memory-save)
+
+(require "lib/perf/util" all:)
+
+; The memory of the runs before this one. A run that failed an idea on
+; a hotspot does not spend its budget on it again: the record carries
+; over, so the next run starts where the last one stopped.
+(define (perf:memory-path spec)
+  (let ((p (hash-ref spec "memory-path" "")))
+    (if (and (string? p) (> (string-length p) 0))
+        p
+        (string-append (hash-ref spec "out-dir" "out") "/memory.json"))))
+
+(define (perf:memory-load path)
+  (let ((text (perf:read-text path)))
+    (if (string=? text "")
+        '()
+        (let ((v (try (json-parse text) (catch (e) #f))))
+          (if (list? v) v '())))))
+
+(define (perf:memory-save path mem)
+  (perf:write-text path (json-encode (if (list? mem) mem '()))))
 
 (define (perf:neg-same? rec class hot idea)
   (and (hash? rec)

@@ -252,19 +252,54 @@
               "cand" (perf:site-ms (hash-ref result "cct" (hash)) site)
               "pct" pct))))
 
+; The references of one round, measured now: the un-rebound baseline and
+; the null candidate. A candidate is compared against the null of its own
+; round, so the machine's load between the rounds cannot move the verdict.
+(define (perf:round-references spec out)
+  (let* ((target (hash-ref spec "target" "bench-kernel"))
+         (base-rec (perf:job-record spec
+                                    (hash "id" "baseline" "role" "baseline"
+                                          "genome" "" "target" target)
+                                    out))
+         (null-rec (perf:null-job spec out))
+         (jobs (if null-rec (list base-rec null-rec) (list base-rec))))
+    (perf:write-jobs jobs)
+    (let* ((batch (perf:launch-jobs jobs (hash-ref spec "worker")))
+           (raw (perf:find-result (hash-ref batch "results" '()) "baseline"))
+           (nul (if null-rec
+                    (perf:find-result (hash-ref batch "results" '()) "null")
+                    #f)))
+      (hash "raw" raw "null" nul))))
+
 (define (perf:trial-round spec cands out buf baseline)
   (let ((records (let loop ((xs cands) (acc '()))
                    (if (null? xs)
                        (reverse acc)
                        (loop (cdr xs) (cons (perf:job-record spec (car xs) out) acc))))))
     (perf:write-jobs records)
-    (let* ((fp-before (evo:source-fingerprint))
+    (let* ((refs (perf:round-references spec out))
+           (raw-res (hash-ref refs "raw" #f))
+           (null-res (hash-ref refs "null" #f))
+           (raw-ok (perf:usable-ms raw-res))
+           (null-ok (perf:usable-ms null-res))
+           (raw-ms (if raw-ok (hash-ref raw-res "heldout-ms") -1))
+           (baseline (if null-ok (hash-ref null-res "heldout-ms") baseline))
+           (raw (if raw-ok raw-ms (perf:raw-of spec)))
+           (fp-before (evo:source-fingerprint))
            (batch (perf:launch-jobs records (hash-ref spec "worker")))
            (fp-after (evo:source-fingerprint))
            (results (hash-ref batch "results" '()))
            (pct (hash-ref spec "min-speedup-pct" 20)))
+      ; The reference of this round is the null candidate of this round,
+      ; and the candidates were measured in the same shape, so the
+      ; rebind's tax is on both sides.
+      (hash-set! buf "before-ms" baseline)
+      (hash-set! buf "before-samples" '())
       (perf:say buf (string-append
-                      "round-wall-ms " (number->string (hash-ref batch "wall-ms" 0))
+                      "round-gate-baseline-ms " (number->string baseline)
+                      " raw-ms=" (number->string raw-ms)
+                      " source=" (if null-ok "null-candidate" "carried")
+                      " round-wall-ms " (number->string (hash-ref batch "wall-ms" 0))
                       " round-dur-sum-ms " (number->string (perf:sum-dur results))
                       " jobs " (number->string (length records))))
       (perf:say buf (string-append
@@ -411,17 +446,28 @@
                  ; its own define is not a loss, even when the program
                  ; as a whole moved less than the program floor.
                  (site (if (hash? winner) (perf:site-context spec winner) (hash)))
+                 ; The candidate's own measurement, taken in the child
+                 ; with the candidate applied, is the one that can be
+                 ; compared with the null candidate of the same round:
+                 ; both paid the rebind's tax. The parent's own
+                 ; measurement is taxed again (the parent's rebind
+                 ; invalidated its JIT), so it is a diagnostic, not the
+                 ; verdict.
+                 (cand-ms (if (hash? winner)
+                              (hash-ref winner "heldout-ms" -1)
+                              (hash-ref tm "median" -1)))
                  (ok (and (eq? (hash-ref chk "ok" #f) #t)
                           (= (hash-ref tm "mismatches" 1) 0)
-                          (or (perf:speedup-ok? baseline (hash-ref tm "median" -1) pct)
+                          (or (perf:speedup-ok? baseline cand-ms pct)
                               (perf:site-ok? site)))))
             (if ok
                 (begin
                   ; The site the floor was measured on, so the verdict
                   ; asks the same question the gate asked.
                   (hash-set! buf "site" site)
-                  (hash-set! buf "after-ms" (hash-ref tm "median"))
+                  (hash-set! buf "after-ms" cand-ms)
                   (hash-set! buf "after-samples" (hash-ref tm "samples" '()))
+                  (hash-set! buf "after-parent-ms" (hash-ref tm "median" -1))
                   (perf:bump buf "keep")
                   (hash-set! buf "world-rebuilt" (hash-ref cd "world-rebuilt" -1))
                   (perf:audit-decision (hash-ref spec "target") "KEEP" "held-out gate"
@@ -891,6 +937,20 @@
         given
         (perf:extract-define (perf:read-text (hash-ref spec "seed-path" "")) target))))
 
+; The null job: the target rebound to its own body. It is the gate's
+; reference, and it is measured again in every round, so the reference
+; and the candidates of that round come from the same moment of the
+; machine's life.
+(define (perf:null-job spec out)
+  (let* ((target (hash-ref spec "target" "bench-kernel"))
+         (null-body (perf:null-genome spec target)))
+    (if (string=? null-body "")
+        #f
+        (perf:job-record spec
+                         (hash "id" "null" "role" "null"
+                               "genome" null-body "target" target)
+                         out))))
+
 (define (perf:measure-references spec buf out)
   (let* ((target (hash-ref spec "target" "bench-kernel"))
          (null-body (perf:null-genome spec target))
@@ -898,12 +958,7 @@
                                     (hash "id" "baseline" "role" "baseline"
                                           "genome" "" "target" target)
                                     out))
-         (null-rec (if (string=? null-body "")
-                       #f
-                       (perf:job-record spec
-                                        (hash "id" "null" "role" "null"
-                                              "genome" null-body "target" target)
-                                        out)))
+         (null-rec (perf:null-job spec out))
          (jobs (if null-rec (list base-rec null-rec) (list base-rec))))
     (perf:write-jobs jobs)
     (let* ((batch (perf:launch-jobs jobs (hash-ref spec "worker")))

@@ -65,8 +65,21 @@ worldline 树（基线那棵和候选那棵），所以两边是同一种量；�
 `site`（默认是它 rebind 的那个 define）。报告里有一行 `site <name> base-ms=…
 cand-ms=… floor-pct=…`。整个目标的地板留成第二道。
 
+门、决定、best-passing 的挑选、失败名单、commit 之后的复核和最后的 verdict 问的是
+同一个问题（程序地板或位点地板），所以「PASS」和「KEEP」不会各说各话。rebind 的税是
+程序层面的东西，位点地板也回答它。
+
 `tests/site_floor_test.aura` 钉住它：程序没快 20% 但位点快了 30% 的候选过门，位点
 不够快的不过，位点没被量的不过。sum-scan 的例子 verdict 不变。
+
+在 aura-runner 的物理目标上，这个地板第一次真的判出了一个 KEEP：
+
+```
+candidate collide-slack PASS reason=gate-pass
+site collide base-ms=461 cand-ms=339 floor-pct=20
+kernel KEEP id=collide-slack heldout-ms=1339
+compile-delta world-rebuilt=0 cascade-full=0 body-only=2 relower-full=36
+```
 
 ### 2. 一个候选可以是一组改动
 
@@ -81,6 +94,20 @@ catalog 里现在一条候选改一个 define。业务上的「让游戏更快�
 这是 aura-perf 现在最缺的一样东西：它能说「这个想法失败了」，不能说「这个位点没救了」。
 
 验收：报告里每个候选带一个上限数字；策略能用上限排序；上限低于某个阈值的位点不进候选。
+
+### 4. 便宜的 screen 量位点，不量整个目标 —— 还差一半
+
+位点的地板已经用上了 ✓（位点的时间来自 worldline 树 ✓），但 screen 还在量整个
+kernel ✗，而且位点的时间只量了一次 ✗：机器一忙，位点的数字就抖（aura-runner 那次
+461→339 赢、下一次 543→526 就输了 ✗）。量几次取中位数，是 seed 自己的事
+（`perf-worldline-measure` 是目标写的 ✓），运行时只要把位点的地板和噪声分开 ✓。
+
+### 4b. 基线和候选要交错着量
+
+基线在跑的开头量一次 ✗，候选在一轮之后量 ✗ —— 机器的负载在这中间变了 ✗，两个数
+不是同一个时刻的 ✗。aura-runner 那次跑出来的基线是 1313 ms / 1388 ms / 1400 ms 三
+个不同的值 ✗。null 候选（门自己的参照 ✓）应该每一轮都重测 ✓，那一轮的候选就对着同一
+时刻的参照比 ✓。
 
 ### 4. 便宜的 screen 量位点，不量整个目标
 

@@ -160,6 +160,12 @@ intend 还可以带一个**按位点的地板** `site-min-faster-pct`。候选�
 catalog 条目可以写 `site`（默认是它 rebind 的那个 define）：改一个谓词的候选，赢的
 是调用方的时间。报告里有一行 `site <name> base-ms=… cand-ms=… floor-pct=…`。
 
+### 10b. checksum 比的是同一个程序
+
+子进程把 job 当 JSON 读 ✗，而 JSON 不保留「读回来变成整数」的浮点（5.0 变成 5 ✗）。
+父进程在自己的输入上算期望值 ✗、子进程在 JSON 那个输入上算结果 ✗ —— 两边其实是两个
+程序 ✗。现在输入先走一遍同样的 round trip ✓，期望值再算 ✓，两边是同一个值 ✓。
+
 ### 11. 便宜筛选，再花 held-out
 
 Checksum 失败的候选不做 held-out。正确的候选先在 `screen-n` 上计一次。只有屏幕时间明显更差（慢过两倍，并且慢过 baseline 加 slack）才 `screen-pruned`。活下来的才跑 held-out。屏幕读数是 0 时放行，交给 held-out 门拒绝更慢的结果。

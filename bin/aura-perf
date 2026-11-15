@@ -8,6 +8,13 @@
 # followed), so an installed copy in ~/.local/bin runs exactly the code a
 # checkout runs.
 #
+# autotune and recheck take an optional spec path. Without one the
+# built-in sum-scan example runs. With one, that file is the spec and
+# the run stays in the caller's directory, so the spec can name the
+# target program's own files (lib/..., out/...). The spec requires the
+# runtime as (require "lib/perf/loop" all:); the repository root is put
+# on AURA_PATH for the run.
+#
 # Needs Aura v0.2.0 on PATH, or AURA_BIN pointing at it. No API key, no
 # virtualenv, no config file.
 set -eu
@@ -22,17 +29,18 @@ while [ -L "$self" ]; do
   esac
 done
 ROOT=$(cd "$(dirname "$self")/.." && pwd)
-cd "$ROOT"
 
 usage() {
   cat <<'EOF'
 aura-perf - an optimization runtime for agents
 
-  aura-perf [verb]
+  aura-perf [verb] [spec]
 
   autotune   measure the target, mine hotspots, trial candidates in isolated
              worldlines, gate them, write out/report.txt and out/evidence.json
-             (the default verb; exits 0 only when the intend is met)
+             (the default verb; exits 0 only when the intend is met).
+             With a spec path, that file is the spec and the run stays in
+             the caller's directory.
   recheck    re-apply the current intend and strategy genes to the saved run -
              no perf, no rebuild
   sysinfo    export this machine's inventory to out/sysinfo.txt and .json
@@ -46,6 +54,12 @@ Environment:
   AURA_PATH       where std/* lives (default: <aura prefix>/lib)
   AURA_PERF_CHECK_SEC   lengthen the check sample (default 1)
   PERF_BIN        a perf binary that can count task-clock (optional)
+
+An external spec is a normal Aura file. It names the target program, the
+regions to time, the inputs, the oracle, the protected defines and the
+catalog, and it calls (perf:autotune spec). It requires the runtime as
+(require "lib/perf/loop" all:); the repository root is on AURA_PATH for
+the run, and the worker is at $AURA_PERF_WORKER.
 EOF
 }
 
@@ -71,6 +85,19 @@ install_self() {
 cmd="${1:-autotune}"
 [ $# -gt 0 ] && shift
 
+# The optional spec path. autotune and recheck take one.
+spec=""
+case "$cmd" in
+  autotune|run|recheck)
+    if [ $# -gt 0 ]; then
+      case "$1" in
+        -*) ;;
+        *) spec="$1"; shift ;;
+      esac
+    fi
+    ;;
+esac
+
 case "$cmd" in
   help|-h|--help)
     usage
@@ -92,31 +119,57 @@ if [ -z "${AURA_PATH:-}" ]; then
   lib=$(dirname "$(dirname "$AURA")")/lib
   if [ -d "$lib" ]; then AURA_PATH="$lib"; export AURA_PATH; fi
 fi
+# The runtime is on the module search path, so an external spec can
+# require it as (require "lib/perf/loop" all:).
+AURA_PATH="$ROOT${AURA_PATH:+:$AURA_PATH}"
+export AURA_PATH
+AURA_PERF_WORKER="$ROOT/examples/sum-scan/worker.aura"
+export AURA_PERF_WORKER
 export AURA_SANDBOX=off
 
 case "$cmd" in
   autotune|run)
-    mkdir -p out/jobs out/trials
-    export AURA_EVO_LOG="${AURA_EVO_LOG:-$PWD/out/evo.jsonl}"
     if [ -z "${PERF_BIN:-}" ]; then
-      PERF_BIN="$(sh scripts/find-perf.sh 2>/dev/null || true)"
+      PERF_BIN="$(sh "$ROOT/scripts/find-perf.sh" 2>/dev/null || true)"
       if [ -n "$PERF_BIN" ]; then export PERF_BIN; fi
     fi
+    if [ -n "$spec" ]; then
+      # An external project: stay in the caller's directory, so the spec
+      # can name the target program's own files.
+      [ -f "$spec" ] || {
+        echo "aura-perf: no such spec: $spec" >&2
+        exit 1
+      }
+      mkdir -p out
+      export AURA_EVO_LOG="${AURA_EVO_LOG:-$PWD/out/evo.jsonl}"
+      exec "$AURA" --preset dev --grant exec "$spec"
+    fi
+    cd "$ROOT"
+    mkdir -p out/jobs out/trials
+    export AURA_EVO_LOG="${AURA_EVO_LOG:-$PWD/out/evo.jsonl}"
     exec "$AURA" --preset dev --grant exec examples/sum-scan/main.aura
     ;;
   recheck)
+    if [ -n "$spec" ]; then
+      mkdir -p out
+      exec "$AURA" --preset dev --grant exec "$spec"
+    fi
+    cd "$ROOT"
     mkdir -p out
     exec "$AURA" --preset dev examples/sum-scan/recheck.aura
     ;;
   sysinfo)
+    cd "$ROOT"
     mkdir -p out
     exec "$AURA" --preset dev --grant exec examples/sum-scan/sysinfo.aura
     ;;
   check)
+    cd "$ROOT"
     mkdir -p out
     exec "$AURA" --preset dev --grant exec examples/sum-scan/check.aura
     ;;
   test)
+    cd "$ROOT"
     # Probe first so a named-let regression is named, then run every
     # test anyway. A real assertion failure is still a failure.
     set +e

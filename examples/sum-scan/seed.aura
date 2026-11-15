@@ -18,6 +18,47 @@
           acc
           (loop (+ i 1) (+ acc (k-ref xs i)))))))
 
+; The worldline measurement. The runtime asks the target program for the
+; tree of one worldline: the seed knows the arity of its own defines, so
+; it can count the calls of the hot leaf and of its sibling, and it
+; reports the rows. A target that does not implement this has no
+; worldline tree, and the report says so.
+;
+; The rows carry the stack of each define, so the tree is the target's
+; own calling shape and not a name the runtime guessed.
+(define saved-k-ref k-ref)
+(define saved-k-length k-length)
+
+(define (perf-worldline-measure kernel xs)
+  (let ((box (hash "k-ref" 0 "k-length" 0 "k-ref-ms" 0 "k-length-ms" 0)))
+    (set! k-ref
+      (lambda (a i)
+        (let ((t0 (monotonic-ms)))
+          (let ((v (saved-k-ref a i)))
+            (hash-set! box "k-ref" (+ (hash-ref box "k-ref" 0) 1))
+            (hash-set! box "k-ref-ms"
+                           (+ (hash-ref box "k-ref-ms" 0) (- (monotonic-ms) t0)))
+            v))))
+    (set! k-length
+      (lambda (a)
+        (let ((t0 (monotonic-ms)))
+          (let ((v (saved-k-length a)))
+            (hash-set! box "k-length" (+ (hash-ref box "k-length" 0) 1))
+            (hash-set! box "k-length-ms"
+                           (+ (hash-ref box "k-length-ms" 0) (- (monotonic-ms) t0)))
+            v))))
+    (try (kernel xs) (catch (e) #f))
+    (set! k-ref saved-k-ref)
+    (set! k-length saved-k-length)
+    (list (hash "name" "k-ref"
+                "calls" (hash-ref box "k-ref" 0)
+                "task-clock" (hash-ref box "k-ref-ms" 0)
+                "stack" (list "bench-kernel" "k-ref"))
+          (hash "name" "k-length"
+                "calls" (hash-ref box "k-length" 0)
+                "task-clock" (hash-ref box "k-length-ms" 0)
+                "stack" (list "bench-kernel" "k-length")))))
+
 (define (perf-strategy ctx)
   (let* ((mine (hash-ref ctx "mine"))
          (hotfn (hash-ref ctx "hot-child-fn"))

@@ -1,0 +1,19 @@
+(require "lib/perf/util" all:)
+(require "lib/perf/score" all:)
+
+; The target program measures its own worldline: the seed knows the arity
+; of its defines, so it counts the calls of the hot leaf and of its
+; sibling and reports the rows.
+(set-code (perf:read-text "examples/sum-scan/seed.aura"))
+(eval-current)
+
+(define rows
+  (perf-worldline-measure (lambda (xs) (bench-kernel xs)) (perf:range 10)))
+
+(define (shape row)
+  (list (hash-ref row "name")
+        (hash-ref row "calls")
+        (hash-ref row "stack")))
+
+(display (list (length rows) (shape (car rows)) (shape (car (cdr rows)))))
+(newline)

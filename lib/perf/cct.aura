@@ -136,14 +136,15 @@
       (let ((v (hash-ref gene key default)))
         (if (number? v) v default))))
 
-; ratio is the classification gene: k-ref is a repeated index walk when
-; its task-clock exceeds ratio times k-length. actionable-ms drops cold
-; defines. protected comes from the sealed intend, not from the gene.
+; ratio is the classification gene: the hot leaf is a repeated index
+; walk when its task-clock exceeds ratio times its siblings together.
+; actionable-ms drops cold defines. protected comes from the sealed
+; intend, not from the gene.
 ;
 ; A native-symbol node is a function from an attached C process (the row
 ; carries native=#t). That class does not fire for the sum-scan tree,
-; which has no such rows. repeated-index-walk still wins when k-ref and
-; k-length are both present and the ratio says so.
+; which has no such rows. repeated-index-walk still wins when the leaf
+; and its siblings are both present and the ratio says so.
 (define (perf:hottest-native nodes th)
   (let loop ((xs (if (list? nodes) nodes '())) (best #f) (best-ms -1))
     (if (null? xs)
@@ -188,23 +189,53 @@
                 "counter" "checksum"
                 "event" ev))))
 
+; The hot leaf is the last define of the hot prefix; its parent is the
+; first one. The leaf's siblings are the other defines under that same
+; parent. The names are not part of the rule: the sum-scan example has
+; a k-length next to its k-ref, another target has its own siblings.
+(define (perf:prefix-leaf-of prefix)
+  (if (and (list? prefix) (pair? prefix) (pair? (cdr prefix)))
+      (car (reverse prefix))
+      ""))
+
+(define (perf:prefix-parent-of prefix)
+  (if (and (list? prefix) (pair? prefix) (pair? (cdr prefix)))
+      (car prefix)
+      ""))
+
+; The task-clock of every sibling of the leaf, added up. A node with no
+; parent (the root of the tree) is nobody's sibling.
+(define (perf:sibling-clock cct parent leaf)
+  (let ((nodes (if (hash? cct) (hash-ref cct "nodes" '()) '())))
+    (let loop ((xs nodes) (acc 0))
+      (if (null? xs)
+          acc
+          (let ((n (car xs)))
+            (loop (cdr xs)
+                  (if (and (string=? (hash-ref n "parent" "") parent)
+                           (not (string=? (hash-ref n "define" "") leaf)))
+                      (+ acc (perf:node-clock n))
+                      acc)))))))
+
 (define (perf:mine-with profile gene protected)
   (let ((cct (if (and (hash? profile) (hash? (hash-ref profile "cct" #f)))
                  (hash-ref profile "cct")
                  #f))
         (ratio (perf:gene-num gene "ratio" 2))
         (th (perf:gene-num gene "actionable-ms" 1))
-        (prot (if (list? protected) protected (list "k-ref" "k-length"))))
+        (prot (if (list? protected) protected '())))
     (if (not cct)
         (hash "class" "" "hot-node" "" "site" "" "prefix" '()
               "hypotheses" '() "actionable" '()
               "ratio" ratio "actionable-ms" th)
         (let* ((prefix (perf:cct-hot-prefix cct))
-               (kref (perf:clock-of cct "k-ref"))
-               (klen (perf:clock-of cct "k-length"))
+               (leaf (perf:prefix-leaf-of prefix))
+               (parent (perf:prefix-parent-of prefix))
+               (leaf-ms (perf:clock-of cct leaf))
+               (sibling-ms (if (string=? leaf "") 0 (perf:sibling-clock cct parent leaf)))
                (native (perf:hottest-native (hash-ref cct "nodes" '()) th))
-               (class (cond ((and (number? kref) (number? klen)
-                                   (> klen 0) (> kref (* klen ratio)))
+               (class (cond ((and (number? leaf-ms) (number? sibling-ms)
+                                   (> sibling-ms 0) (> leaf-ms (* sibling-ms ratio)))
                              "repeated-index-walk")
                             ((hash? native) "native-symbol")
                             ((pair? prefix) "flat-hot")
@@ -227,8 +258,8 @@
                 "hot-node" hot
                 "site" site
                 "prefix" shown
-                "k-ref-ms" kref
-                "k-length-ms" klen
+                "hot-ms" leaf-ms
+                "sibling-ms" sibling-ms
                 "ratio" ratio
                 "actionable-ms" th
                 "actionable" (perf:cct-actionable cct th prot)
@@ -236,9 +267,11 @@
                                  (perf:native-hypotheses site ndso nev)
                                  (perf:hypotheses class site)))))))
 
+; The protected defines come from the sealed intend. The miner does not
+; protect anything on its own: a target that protects nothing is a
+; target whose catalog may trial every define.
 (define (perf:mine profile)
-  (perf:mine-with profile (hash "ratio" 2 "actionable-ms" 1)
-                  (list "k-ref" "k-length")))
+  (perf:mine-with profile (hash "ratio" 2 "actionable-ms" 1) '()))
 
 ; Executable hypotheses. Each one names a catalog id, the define it
 ; would rebind, the constraint, and which counter it expects to move.

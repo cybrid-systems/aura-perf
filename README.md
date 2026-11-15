@@ -46,6 +46,70 @@ aura-perf test       # aura test
 
 特有能力的清单在 [docs/capabilities.md](docs/capabilities.md)。
 
+## 外部目标
+
+`autotune` 和 `recheck` 接一个可选的 spec 路径。没有路径就跑内置的 sum-scan
+例子；有路径，那个文件就是 spec，运行留在调用者的目录里，所以 spec 可以直接
+点名目标程序自己的文件：
+
+```sh
+cd my-project
+aura-perf autotune perf/spec.aura
+```
+
+spec 就是一个普通的 Aura 文件。它 require 运行时（仓库根目录在这次运行的
+`AURA_PATH` 上），然后调 `(perf:autotune spec)`：
+
+```scheme
+(require "lib/perf/loop" all:)
+(require "lib/perf/util" all:)
+
+; 目标程序：seed 装进 workspace，候选 rebind 的 define 就在那个 module 里
+(define seed-path "perf/out/seed.aura")
+(perf:write-text seed-path
+  (string-append (perf:read-text "lib/target.aura") "\n"
+                 (perf:read-text "perf/workload.aura")))
+
+; oracle：目标自己的形状，不是「输入之和」
+(define golden (string-split (perf:read-text "perf/golden.txt") "\n"))
+(define (oracle xs) (list-ref golden (- (length xs) 1)))
+
+(define spec
+  (hash "label" "my-target"          ; 报告第一行
+        "seed-path" seed-path
+        "worker" (getenv "AURA_PERF_WORKER")
+        "target" "hot-define"          ; null 候选 rebind 的那个 define
+        "kernel" "bench-kernel"
+        "out-dir" "perf/out"
+        "heldout-n" 2
+        "repeats" 5
+        "min-speedup-pct" 20
+        "intend" (hash "min-faster-pct" 10 "checksum" #t
+                        "budget" 4 "protected" '())
+        "call" (lambda (xs) (bench-kernel xs))
+        "regions-fn" regions            ; 要计时的 define 和它们的 stack
+        "inputs" (lambda (n) (make-cases n))
+        "oracle" oracle
+        "check-inputs" (lambda () (list (make-cases 1)))
+        "count-defines" #t              ; 要不要每条 worldline 的树
+        "catalog" catalog))
+```
+
+几点：
+
+- **seed 是目标程序。** 运行时把它 `set-code` 进 workspace，所以候选 rebind 的
+  define（`step`、`collide`、……）就住在运行时改的那个 module 里。
+- **oracle 是目标自己的形状。** `inputs` 造输入，`oracle` 给出这次运行该得到的
+  值，`check-inputs` 是 checksum 用的那几组。`check-inputs` 可以是一个过程：
+  外部目标的输入常常要用目标自己的 define 造，而那些 define 只有 seed 装好之后
+  才在 workspace 里。
+- **每条 worldline 的树由目标自己量。** seed 可以定义
+  `(perf-worldline-measure kernel xs)`：它知道自己的 define 的元数，所以能装上
+  计数器、跑一次 kernel、把每个 define 的调用次数和毫秒连同自己的 stack 报回来。
+  没有这个约定的目标没有这张树，报告写 `measured=0`。
+- **矿工不认名字。** `repeated-index-walk` 的判据是「热叶子比它同一个父节点下的
+  兄弟加起来还贵 `ratio` 倍」，`protected` 来自 spec 的 intend。
+
 ## 这次实测
 
 Aura 0.2.0，x86_64。这台机器没有可用的 `perf` 二进制（`/usr/bin/perf` 不在，`scripts/find-perf.sh` 没找到能读 task-clock 的 ELF），所以没有 PMU 数字，也没有 `perf record` 样本。热点毫秒来自 region timer。`k-length` 的单次测量落到 0 ms，2 倍阈值因此没有判成 `repeated-index-walk`，class 是 `flat-hot`，热叶子仍是 `k-ref`，位点是 `bench-kernel`。

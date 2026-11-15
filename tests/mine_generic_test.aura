@@ -1,0 +1,33 @@
+(require "lib/perf/cct" all:)
+
+; A target that is not the sum-scan example: the names are the target's
+; own, and the hot leaf is found by the structure of the tree.
+(define rows
+  (list (hash "name" "collide" "task-clock" 900 "calls" 600
+              "stack" (list "step" "collide"))
+        (hash "name" "pset" "task-clock" 200 "calls" 7800
+              "stack" (list "step" "pset"))
+        (hash "name" "pxs" "task-clock" 100 "calls" 18000
+              "stack" (list "step" "pxs"))
+        (hash "name" "step" "task-clock" 1200 "calls" 1
+              "stack" (list "step"))))
+
+(define cct (perf:cct-build rows))
+(define profile (hash "cct" cct))
+
+(define (mine ratio)
+  (let ((m (perf:mine-with profile (hash "ratio" ratio "actionable-ms" 1) '())))
+    (list (hash-ref m "class")
+          (hash-ref m "hot-node")
+          (hash-ref m "site")
+          (hash-ref m "prefix")
+          (hash-ref m "hot-ms")
+          (hash-ref m "sibling-ms"))))
+
+; The hot leaf is more than twice its siblings together: a repeated
+; index walk, whatever the defines are called.
+(display (list (mine 2)
+               (mine 4)
+               (hash-ref (perf:mine profile) "class")
+               (length (hash-ref (perf:mine profile) "actionable" '()))))
+(newline)

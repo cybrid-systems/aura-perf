@@ -8,6 +8,27 @@ aura-perf 是给 agent 用的优化运行时。剖析和调优是 workspace 里�
 
 ## 已实现，本轮在跑
 
+### 0. 目标是自己给的
+
+spec 是目标项目和运行时之间的那份约定，运行时按它工作：
+
+| spec 键 | 意思 | 缺省 |
+|---|---|---|
+| `seed-path` | 目标程序的源码（seed 装进 workspace） | 无 |
+| `kernel` | 被测量的那个 define 的名字 | `target` |
+| `target` | null 候选 rebind 的 define | `bench-kernel` |
+| `call` | 被计时的 kernel：`(call inputs)` | 无 |
+| `inputs` | `(n -> inputs)` | `perf:range` |
+| `oracle` | `(inputs -> expected)` | `perf:sum-ref` |
+| `check-inputs` | checksum 用的那几组输入（列表或过程） | sum-scan 的几组 |
+| `regions-fn` | 要计时的 define 和它们的 stack | 无 |
+| `catalog` | 候选：id、target、genome、thought | 无 |
+| `intend` | 最低加速、checksum、预算、protected | 无 |
+| `genes` | 策略基因 | 无 |
+| `count-defines` | 要不要每条 worldline 的树（`#t` 或 define 名字的列表） | `#f` |
+| `label` | 报告第一行的名字 | `sum-scan` |
+| `worker` | 跑一个候选的子进程脚本 | `examples/sum-scan/worker.aura` |
+
 ### 1. 证据是可查询的值，策略直接调用
 
 Agent 不接收报告。一次采集得到一个 profile 值，里面有 `cct`（调用上下文树）、`hotspots`、`counters`。树节点是**被优化程序的 define**，字段是 `inclusive-ms` / `exclusive-ms`（这里来自该 define 工作负载的 `perf stat` task-clock）、`calls`、`stack`、`page-faults`。没有像素宽度。
@@ -42,7 +63,9 @@ Agent 不接收报告。一次采集得到一个 profile 值，里面有 `cct`�
 
 ### 3. 自动矿工 + 可执行假设
 
-矿工不做 exclusive 排序然后交出一个函数名。`repeated-index-walk` 的判定是结构的：同一父节点下，`k-ref` 的 task-clock 超过 `k-length` 的两倍。分类对应一组**可 trial 的假设**，每条有 id、位点、预期（哪一个门会怎么判）、要动的计数器：
+矿工不做 exclusive 排序然后交出一个函数名。`repeated-index-walk` 的判定是结构的：热叶子（热前缀的最后一个 define）比它**同一个父节点下的兄弟加起来**还贵 `ratio` 倍。名字不在这条规则里：sum-scan 的例子恰好是 `k-ref` 和 `k-length` 并排，别的目标是它自己的 define 和它自己的兄弟。`protected` 也来自 spec，不写死。
+
+分类对应一组**可 trial 的假设**，每条有 id、位点、预期（哪一个门会怎么判）、要动的计数器（下面这组是 sum-scan 的 catalog）：
 
 | id | 位点 | 预期 |
 |---|---|---|
@@ -104,9 +127,11 @@ KEEP 不重启 agent。同一个进程里：
 
 ### 7. 每个 worldline 一棵 CCT
 
-Trial 子进程在 checksum 通过之后，用一次便宜的 region 计数把 `k-ref` / `k-length` 的调用次数记进那条 worldline 的 CCT。父进程调用 `(perf:cct-worldline-query before after prefix)`，得到 `prefix-removed`、`cost-moved`、`moved-to`。`(perf:cct-cleared …)` 回答「哪次 mutation 去掉了同一条热前缀，且没有把代价挪到别的 define」。差分摘要写进该候选的 `evo:record!` evidence（`cct-delta`）。KEEP 之后若 `perf:should-continue?` 为真，用新树再 `perf:mine`；示例里线性扫描是 `continue 0`。
+Trial 子进程在 checksum 通过之后，量出那条 worldline 的树。**树是目标程序自己量的**：seed 可以定义 `(perf-worldline-measure kernel xs)`，它知道自己的 define 的元数，所以能装上计数器、跑一次 kernel、把每个 define 的调用次数和毫秒连同它自己的 stack 报回来。运行时只补上根（它量的那个 kernel）并建树。spec 用 `count-defines` 决定要不要这张树，也可以点名要哪些 define（`#t` = seed 报的全部）。
 
-度量：`cleared` 行点名候选；`worldline` 行给出 measured / prefix-removed / cost-moved。空树是 `measured=0`，不算「前缀被删掉」。
+父进程调用 `(perf:cct-worldline-query before after prefix)`，得到 `prefix-removed`、`cost-moved`、`moved-to`。`(perf:cct-cleared …)` 回答「哪次 mutation 去掉了同一条热前缀，且没有把代价挪到别的 define」。差分摘要写进该候选的 `evo:record!` evidence（`cct-delta`）。KEEP 之后若 `perf:should-continue?` 为真，用新树再 `perf:mine`；示例里线性扫描是 `continue 0`。
+
+度量：`cleared` 行点名候选；`worldline` 行给出 measured / prefix-removed / cost-moved。空树是 `measured=0`，不算「前缀被删掉」。没有实现 `perf-worldline-measure` 的目标没有这张树，报告如实写 `measured=0`。
 
 ### 8. 负例按 class + hot-node
 

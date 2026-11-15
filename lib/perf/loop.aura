@@ -76,9 +76,31 @@
   (let ((f (hash-ref spec "oracle" #f)))
     (if (procedure? f) f perf:sum-ref)))
 
+; The check cases may be a list or a procedure that returns one. A
+; procedure is what an external target needs: its inputs are often
+; built from the target program, which only lives in the workspace
+; after the seed is installed.
+; The worldline tree: the target program measures it (the seed knows
+; the arity of its own defines). The spec says whether the run wants one,
+; and may name the defines that belong in it. Without a list every row
+; the seed reports is kept.
+(define (perf:count-on? spec)
+  (let ((cd (hash-ref spec "count-defines" #f)))
+    (cond ((eq? cd #t) #t)
+          ((list? cd) (pair? cd))
+          (else #f))))
+
+(define (perf:count-names spec)
+  (let ((cd (hash-ref spec "count-defines" #f)))
+    (if (list? cd) cd '())))
+
 (define (perf:check-cases spec)
   (let ((c (hash-ref spec "check-inputs" #f)))
-    (if (list? c) c (perf:check-inputs))))
+    (cond ((list? c) c)
+          ((procedure? c)
+           (let ((v (try (c) (catch (e) #f))))
+             (if (list? v) v (perf:check-inputs))))
+          (else (perf:check-inputs)))))
 
 (define (perf:run-check spec kernel)
   (let ((c (hash-ref spec "check" #f)))
@@ -142,7 +164,8 @@
           "heldout" (perf:bake-one spec (hash-ref spec "heldout-n" 0))
           "screen" (perf:bake-one spec (hash-ref spec "screen-n" 0))
           "checks" (perf:bake-checks spec)
-          "count-defines" (if (eq? (hash-ref spec "count-defines" #f) #t) 1 0)
+          "count-defines" (if (perf:count-on? spec) 1 0)
+          "count-names" (perf:count-names spec)
           "repeats" (hash-ref spec "repeats" 3)
           "timeout-ms" 60000
           "screen-n" (hash-ref spec "screen-n" 0)
@@ -960,7 +983,7 @@
           (hash-set! buf "before-ms" (hash-ref refs "raw-ms" -1))
           (hash-set! buf "before-samples" (hash-ref refs "raw-samples" '()))
           (hash-set! buf "profile" profile)
-          (perf:say buf "aura-perf sum-scan")
+          (perf:say buf (string-append "aura-perf " (hash-ref spec "label" "sum-scan")))
           (perf:say buf (perf:tool-line profile))
           (let loop ((xs (perf:note-lines profile)))
             (if (null? xs) #t (begin (perf:say buf (car xs)) (loop (cdr xs)))))

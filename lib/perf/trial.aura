@@ -45,7 +45,13 @@
                   " " (perf:aura-bin)
                   " --preset dev " worker
                   " > " job-path ".stdout 2>&1"))
-         (code (shell (string-append "timeout 90 sh -c '" inner "'"))))
+         ; The result of the PREVIOUS run must not be read as this run's
+         ; result: a worker that fails (a broken file, a crash, a
+         ; timeout) leaves the old file behind, and the old file holds
+         ; another moment's numbers. The gate would judge them.
+         (code (begin
+                 (shell (string-append "rm -f " result-path))
+                 (shell (string-append "timeout 90 sh -c '" inner "'")))))
     (perf:result-or-error result-path id code)))
 
 (define (perf:runner worker j)

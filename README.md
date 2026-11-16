@@ -112,7 +112,12 @@ spec 就是一个普通的 Aura 文件。它 require 运行时（仓库根目录
   那条 define，比较就不是同一件事了。spec 用 `null-genomes`（target → 源码的表）
   或 `null-genome-fn`（target → 源码的过程）给出别的 define 的原样；seed 里定义的
   define 运行时自己从 seed 的文本里取。报告里每条候选都写着它对的是哪条参照物：
-  `candidate ... ref-ms=... ref-target=...`，每条 null 也单独一行。
+  `candidate ... ref-ms=... ref-target=...`，每条 null 也单独一行，并带着它自己的
+  `rebind-penalty-ms`。
+- **没有参照物的候选被拒绝。** 候选改的那条 define 没有可 rebind 的 null（spec
+  没给函数体，或者函数体调用了本 module 的 private define）时，门不能默默拿别的
+  define 的 null 当参照物：这条候选记 `ROLLBACK reason=reference-missing`，报告里
+  写 `null-candidate target=... heldout-ms=-1 missing`。
 - **每条 worldline 的树由目标自己量。** seed 可以定义
   `(perf-worldline-measure kernel xs)`：它知道自己的 define 的元数，所以能装上
   计数器、跑一次 kernel、把每个 define 的调用次数和毫秒连同自己的 stack 报回来。

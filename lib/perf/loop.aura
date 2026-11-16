@@ -185,7 +185,10 @@
           "count-defines" (if (perf:count-on? spec) 1 0)
           "count-names" (perf:count-names spec)
           "repeats" (hash-ref spec "repeats" 3)
-          "timeout-ms" 60000
+          ; A trial that measures the candidate and its null twice each
+          ; takes four measurements; a heavy target needs more than a
+          ; minute.
+          "timeout-ms" (hash-ref spec "timeout-ms" 60000)
           "screen-n" (hash-ref spec "screen-n" 0)
           "screen-baseline-ms" (hash-ref spec "screen-baseline-ms" -1)
           "screen-slack-ms" (hash-ref spec "screen-slack-ms" 5)

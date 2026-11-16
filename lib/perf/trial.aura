@@ -38,8 +38,12 @@
                     "exit" code))))))
 
 ; timeout(1) does not invoke a shell, so the env prefix has to sit inside sh -c.
-(define (perf:launch-one worker job-path result-path log-path id)
-  (let* ((inner (string-append
+(define (perf:launch-one worker j)
+  (let* ((job-path (hash-ref j "job"))
+         (result-path (hash-ref j "result"))
+         (log-path (hash-ref j "log"))
+         (id (hash-ref j "id"))
+         (inner (string-append
                   "AURA_SANDBOX=off AURA_EVO_LOG=" log-path
                   " AURA_PERF_JOB=" job-path
                   " " (perf:aura-bin)
@@ -51,16 +55,15 @@
          ; another moment's numbers. The gate would judge them.
          (code (begin
                  (shell (string-append "rm -f " result-path))
-                 (shell (string-append "timeout 90 sh -c '" inner "'")))))
+                 (shell (string-append "timeout " (number->string
+                                                   (+ (hash-ref j "timeout-ms" 60000)
+                                                      30000))
+                                        " sh -c '" inner "'")))))
     (perf:result-or-error result-path id code)))
 
 (define (perf:runner worker j)
   (lambda (ignored)
-    (try (perf:launch-one worker
-                          (hash-ref j "job")
-                          (hash-ref j "result")
-                          (hash-ref j "log")
-                          (hash-ref j "id"))
+    (try (perf:launch-one worker j)
          (catch (e)
            (hash "id" (hash-ref j "id" "")
                  "status" "error"

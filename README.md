@@ -133,7 +133,7 @@ spec 就是一个普通的 Aura 文件。它 require 运行时（仓库根目录
   catalog 条目里的 `site`）在自己的 worldline 树上快过这个百分比，门就认。整
   个目标的地板（`min-faster-pct`）仍然是第二道。报告里有一行 `site ... base-ms=
   ... cand-ms=... floor-pct=...`，每条候选行还有 `site-floor=0|1`（1 = 程序地板
-  没���，是 site 地板把它留下的）。
+  没过，是 site 地板把它留下的）。
 - **两边在同一个进程里量。** worker 在候选的同一个子进程里先把 target rebind 成
   它自己的函数体（null）量一遍，再 rebind 成候选量一遍：参照物和候选于是差
   「候选本身」这一件事。跨进程的两个数还差机器的负载和分配历史（同一段代码跨进程

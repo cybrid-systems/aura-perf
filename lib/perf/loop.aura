@@ -3,7 +3,9 @@
 ; passed the held-out gate in a child process. Strategy rewrites use
 ; ast:snapshot / ast:restore on this process.
 
-(export perf:optimize perf:autotune perf:job-record perf:site-context)
+(export perf:optimize perf:autotune perf:job-record perf:site-context
+        perf:null-body perf:null-id perf:cand-baseline perf:split-reference
+        perf:run-targets)
 
 (require "std/evo-core" all:)
 (require "std/evo" all:)
@@ -244,13 +246,21 @@
 ; The site's two times: the baseline's and the candidate's, both from
 ; the worldline trees, and the floor the intend asks for. The result
 ; carries the site's name (the trial round set it).
-(define (perf:site-context spec result)
+(define (perf:site-context spec result . rest)
   (let* ((site (hash-ref result "site" ""))
-         (pct (hash-ref (perf:intend-seal spec) "site-min-faster-pct" #f)))
+         (pct (hash-ref (perf:intend-seal spec) "site-min-faster-pct" #f))
+         ; The base of the site floor is the same define measured in the
+         ; same shape: the null of the define the candidate rebinds. The
+         ; un-rebound baseline's tree is the fallback when that null has
+         ; no tree.
+         (base-cct (let ((c (if (pair? rest) (car rest) #f)))
+                     (if (and (hash? c) (pair? (hash-keys c)))
+                         c
+                         (hash-ref spec "baseline-cct" (hash))))))
     (if (or (not (number? pct)) (not (string? site)) (string=? site ""))
         (hash)
         (hash "site" site
-              "base" (perf:site-ms (hash-ref spec "baseline-cct" (hash)) site)
+              "base" (perf:site-ms base-cct site)
               "cand" (perf:site-ms (hash-ref result "cct" (hash)) site)
               "pct" pct))))
 
@@ -274,21 +284,27 @@
       (hash "raw" raw "null" nul "nulls" nulls))))
 
 (define (perf:trial-round spec cands out buf baseline)
-  (let ((records (let loop ((xs cands) (acc '()))
-                   (if (null? xs)
-                       (reverse acc)
-                       (loop (cdr xs) (cons (perf:job-record spec (car xs) out) acc))))))
+  (let* ((refs (perf:round-references spec out))
+         (raw-res (hash-ref refs "raw" #f))
+         (null-res (hash-ref refs "null" #f))
+         (nulls (hash-ref refs "nulls" (hash)))
+         (raw-ok (perf:usable-ms raw-res))
+         (null-ok (perf:usable-ms null-res))
+         (raw-ms (if raw-ok (hash-ref raw-res "heldout-ms") -1))
+         (baseline (if null-ok (hash-ref null-res "heldout-ms") baseline))
+         (raw (if raw-ok raw-ms (perf:raw-of spec)))
+         ; The candidates whose reference exists: the null of the define
+         ; they rebind. The rest are rejected, not measured against
+         ; another define's null.
+         (split (perf:split-reference spec nulls cands))
+         (trialable (car split))
+         (unjudgeable (car (cdr split)))
+         (records (let loop ((xs trialable) (acc '()))
+                    (if (null? xs)
+                        (reverse acc)
+                        (loop (cdr xs) (cons (perf:job-record spec (car xs) out) acc))))))
     (perf:write-jobs records)
-    (let* ((refs (perf:round-references spec out))
-           (raw-res (hash-ref refs "raw" #f))
-           (null-res (hash-ref refs "null" #f))
-           (nulls (hash-ref refs "nulls" (hash)))
-           (raw-ok (perf:usable-ms raw-res))
-           (null-ok (perf:usable-ms null-res))
-           (raw-ms (if raw-ok (hash-ref raw-res "heldout-ms") -1))
-           (baseline (if null-ok (hash-ref null-res "heldout-ms") baseline))
-           (raw (if raw-ok raw-ms (perf:raw-of spec)))
-           (fp-before (evo:source-fingerprint))
+    (let* ((fp-before (evo:source-fingerprint))
            (batch (perf:launch-jobs records (hash-ref spec "worker")))
            (fp-after (evo:source-fingerprint))
            (results (hash-ref batch "results" '()))
@@ -309,7 +325,26 @@
                       "live-fingerprint-during-trials "
                       (number->string fp-before) " -> " (number->string fp-after)
                       (if (= fp-before fp-after) " unchanged" " CHANGED")))
-      (let loop ((xs cands))
+      ; The candidates with no reference of their own.
+      (let loop ((xs unjudgeable))
+        (if (null? xs)
+            #t
+            (let* ((id (hash-ref (car xs) "id" "?"))
+                   (t (perf:cand-target spec (car xs))))
+              (perf:say buf (string-append "candidate " id
+                                           " ROLLBACK reason=reference-missing"
+                                           " ref-target=" t))
+              (perf:note buf "reject" id "reference-missing")
+              (perf:bump buf "rollback")
+              (perf:audit-decision t "ROLLBACK" "reference-missing" (hash "id" id))
+              (hash-set! buf "memory"
+                         (perf:neg-remember (hash-ref buf "memory" '())
+                                            (hash-ref spec "class" "")
+                                            (hash-ref spec "hot-node" "")
+                                            id
+                                            "reference-missing"))
+              (loop (cdr xs)))))
+      (let loop ((xs trialable))
         (if (null? xs)
             results
             (let* ((id (hash-ref (car xs) "id" ""))
@@ -323,8 +358,10 @@
                                          "ROLLBACK" "missing-result" (hash "id" id)))
                   (hash-set! result "site" (perf:candidate-site (car xs)))
                   (let* ((raw (perf:raw-of spec))
-                         (site (perf:site-context spec result))
                          (cand-target (perf:cand-target spec (car xs)))
+                         (site (perf:site-context spec result
+                                                 (hash-ref (hash-ref nulls cand-target #f)
+                                                           "cct" #f)))
                          ; The reference of this candidate is the null of
                          ; the define IT rebinds: a candidate and its
                          ; reference have to pay the same rebind.
@@ -344,6 +381,7 @@
                     (hash-set! result "target" (hash-ref (car xs) "target" ""))
                     (hash-set! result "ref-ms" cand-base)
                     (hash-set! result "ref-target" cand-target)
+                    (hash-set! result "site-context" site)
                     (hash-set! buf "results" (append (hash-ref buf "results" '()) (list result)))
                     (perf:say buf (perf:format-candidate result cand-base pct raw site))
                     (if (and (hash? site)
@@ -399,8 +437,8 @@
                    ; the fallback.
                    (let ((base (hash-ref r "ref-ms" baseline)))
                    (if raw
-                       (perf:accept? base r pct raw (perf:site-context spec r))
-                       (perf:accept? base r pct (perf:site-context spec r)))))
+                       (perf:accept? base r pct raw (hash-ref r "site-context" (hash)))
+                       (perf:accept? base r pct (hash-ref r "site-context" (hash))))))
               (if (or (not best)
                       (< (hash-ref r "heldout-ms" 999999999)
                          (hash-ref best "heldout-ms" 999999999)))
@@ -426,8 +464,8 @@
           (if (and (hash? r)
                    (let ((base (hash-ref r "ref-ms" baseline)))
                    (not (if raw
-                            (perf:accept? base r pct raw (perf:site-context spec r))
-                            (perf:accept? base r pct (perf:site-context spec r))))))
+                            (perf:accept? base r pct raw (hash-ref r "site-context" (hash)))
+                            (perf:accept? base r pct (hash-ref r "site-context" (hash)))))))
               (loop (cdr xs) (cons (hash-ref r "id" "") acc))
               (loop (cdr xs) acc)))))))
 
@@ -460,7 +498,7 @@
                  ; The site floor answers here too: a candidate that won
                  ; its own define is not a loss, even when the program
                  ; as a whole moved less than the program floor.
-                 (site (if (hash? winner) (perf:site-context spec winner) (hash)))
+                 (site (if (hash? winner) (hash-ref winner "site-context" (hash)) (hash)))
                  ; The candidate's own measurement, taken in the child
                  ; with the candidate applied, is the one that can be
                  ; compared with the null candidate of the same round:
@@ -1075,6 +1113,28 @@
         (hash-ref r "heldout-ms")
         fallback)))
 
+; The candidates that can be judged and the ones that cannot.
+;
+; A candidate that rebinds a define the spec does not name has to be
+; judged against the null of THAT define: a rebind of a hot define is
+; worth 2x on its own on the Aura runtime, so a reference that never
+; paid that rebind is not like for like. When the spec gave no
+; rebindable body for that define, there is no reference, and the
+; candidate is rejected instead of being measured against another
+; define's null.
+(define (perf:split-reference spec nulls cands)
+  (let ((spec-target (hash-ref spec "target" "bench-kernel")))
+    (let loop ((xs cands) (ok '()) (no '()))
+      (if (null? xs)
+          (list (reverse ok) (reverse no))
+          (let* ((c (car xs))
+                 (t (perf:cand-target spec c))
+                 (has (or (string=? t spec-target)
+                          (perf:usable-ms (hash-ref nulls t #f)))))
+            (if has
+                (loop (cdr xs) (cons c ok) no)
+                (loop (cdr xs) ok (cons c no))))))))
+
 (define (perf:measure-references spec buf out)
   (let* ((target (hash-ref spec "target" "bench-kernel"))
          (null-body (perf:null-genome spec target))
@@ -1125,7 +1185,8 @@
                                    (if (string=? null-body "") " genome=missing" "")))
       ; One null per target a candidate may rebind: a candidate that
       ; changes a define the spec does not name is judged against the
-      ; null of THAT define.
+      ; null of THAT define. The rebind's tax is per target too: it is
+      ; the gap between the un-rebound baseline and that target's null.
       (perf:say-each
         buf
         (let loop ((ts (perf:run-targets spec)) (lines '()))
@@ -1142,7 +1203,12 @@
                                                (number->string (if ok
                                                                   (hash-ref r "heldout-ms")
                                                                   -1))
-                                               (if ok " rebound=1" " missing"))
+                                               (if ok
+                                                   (string-append " rebound=1 rebind-penalty-ms="
+                                                                  (number->string
+                                                                    (- (hash-ref r "heldout-ms")
+                                                                       raw-ms)))
+                                                   " missing"))
                                 lines)))))))
       (perf:say buf (string-append "gate-baseline-ms " (number->string gate-ms)
                                    " source=" gate-source))

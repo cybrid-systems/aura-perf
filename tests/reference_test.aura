@@ -1,0 +1,54 @@
+; tests/reference_test.aura — the reference of a candidate is the null of
+; the define the candidate rebinds.
+;
+; A candidate in the catalog may rebind a define the spec does not name.
+; The reference that pays the same rebind is then the null of THAT
+; define, and a candidate whose define has no null cannot be judged at
+; all: it is not measured against another define's null.
+
+(require "lib/perf/loop" all:)
+
+(define catalog
+  (list (hash "id" "a" "target" "bench-kernel")
+        (hash "id" "b" "target" "k-ref")
+        (hash "id" "c" "target" "no-such-define")))
+
+(define spec
+  (hash "target" "bench-kernel"
+        "seed-path" "examples/sum-scan/seed.aura"
+        "catalog" catalog
+        "null-genomes" (hash "k-ref" "(define (k-ref xs i) 0)")))
+
+; The nulls of a round: each target with the time its own null measured.
+(define nulls
+  (hash "bench-kernel" (hash "status" "ok" "checksum-ok" 1 "heldout-ms" 100)
+        "k-ref" (hash "status" "ok" "checksum-ok" 1 "heldout-ms" 90)))
+
+(define split (perf:split-reference spec nulls catalog))
+(define ok (car split))
+(define no (car (cdr split)))
+
+; The body of a null comes from the spec first, then from the seed's
+; own text.
+(define bench-body (perf:null-body spec "bench-kernel"))
+
+(display (list
+          ; the candidates with a reference, and the one without
+          (length ok)
+          (length no)
+          (if (equal? (hash-ref (car ok) "id" "") "a") 1 0)
+          (if (equal? (hash-ref (car (cdr ok)) "id" "") "b") 1 0)
+          (if (equal? (hash-ref (car no) "id" "") "c") 1 0)
+          ; the reference of a candidate is the null of its own target
+          (if (= (perf:cand-baseline spec nulls 1000 "k-ref") 90) 1 0)
+          (if (= (perf:cand-baseline spec nulls 1000 "bench-kernel") 100) 1 0)
+          ; a target with no null has no reference of its own
+          (if (= (perf:cand-baseline spec nulls 1000 "no-such-define") 1000) 1 0)
+          ; the spec's body wins over the seed's text
+          (if (string=? (perf:null-body spec "k-ref") "(define (k-ref xs i) 0)") 1 0)
+          ; the seed's text carries the body of a define it owns
+          (if (> (string-length bench-body) 0) 1 0)
+          ; the id of a null job is a file name
+          (if (string=? (perf:null-id spec "bench-kernel") "null") 1 0)
+          (if (string=? (perf:null-id spec "bits:json-string") "null-bits-json-string") 1 0)))
+(newline)

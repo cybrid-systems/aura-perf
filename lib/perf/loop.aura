@@ -1018,10 +1018,25 @@
 
 ; The id of a target's null job: "null" for the spec's target, so the
 ; report keeps the name it always had, and "null-<target>" for the rest.
+; The id is also a file name, so the target's name is made safe.
+(define (perf:id-safe s)
+  (let ((n (string-length s)))
+    (let loop ((i 0) (out ""))
+      (if (>= i n)
+          out
+          (let ((c (string-ref s i)))
+            (loop (+ i 1)
+                  (string-append out
+                                 (if (or (and (>= c 48) (<= c 57))
+                                         (and (>= c 65) (<= c 90))
+                                         (and (>= c 97) (<= c 122)))
+                                     (list->string (list c))
+                                     "-"))))))))
+
 (define (perf:null-id spec target)
   (if (string=? target (hash-ref spec "target" "bench-kernel"))
       "null"
-      (string-append "null-" target)))
+      (string-append "null-" (perf:id-safe target))))
 
 ; One null job per target that has a body. The reference of a
 ; candidate is the null of the define the candidate rebinds.

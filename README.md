@@ -106,6 +106,13 @@ spec 就是一个普通的 Aura 文件。它 require 运行时（仓库根目录
 - **门比的是 null 候选。** null 候选把目标 rebind 成它自己的原样，所以参照和候选
   付的是同一笔 rebind 的税（report 里是 `rebind-penalty-ms`）。目标的 define 如果不在
   seed 里而在别的 module（aura-redis 的 `src/` ✓），spec 用 `null-genome` 给出那段源码 ✓。
+- **参照物按候选自己的 define 建。** catalog 里每条候选可以 rebind 另一条 define，
+  那它的参照物就得是**那条 define** 的 null，不是 spec 的 `target` 的 null：一次
+  rebind 本身就值好几倍（Aura runtime 上实测 2.26×），参照物没有 rebind 候选改的
+  那条 define，比较就不是同一件事了。spec 用 `null-genomes`（target → 源码的表）
+  或 `null-genome-fn`（target → 源码的过程）给出别的 define 的原样；seed 里定义的
+  define 运行时自己从 seed 的文本里取。报告里每条候选都写着它对的是哪条参照物：
+  `candidate ... ref-ms=... ref-target=...`，每条 null 也单独一行。
 - **每条 worldline 的树由目标自己量。** seed 可以定义
   `(perf-worldline-measure kernel xs)`：它知道自己的 define 的元数，所以能装上
   计数器、跑一次 kernel、把每个 define 的调用次数和毫秒连同自己的 stack 报回来。

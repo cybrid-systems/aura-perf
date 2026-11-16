@@ -171,23 +171,35 @@
                                                                  (hash-ref screen-spec "oracle" perf:sum-ref))))
                                   (screen-ms (hash-ref screen "median" -1))
                                   (screen-xs (if screen-spec (hash-ref screen-spec "input" '()) '()))
-                                  (cct (if (or (not screen-spec)
-                                               (not (= (hash-ref job "count-defines" 0) 1)))
-                                           (hash "kind" "perf-cct" "nodes" '())
-                                           (worldline-cct run-kernel screen-xs screen-ms
-                                                         (hash-ref job "kernel" "bench-kernel"))))
                                   (hold (and (not (string=? role "null"))
                                              (not (string=? role "baseline"))
                                              (perf:screen-prune?
                                                (hash-ref job "screen-baseline-ms" -1)
                                                screen-ms
                                                (hash-ref job "screen-slack-ms" 5)))))
+                             ; The worldline tree is measured after the
+                             ; timing, never between the checksum and
+                             ; the timing: the target's own measurement
+                             ; installs its wrappers around the hot
+                             ; defines, and a program that has been
+                             ; measured that way must not be the program
+                             ; whose result is compared.
                              (if hold
-                                 (screen-result screen-ms cct "screen-pruned" -1 0 '())
+                                 (let ((cct (if (or (not screen-spec)
+                                                   (not (= (hash-ref job "count-defines" 0) 1)))
+                                               (hash "kind" "perf-cct" "nodes" '())
+                                               (worldline-cct run-kernel screen-xs screen-ms
+                                                             (hash-ref job "kernel" "bench-kernel")))))
+                                   (screen-result screen-ms cct "screen-pruned" -1 0 '()))
                                  (let* ((ho (heldout-of))
                                         (tm (perf:time-checked repeats run-kernel
                                                                (hash-ref ho "input" '())
-                                                               (hash-ref ho "oracle" perf:sum-ref))))
+                                                               (hash-ref ho "oracle" perf:sum-ref)))
+                                        (cct (if (or (not screen-spec)
+                                                     (not (= (hash-ref job "count-defines" 0) 1)))
+                                                 (hash "kind" "perf-cct" "nodes" '())
+                                                 (worldline-cct run-kernel screen-xs screen-ms
+                                                                   (hash-ref job "kernel" "bench-kernel")))))
                                    (screen-result screen-ms cct "held-out"
                                                   (hash-ref tm "median")
                                                   (hash-ref tm "mismatches")

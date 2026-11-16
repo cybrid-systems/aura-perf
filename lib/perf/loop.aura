@@ -218,6 +218,8 @@
     " " (if (string=? reason "gate-pass") "PASS" "ROLLBACK")
     " reason=" reason
     " heldout-ms=" (number->string (hash-ref result "heldout-ms" -1))
+    " ref-ms=" (number->string baseline)
+    " ref-target=" (hash-ref result "ref-target" "")
     " mismatches=" (number->string (hash-ref result "mismatches" -1))
     " live-unchanged=" (number->string (hash-ref result "live-unchanged" 0))
     " trial-applied=" (number->string (hash-ref result "trial-applied" 0))
@@ -261,15 +263,15 @@
                                     (hash "id" "baseline" "role" "baseline"
                                           "genome" "" "target" target)
                                     out))
-         (null-rec (perf:null-job spec out))
-         (jobs (if null-rec (list base-rec null-rec) (list base-rec))))
+         (null-recs (perf:null-jobs spec out))
+         (jobs (cons base-rec null-recs)))
     (perf:write-jobs jobs)
     (let* ((batch (perf:launch-jobs jobs (hash-ref spec "worker")))
-           (raw (perf:find-result (hash-ref batch "results" '()) "baseline"))
-           (nul (if null-rec
-                    (perf:find-result (hash-ref batch "results" '()) "null")
-                    #f)))
-      (hash "raw" raw "null" nul))))
+           (results (hash-ref batch "results" '()))
+           (raw (perf:find-result results "baseline"))
+           (nul (perf:find-result results "null"))
+           (nulls (perf:null-results spec results)))
+      (hash "raw" raw "null" nul "nulls" nulls))))
 
 (define (perf:trial-round spec cands out buf baseline)
   (let ((records (let loop ((xs cands) (acc '()))
@@ -280,6 +282,7 @@
     (let* ((refs (perf:round-references spec out))
            (raw-res (hash-ref refs "raw" #f))
            (null-res (hash-ref refs "null" #f))
+           (nulls (hash-ref refs "nulls" (hash)))
            (raw-ok (perf:usable-ms raw-res))
            (null-ok (perf:usable-ms null-res))
            (raw-ms (if raw-ok (hash-ref raw-res "heldout-ms") -1))
@@ -321,9 +324,14 @@
                   (hash-set! result "site" (perf:candidate-site (car xs)))
                   (let* ((raw (perf:raw-of spec))
                          (site (perf:site-context spec result))
+                         (cand-target (perf:cand-target spec (car xs)))
+                         ; The reference of this candidate is the null of
+                         ; the define IT rebinds: a candidate and its
+                         ; reference have to pay the same rebind.
+                         (cand-base (perf:cand-baseline spec nulls baseline cand-target))
                          (reason (if raw
-                                     (perf:reason result baseline pct raw site)
-                                     (perf:reason result baseline pct site)))
+                                     (perf:reason result cand-base pct raw site)
+                                     (perf:reason result cand-base pct site)))
                          (q (perf:cct-worldline-query
                               (hash-ref spec "profile-cct" #f)
                               (hash-ref result "cct" #f)
@@ -334,8 +342,10 @@
                     (hash-set! result "measured" (if (eq? (hash-ref q "measured" #f) #t) 1 0))
                     (hash-set! result "moved-to" (perf:join (hash-ref q "moved-to" '()) ","))
                     (hash-set! result "target" (hash-ref (car xs) "target" ""))
+                    (hash-set! result "ref-ms" cand-base)
+                    (hash-set! result "ref-target" cand-target)
                     (hash-set! buf "results" (append (hash-ref buf "results" '()) (list result)))
-                    (perf:say buf (perf:format-candidate result baseline pct raw site))
+                    (perf:say buf (perf:format-candidate result cand-base pct raw site))
                     (if (and (hash? site)
                              (string? (hash-ref site "site" ""))
                              (> (string-length (hash-ref site "site" "")) 0))
@@ -384,9 +394,13 @@
         best
         (let ((r (car xs)))
           (if (and (hash? r)
+                   ; The reference of a candidate is the null of the
+                   ; define it rebinds; the round's reference is only
+                   ; the fallback.
+                   (let ((base (hash-ref r "ref-ms" baseline)))
                    (if raw
-                       (perf:accept? baseline r pct raw (perf:site-context spec r))
-                       (perf:accept? baseline r pct (perf:site-context spec r))))
+                       (perf:accept? base r pct raw (perf:site-context spec r))
+                       (perf:accept? base r pct (perf:site-context spec r)))))
               (if (or (not best)
                       (< (hash-ref r "heldout-ms" 999999999)
                          (hash-ref best "heldout-ms" 999999999)))
@@ -410,9 +424,10 @@
         (reverse acc)
         (let ((r (car xs)))
           (if (and (hash? r)
+                   (let ((base (hash-ref r "ref-ms" baseline)))
                    (not (if raw
-                            (perf:accept? baseline r pct raw (perf:site-context spec r))
-                            (perf:accept? baseline r pct (perf:site-context spec r)))))
+                            (perf:accept? base r pct raw (perf:site-context spec r))
+                            (perf:accept? base r pct (perf:site-context spec r))))))
               (loop (cdr xs) (cons (hash-ref r "id" "") acc))
               (loop (cdr xs) acc)))))))
 
@@ -456,9 +471,14 @@
                  (cand-ms (if (hash? winner)
                               (hash-ref winner "heldout-ms" -1)
                               (hash-ref tm "median" -1)))
+                 ; The winner's own reference: the null of the define it
+                 ; rebinds, the same one the gate used.
+                 (ref-ms (if (hash? winner)
+                             (hash-ref winner "ref-ms" baseline)
+                             baseline))
                  (ok (and (eq? (hash-ref chk "ok" #f) #t)
                           (= (hash-ref tm "mismatches" 1) 0)
-                          (or (perf:speedup-ok? baseline cand-ms pct)
+                          (or (perf:speedup-ok? ref-ms cand-ms pct)
                               (perf:site-ok? site)))))
             (if ok
                 (begin
@@ -951,6 +971,95 @@
                                "genome" null-body "target" target)
                          out))))
 
+; The body of ANY target's null candidate: the target's own body, so a
+; candidate and its reference pay the same rebind.
+;
+; The spec's "null-genome" covers the spec's own target. A candidate may
+; rebind another define (the catalog's "target"), and then the reference
+; has to be the null of THAT define: a rebind of a hot define is worth
+; 2x on its own on the Aura runtime, so judging a candidate against
+; another define's null is not like for like.
+;
+; The other bodies come from the spec:
+;   "null-genomes"  a hash of target -> body
+;   "null-genome-fn" a procedure (target -> body)
+; A target with no known body has no null: the gate must not silently
+; use another define's null for it.
+(define (perf:null-body spec target)
+  (let ((given (hash-ref spec "null-genomes" (hash)))
+        (fn (hash-ref spec "null-genome-fn" #f)))
+    (let ((explicit (cond ((and (hash? given)
+                                 (string? (hash-ref given target ""))
+                                 (> (string-length (hash-ref given target "")) 0))
+                            (hash-ref given target ""))
+                           ((procedure? fn)
+                            (let ((b (try (fn target) (catch (e) ""))))
+                              (if (string? b) b "")))
+                           (else ""))))
+      (if (> (string-length explicit) 0)
+          explicit
+          (if (string=? target (hash-ref spec "target" "bench-kernel"))
+              (perf:null-genome spec target)
+              ; A target the seed defines can be rebound to its own
+              ; body there: the seed's text is where its defines live.
+              (perf:extract-define (perf:read-text (hash-ref spec "seed-path" "")) target))))))
+
+; Every target this run may rebind: the spec's target first, then the
+; target of every candidate in the catalog.
+(define (perf:run-targets spec)
+  (let loop ((xs (perf:catalog spec)) (acc (list (hash-ref spec "target" "bench-kernel"))))
+    (if (null? xs)
+        (reverse acc)
+        (let ((t (perf:cand-target spec (car xs))))
+          (loop (cdr xs)
+                (if (perf:member? acc t)
+                    acc
+                    (append acc (list t))))))))
+
+; The id of a target's null job: "null" for the spec's target, so the
+; report keeps the name it always had, and "null-<target>" for the rest.
+(define (perf:null-id spec target)
+  (if (string=? target (hash-ref spec "target" "bench-kernel"))
+      "null"
+      (string-append "null-" target)))
+
+; One null job per target that has a body. The reference of a
+; candidate is the null of the define the candidate rebinds.
+(define (perf:null-jobs spec out)
+  (let loop ((ts (perf:run-targets spec)) (acc '()))
+    (if (null? ts)
+        (reverse acc)
+        (let* ((target (car ts))
+               (body (perf:null-body spec target)))
+          (if (string=? body "")
+              (loop (cdr ts) acc)
+              (loop (cdr ts)
+                    (cons (perf:job-record spec
+                                           (hash "id" (perf:null-id spec target)
+                                                 "role" "null"
+                                                 "genome" body "target" target)
+                                           out)
+                          acc)))))))
+
+; The null results, keyed by the target each one rebinds.
+(define (perf:null-results spec results)
+  (let loop ((ts (perf:run-targets spec)) (acc (hash)))
+    (if (null? ts)
+        acc
+        (let* ((target (car ts))
+               (r (perf:find-result results (perf:null-id spec target))))
+          (if r (hash-set! acc target r) #f)
+          (loop (cdr ts) acc)))))
+
+; The reference of a candidate: the null of the define the candidate
+; rebinds. When that define has no null of its own, the round's
+; reference is used and the report says so.
+(define (perf:cand-baseline spec nulls fallback target)
+  (let ((r (hash-ref nulls target #f)))
+    (if (perf:usable-ms r)
+        (hash-ref r "heldout-ms")
+        fallback)))
+
 (define (perf:measure-references spec buf out)
   (let* ((target (hash-ref spec "target" "bench-kernel"))
          (null-body (perf:null-genome spec target))
@@ -958,14 +1067,14 @@
                                     (hash "id" "baseline" "role" "baseline"
                                           "genome" "" "target" target)
                                     out))
-         (null-rec (perf:null-job spec out))
-         (jobs (if null-rec (list base-rec null-rec) (list base-rec))))
+         (null-recs (perf:null-jobs spec out))
+         (jobs (cons base-rec null-recs)))
     (perf:write-jobs jobs)
     (let* ((batch (perf:launch-jobs jobs (hash-ref spec "worker")))
-           (raw (perf:find-result (hash-ref batch "results" '()) "baseline"))
-           (nul (if null-rec
-                    (perf:find-result (hash-ref batch "results" '()) "null")
-                    #f))
+           (results (hash-ref batch "results" '()))
+           (raw (perf:find-result results "baseline"))
+           (nul (perf:find-result results "null"))
+           (nulls (perf:null-results spec results))
            (raw-ok (perf:usable-ms raw))
            (null-ok (perf:usable-ms nul))
            (parent (if raw-ok #f (perf:baseline spec)))
@@ -999,6 +1108,27 @@
                                                        -1))
                                    " rebound=1 target=" target
                                    (if (string=? null-body "") " genome=missing" "")))
+      ; One null per target a candidate may rebind: a candidate that
+      ; changes a define the spec does not name is judged against the
+      ; null of THAT define.
+      (perf:say-each
+        buf
+        (let loop ((ts (perf:run-targets spec)) (lines '()))
+          (if (null? ts)
+              (reverse lines)
+              (let* ((t (car ts))
+                     (r (hash-ref nulls t #f))
+                     (ok (perf:usable-ms r)))
+                (loop (cdr ts)
+                      (if (string=? t target)
+                          lines
+                          (cons (string-append "null-candidate target=" t
+                                               " heldout-ms="
+                                               (number->string (if ok
+                                                                  (hash-ref r "heldout-ms")
+                                                                  -1))
+                                               (if ok " rebound=1" " missing"))
+                                lines)))))))
       (perf:say buf (string-append "gate-baseline-ms " (number->string gate-ms)
                                    " source=" gate-source))
       (if (and null-ok raw-ok)

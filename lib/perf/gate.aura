@@ -46,6 +46,14 @@
 ; The site floor. A candidate that rebinds one define can only win the
 ; slice of the program that define owns, so the floor is measured
 ; against the define, not against the whole target.
+;
+; A percentage over a few milliseconds is noise: the timer reads in
+; milliseconds, and a define that owns 6 ms of a 400 request screen
+; cannot be told apart from one that owns 12 ms. So the difference has
+; to stand up on its own: at least PERF-SITE-MIN-DIFF-MS, which means
+; a 10% floor needs a base of 100 ms and a 20% floor a base of 50 ms.
+(define PERF-SITE-MIN-DIFF-MS 10)
+
 (define (perf:site-ok? site)
   (if (hash? site)
       (let* ((base (hash-ref site "base" -1))
@@ -54,6 +62,7 @@
         (and (number? base) (> base 0)
              (number? cand) (>= cand 0)
              (number? pct) (>= pct 0) (< pct 100)
+             (>= (- base cand) PERF-SITE-MIN-DIFF-MS)
              (<= (* cand 100) (* base (- 100 pct)))))
       #f))
 

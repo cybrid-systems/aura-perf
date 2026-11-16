@@ -169,6 +169,12 @@
     (hash "id" id
           "seed" (hash-ref spec "seed-path")
           "target" target
+          ; The body of the target's own null: the worker rebinds to it
+          ; first and measures the tree, so the site floor's two sides
+          ; are measured in the SAME process, in the same shape (a
+          ; rebind makes the rebound define faster to call, so a base
+          ; measured without the rebind would flatter every candidate).
+          "null-genome" (perf:null-body spec target)
           "kernel" (hash-ref spec "kernel" (hash-ref spec "target" "bench-kernel"))
           "role" (hash-ref cand "role" "candidate")
           "genome" (hash-ref cand "genome" "")
@@ -222,6 +228,7 @@
     " heldout-ms=" (number->string (hash-ref result "heldout-ms" -1))
     " ref-ms=" (number->string baseline)
     " ref-target=" (hash-ref result "ref-target" "")
+    " site-floor=" (number->string (hash-ref result "site-floor" 0))
     " mismatches=" (number->string (hash-ref result "mismatches" -1))
     " live-unchanged=" (number->string (hash-ref result "live-unchanged" 0))
     " trial-applied=" (number->string (hash-ref result "trial-applied" 0))
@@ -360,12 +367,33 @@
                   (let* ((raw (perf:raw-of spec))
                          (cand-target (perf:cand-target spec (car xs)))
                          (site (perf:site-context spec result
-                                                 (hash-ref (hash-ref nulls cand-target #f)
-                                                           "cct" #f)))
+                                                 (let ((own (hash-ref result "base-cct" #f)))
+                                                   ; The candidate's own base: the
+                                                   ; same tree, in the same
+                                                   ; process, measured before the
+                                                   ; rebind. Two processes are two
+                                                   ; histories, and the histories
+                                                   ; move the numbers.
+                                                   (if (and (hash? own)
+                                                            (pair? (hash-keys own)))
+                                                       own
+                                                       (hash-ref (hash-ref nulls cand-target #f)
+                                                                 "cct" #f)))))
                          ; The reference of this candidate is the null of
                          ; the define IT rebinds: a candidate and its
                          ; reference have to pay the same rebind.
-                         (cand-base (perf:cand-baseline spec nulls baseline cand-target))
+                         (cand-base (let ((own (hash-ref result "null-heldout-ms" -1)))
+                                      ; The reference of this candidate: the
+                                      ; null of the define it rebinds,
+                                      ; measured in the SAME process (the
+                                      ; worker measures it right before it
+                                      ; applies the candidate). Across
+                                      ; processes the two numbers differ by
+                                      ; the machine's load, which is worth
+                                      ; more than the floor.
+                                      (if (and (number? own) (> own 0))
+                                          own
+                                          (perf:cand-baseline spec nulls baseline cand-target))))
                          (reason (if raw
                                      (perf:reason result cand-base pct raw site)
                                      (perf:reason result cand-base pct site)))
@@ -373,7 +401,16 @@
                               (hash-ref spec "profile-cct" #f)
                               (hash-ref result "cct" #f)
                               (hash-ref spec "prefix" '())))
-                         (pass (string=? reason "gate-pass")))
+                         (pass (string=? reason "gate-pass"))
+                         ; Did the site floor keep it, when the program
+                         ; floor did not? The report says so: a reader
+                         ; should not have to guess which of the two
+                         ; floors answered.
+                         (site-floor (if (and (not (perf:speedup-ok? cand-base
+                                                                 (hash-ref result "heldout-ms" -1)
+                                                                 pct))
+                                           (perf:site-ok? site))
+                                        1 0)))
                     (hash-set! result "prefix-removed" (if (eq? (hash-ref q "prefix-removed" #f) #t) 1 0))
                     (hash-set! result "cost-moved" (if (eq? (hash-ref q "cost-moved" #f) #t) 1 0))
                     (hash-set! result "measured" (if (eq? (hash-ref q "measured" #f) #t) 1 0))
@@ -382,6 +419,7 @@
                     (hash-set! result "ref-ms" cand-base)
                     (hash-set! result "ref-target" cand-target)
                     (hash-set! result "site-context" site)
+                    (hash-set! result "site-floor" site-floor)
                     (hash-set! buf "results" (append (hash-ref buf "results" '()) (list result)))
                     (perf:say buf (perf:format-candidate result cand-base pct raw site))
                     (if (and (hash? site)

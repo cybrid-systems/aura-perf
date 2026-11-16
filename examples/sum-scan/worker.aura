@@ -46,16 +46,78 @@
 ; An empty genome is the un-rebound baseline: same child shape as a
 ; candidate, but mutate:rebind is not applied. The null candidate passes
 ; the target's own define text and does rebind.
+;
+; The base of the site floor is measured HERE, before the rebind, in
+; this process: the two sides of the site comparison then differ by the
+; candidate and by nothing else. Two processes are two histories, and
+; the histories move the numbers (the region timer is sensitive to the
+; allocation history), so a base measured in another process can make a
+; candidate that changes nothing look like a win on its own site.
+;
+; The base is measured with the target rebound to its OWN body, not
+; un-rebound: a rebound define is called through a faster path, so an
+; un-rebound base flatters every candidate (on the aura-redis GET path
+; the same define measured 14 ms un-rebound and 5 ms rebound).
+(define base-cct (hash "kind" "perf-cct" "nodes" '()))
+(define null-genome (hash-ref job "null-genome" ""))
+
+(define (measure-tree screen-xs screen-ms)
+  (if (or (not (= (hash-ref job "count-defines" 0) 1))
+          (null? screen-xs))
+      (hash "kind" "perf-cct" "nodes" '())
+      (worldline-cct run-kernel screen-xs screen-ms
+                    (hash-ref job "kernel" "bench-kernel"))))
+
+(define (screen-measure)
+  (let* ((spec (screen-of))
+         (xs (if spec (hash-ref spec "input" '()) '()))
+         (screen (if (not spec)
+                     (hash "median" -1)
+                     (perf:time-checked 1 run-kernel
+                                        (hash-ref spec "input" '())
+                                        (hash-ref spec "oracle" perf:sum-ref))))
+         (ms (hash-ref screen "median" -1)))
+    (list xs ms)))
+
+(define null-heldout-ms -1)
+
+(define (measure-base)
+  ; The null: the target rebound to its own body, measured here, in this
+  ; process, right before the candidate is applied. The gate's two
+  ; numbers - the null's and the candidate's - then come from the same
+  ; process, in the same shape, and differ by the candidate and by
+  ; nothing else. Across processes they differ by the machine's load
+  ; and by the allocation history, which is worth more than the floor.
+  (if (or (not (string? null-genome)) (= (string-length null-genome) 0))
+      #f
+      (let ((rb (mutate:rebind target null-genome "perf-null-base")))
+        (if (not (eq? rb #t))
+            #f
+            (begin
+              (eval-current)
+              (let* ((m (screen-measure))
+                     (ho (heldout-of))
+                     (tm (perf:time-checked repeats run-kernel
+                                            (hash-ref ho "input" '())
+                                            (hash-ref ho "oracle" perf:sum-ref))))
+                (set! base-cct (measure-tree (car m) (cadr m)))
+                (set! null-heldout-ms (hash-ref tm "median" -1))
+                null-heldout-ms))))))
+
 (define (apply-candidate c)
   (let ((g (hash-ref c "genome" "")))
     (if (or (string=? role "baseline")
             (not (string? g))
             (string=? g ""))
         #t
-        (let ((rb (mutate:rebind target g "perf-trial")))
-          (if (eq? rb #t)
-              (begin (eval-current) #t)
-              rb)))))
+        (begin
+          ; The base of the site floor, in this process, in the same
+          ; shape as the candidate's own measurement.
+          (measure-base)
+          (let ((rb (mutate:rebind target g "perf-trial")))
+            (if (eq? rb #t)
+                (begin (eval-current) #t)
+                rb))))))
 
 (define (run-kernel xs)
   (let ((fn (try (eval (string->symbol kernel-name)) (catch (e) #f))))
@@ -124,7 +186,13 @@
                          "samples" samples
                          "fidelity" fidelity
                          "screen-ms" screen-ms
-                         "cct" cct)))
+                         "cct" cct
+                         ; The tree of the same process before the
+                         ; rebind: the base of the site floor.
+                         "base-cct" base-cct
+                         ; The null's held-out, in the same process:
+                         ; the reference the gate compares with.
+                         "null-heldout-ms" null-heldout-ms)))
 
 (define (heldout-of)
   (let ((baked (hash-ref job "heldout" #f)))
@@ -225,6 +293,8 @@
         "fidelity" (hash-ref beh "fidelity" "")
         "screen-ms" (hash-ref beh "screen-ms" -1)
         "cct" (hash-ref beh "cct" (hash "kind" "perf-cct" "nodes" '()))
+        "base-cct" (hash-ref beh "base-cct" (hash "kind" "perf-cct" "nodes" '()))
+        "null-heldout-ms" (hash-ref beh "null-heldout-ms" -1)
         "dur-ms" (hash-ref tr "dur-ms" 0)
         "error" (let ((e (hash-ref tr "error" #f)))
                   (if (string? e) e ""))))

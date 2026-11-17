@@ -137,7 +137,11 @@ spec 就是一个普通的 Aura 文件。它 require 运行时（仓库根目录
 - **两边在同一个进程里量。** worker 在候选的同一个子进程里先把 target rebind 成
   它自己的函数体（null）量一遍，再 rebind 成候选量一遍：参照物和候选于是差
   「候选本身」这一件事。跨进程的两个数还差机器的负载和分配历史（同一段代码跨进程
-  能差 6%，同一个进程里只差 0.3%）。所以 job 里带 `null-genome`，worker 要把它
+  能差 6%，同一个进程里只差 0.3%）。
+  代价：null 先量，所以在**带 LLVM JIT 的构建**上，null 吃的是那次测量的预热
+  （JIT 爬 tier），读出来偏慢，地板会偏袒候选。报告里两个参照都写出来：
+  `null-candidate heldout-ms`（null job 自己那个进程量的）和候选行的 `ref-ms`
+  （候选进程里量的），差得远时以 job 的那个为准。所以 job 里带 `null-genome`，worker 要把它
   量出来写进结果的 `base-cct` 和 `null-heldout-ms`；不提供这两个值的 worker 仍
   然能用（运行时退回那条 define 的 null job 的树）。
 - **几毫秒上的百分比不算数。** site 地板还要求绝对差值站得住（10 ms）：10% 的地板

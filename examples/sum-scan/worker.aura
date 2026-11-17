@@ -82,12 +82,21 @@
 (define null-heldout-ms -1)
 
 (define (measure-base)
-  ; The null: the target rebound to its own body, measured here, in this
-  ; process, right before the candidate is applied. The gate's two
-  ; numbers - the null's and the candidate's - then come from the same
-  ; process, in the same shape, and differ by the candidate and by
-  ; nothing else. Across processes they differ by the machine's load
-  ; and by the allocation history, which is worth more than the floor.
+  ; The null: the target rebound to its own body, measured in this
+  ; process, so the gate's two numbers - the null's and the candidate's -
+  ; come from the same process, in the same shape, and differ by the
+  ; candidate and by nothing else. Across processes they differ by the
+  ; machine's load and by the allocation history, which is worth more
+  ; than the floor.
+  ;
+  ; The null is measured FIRST, before the candidate is applied. On a
+  ; build with the LLVM JIT the first measurement in a process pays the
+  ; warm-up (the JIT tiers up), so the null reads slower than the same
+  ; code measured later and the floor flatters the candidate. The
+  ; reference that does not have that bias is the null job's own
+  ; measurement (a separate process, measured on its own); the runtime
+  ; reports both: "null-candidate heldout-ms" (the job) and the
+  ; candidate's "ref-ms" (this one).
   (if (or (not (string? null-genome)) (= (string-length null-genome) 0))
       #f
       (let ((rb (mutate:rebind target null-genome "perf-null-base")))

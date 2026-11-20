@@ -1,0 +1,191 @@
+; bus.aura — aura-perf on the Aura bus (#5128, aura-perf#10).
+;
+; The perf parent owns the seed workspace, so it HOSTS the bus (#5121's
+; process model: the coordinator is the workspace owner, not a daemon)
+; and attaches as the perf peer (role 1). CCT, hotspots, hypotheses and
+; verdicts go to the bus channels and the shared audit; KEEP runs the
+; coordinator's constraint gate — a rejection downgrades the verdict to
+; ROLLBACK, there is no local bypass. Workers stay on the internal job
+; exchange (that is one tool's own mechanics); the bus is the inter-tool
+; main path: after perf detaches, the host keeps serving, so harness or
+; maintainer can attach and query the same audit and image.
+;
+; Enabled by the spec's "bus" hash ("workspace" N) or the environment
+; AURA_PERF_BUS_WORKSPACE=N. Without either, every function is a no-op
+; and the round runs exactly as before.
+;
+; Channel mapping (the image carries immediates, not text):
+;   cct      one record per profile name, published in stack order so
+;            parent indices point backward; mid = the rolling name hash
+;            below (31-multiplier, mod 999999937, fits the low 62 bits);
+;            node = -1 (no node index); samples = calls;
+;            self-ns = self-ms * 1e6. A hypothesis adds a mark record
+;            with mid = hash(candidate id), samples = 1.
+;   metrics  hypothesis key K (1, 2, ... per round) -> the base-ms the
+;            candidate must beat; the report line names K <-> id.
+;            Summary keys: 900001 -> before-ms, 900002 -> after-ms.
+;   worldlines  one bus:trial per trialable candidate; the gate verdict
+;            is bus:keep (value = heldout-ms) or bus:rollback.
+;   patches  at finish, bus:project-patches then bus:project-worldlines
+;            project the round's real committed mutations (order matters:
+;            patches first, so worldline records carry patch ranges).
+
+(require "std/bus" all:)
+(require "std/string" all:)
+(require "lib/perf/query" all:)
+
+; Self-contained reporter: the bus module must not depend on loop.aura
+; (loop requires this module). Same buf shape perf:say uses.
+(define (perf:bus-say buf line)
+  (if (hash? buf)
+      (hash-set! buf "lines" (cons line (hash-ref buf "lines" '())))
+      #f))
+
+(export perf:bus-start perf:bus-publish-profile perf:bus-hypothesis
+        perf:bus-trial perf:bus-verdict perf:bus-finish perf:bus-mid
+        perf:bus-workspace)
+
+(define (perf:bus-workspace spec)
+  (let ((cfg (hash-ref spec "bus" (hash))))
+    (let ((ws (hash-ref cfg "workspace" 0)))
+      (if (and (number? ws) (> ws 0))
+          ws
+          (let ((env (getenv "AURA_PERF_BUS_WORKSPACE")))
+            (if (and (string? env) (> (string-length env) 0))
+                (let ((n (string->number env)))
+                  (if (and (number? n) (> n 0)) n 0))
+                0))))))
+
+; The CCT mid: a rolling hash of the define name. Small enough to stay
+; a legal immediate, stable across tools and rounds.
+(define (perf:bus-mid name)
+  (let ((h 0) (i 0) (n (string-length name)))
+    (while (lambda () (< i n))
+      (lambda ()
+        (set! h (modulo (+ (* h 31) (string-ref name i)) 999999937))
+        (set! i (+ i 1))))
+    h))
+
+; Host + attach + project the workspace nodes. Returns the bus handle
+; (a hash) or #f; says why on failure. Caps: read|publish|trial|keep|
+; rollback (31) — perf ACCEPTS constraints, it does not write them.
+(define (perf:bus-start spec buf)
+  (let ((ws (perf:bus-workspace spec)))
+    (if (<= ws 0)
+        #f
+        (let ((h (bus:host ws)))
+          (if (not (bus:ok? h))
+              (begin
+                (perf:bus-say buf (string-append "bus host-failed " (bus:message h)))
+                #f)
+              (let ((s (bus:attach "" ws 1 31 255)))
+                (if (not (bus:ok? s))
+                    (begin
+                      (perf:bus-say buf (string-append "bus attach-failed " (bus:message s)))
+                      #f)
+                    (let ((sid (car (cdr s))))
+                      (bus:project-nodes sid)
+                      (perf:bus-say buf (string-append "bus attached ws=" (number->string ws)
+                                                   " role=perf session=" (number->string sid)))
+                      (hash "session" sid "workspace" ws "key" 1)))))))))
+
+; Unique names in stack order (callers before callees), so a parent's
+; batch index is always backward.
+(define (perf:bus-stack-order spots)
+  (let loop ((xs spots) (acc '()))
+    (if (null? xs)
+        acc
+        (loop (cdr xs)
+              (let inner ((ys (hash-ref (car xs) "stack" '())) (a acc))
+                (if (null? ys)
+                    a
+                    (inner (cdr ys)
+                           (if (member (car ys) a) a (append a (list (car ys)))))))))))
+
+; Publish the profile's CCT, one record per name in stack order.
+; Returns the number of accepted records.
+(define (perf:bus-publish-profile bus profile)
+  (if (not bus)
+      0
+      (let* ((sid (hash-ref bus "session"))
+             (spots (perf:hotspots profile))
+             (names (perf:bus-stack-order spots))
+             (index (lambda (name)
+                      (let loop ((xs names) (i 0))
+                        (cond ((null? xs) -1)
+                              ((string=? (car xs) name) i)
+                              (else (loop (cdr xs) (+ i 1)))))))
+             (spot-of (lambda (name)
+                        (let loop ((xs spots))
+                          (cond ((null? xs) (hash))
+                                ((string=? (hash-ref (car xs) "name" "") name) (car xs))
+                                (else (loop (cdr xs))))))))
+        (let loop ((xs names) (ok 0))
+          (if (null? xs)
+              ok
+              (let* ((name (car xs))
+                     (h (spot-of name))
+                     (stack (hash-ref h "stack" '()))
+                     (parent-name (if (>= (length stack) 2)
+                                      (list-ref stack (- (length stack) 2))
+                                      ""))
+                     (parent (if (string=? parent-name "") -1 (index parent-name)))
+                     (r (bus:publish-cct sid parent (perf:bus-mid name) -1
+                                         (hash-ref h "calls" 0)
+                                         (* (hash-ref h "self-ms" 0) 1000000))))
+                (loop (cdr xs) (+ ok (if (bus:ok? r) 1 0)))))))))
+
+; One hypothesis: metric key K -> base-ms to beat, plus a CCT mark for
+; the candidate id. Returns K (or -1).
+(define (perf:bus-hypothesis bus cand base-ms)
+  (if (not bus)
+      -1
+      (let* ((sid (hash-ref bus "session"))
+             (key (hash-ref bus "key"))
+             (id (hash-ref cand "id" "?"))
+             (v (if (and (number? base-ms) (>= base-ms 0)) base-ms 0))
+             (r (bus:publish sid key v)))
+        (hash-set! bus "key" (+ key 1))
+        (bus:publish-cct sid -1 (perf:bus-mid id) -1 1 0)
+        (if (bus:ok? r) key -1))))
+
+; Open a worldline for one candidate trial. Returns the id or -1.
+(define (perf:bus-trial bus)
+  (if (not bus)
+      -1
+      (let ((r (bus:trial (hash-ref bus "session") 1)))
+        (if (bus:ok? r) (car (cdr r)) -1))))
+
+; The verdict. KEEP runs the coordinator's current constraint set; a
+; rejection is reported, never bypassed. Returns "kept", "rolled",
+; "constraint-rejected: <why>", or "no-bus".
+(define (perf:bus-verdict bus wl pass heldout-ms)
+  (if (or (not bus) (< wl 0))
+      "no-bus"
+      (let ((sid (hash-ref bus "session")))
+        (if pass
+            (let ((r (bus:keep sid wl 0
+                               (if (and (number? heldout-ms) (>= heldout-ms 0))
+                                   heldout-ms 0))))
+              (if (bus:ok? r)
+                  "kept"
+                  (string-append "constraint-rejected: " (bus:message r))))
+            (begin (bus:rollback sid wl) "rolled")))))
+
+; Summary metrics, the real mutation projections, then detach. The host
+; keeps serving for the next tool; the coordinator rolls back whatever
+; this session left pending (the delivered disconnect semantics).
+(define (perf:bus-finish bus buf before-ms after-ms)
+  (if (not bus)
+      #f
+      (let ((sid (hash-ref bus "session")))
+        (bus:publish sid 900001 (if (and (number? before-ms) (>= before-ms 0)) before-ms 0))
+        (bus:publish sid 900002 (if (and (number? after-ms) (>= after-ms 0)) after-ms 0))
+        (bus:project-patches sid)
+        (bus:project-worldlines sid)
+        (let ((a (bus:audit sid 0)))
+          (perf:bus-say buf (string-append "bus audit-events "
+                                       (number->string (if (bus:ok? a) (car (cdr a)) -1))
+                                       " ws=" (number->string (hash-ref bus "workspace")))))
+        (bus:detach sid)
+        (perf:bus-say buf "bus detached (host stays for harness/maintainer)"))))

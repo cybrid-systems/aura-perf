@@ -1,0 +1,12 @@
+start-ok
+cct-records 2
+hypothesis-key 1
+verdict-kept
+verdict-rolled
+audit-positive #t
+finish-ok
+expert-ok
+expert-install-ok
+expert-sees-perf-audit #t
+rejected #t
+unhost-ok

@@ -23,6 +23,7 @@
 (require "lib/perf/gene" all:)
 (require "lib/perf/sysinfo" all:)
 (require "lib/perf/layers" all:)
+(require "lib/perf/bus" all:)
 
 (define (perf:say buf line)
   (hash-set! buf "lines" (append (hash-ref buf "lines" '()) (list line)))
@@ -163,6 +164,12 @@
 ; The job carries the candidate's own target, so one catalog can rebind
 ; more than one define. checks/heldout/screen are values the parent
 ; oracle already produced; the child cannot rewrite that oracle.
+(define (perf:find-record records id)
+  (let loop ((xs records))
+    (cond ((null? xs) #f)
+          ((string=? (hash-ref (car xs) "id" "") id) (car xs))
+          (else (loop (cdr xs))))))
+
 (define (perf:job-record spec cand out)
   (let ((id (hash-ref cand "id" "candidate"))
         (target (perf:cand-target spec cand)))
@@ -309,10 +316,21 @@
          (split (perf:split-reference spec nulls cands))
          (trialable (car split))
          (unjudgeable (car (cdr split)))
+         (bus (hash-ref buf "bus" #f))
          (records (let loop ((xs trialable) (acc '()))
                     (if (null? xs)
                         (reverse acc)
-                        (loop (cdr xs) (cons (perf:job-record spec (car xs) out) acc))))))
+                        (let* ((cand (car xs))
+                               (rec (perf:job-record spec cand out))
+                               (k (perf:bus-hypothesis bus cand baseline)))
+                          (if (>= k 0)
+                              (perf:say buf (string-append "bus-hypothesis "
+                                                           (hash-ref cand "id" "?")
+                                                           " key=" (number->string k)
+                                                           " base-ms=" (number->string baseline)))
+                              #f)
+                          (hash-set! rec "bus-wl" (perf:bus-trial bus))
+                          (loop (cdr xs) (cons rec acc)))))))
     (perf:write-jobs records)
     (let* ((fp-before (evo:source-fingerprint))
            (batch (perf:launch-jobs records (hash-ref spec "worker")))
@@ -397,9 +415,20 @@
                                       (if (and (number? own) (> own 0))
                                           own
                                           (perf:cand-baseline spec nulls baseline cand-target))))
-                         (reason (if raw
-                                     (perf:reason result cand-base pct raw site)
-                                     (perf:reason result cand-base pct site)))
+                         (reason0 (if raw
+                                      (perf:reason result cand-base pct raw site)
+                                      (perf:reason result cand-base pct site)))
+                         ; #5128: the verdict goes through the bus. KEEP runs
+                         ; the coordinator's constraint set; a rejection
+                         ; downgrades to ROLLBACK — no local bypass.
+                         (bus-wl (let ((rec (perf:find-record records id)))
+                                   (if rec (hash-ref rec "bus-wl" -1) -1)))
+                         (bus-res (perf:bus-verdict bus bus-wl
+                                                    (string=? reason0 "gate-pass")
+                                                    (hash-ref result "heldout-ms" -1)))
+                         (bus-rejected (and (string? bus-res)
+                                            (string-prefix? bus-res "constraint-rejected")))
+                         (reason (if bus-rejected "bus-constraint-rejected" reason0))
                          (q (perf:cct-worldline-query
                               (hash-ref spec "profile-cct" #f)
                               (hash-ref result "cct" #f)
@@ -423,6 +452,12 @@
                     (hash-set! result "ref-target" cand-target)
                     (hash-set! result "site-context" site)
                     (hash-set! result "site-floor" site-floor)
+                    (hash-set! result "bus-verdict" bus-res)
+                    (if (and bus (>= bus-wl 0))
+                        (perf:say buf (string-append "bus-worldline " id
+                                                     " wl=" (number->string bus-wl)
+                                                     " verdict=" bus-res))
+                        #f)
                     (hash-set! buf "results" (append (hash-ref buf "results" '()) (list result)))
                     (perf:say buf (perf:format-candidate result cand-base pct raw site))
                     (if (and (hash? site)
@@ -874,6 +909,7 @@
           (perf:say buf (string-append "after-heldout-ms " (number->string after-ms)
                                        " samples=" (perf:sample-text (hash-ref buf "after-samples" '()))))
           (perf:say buf (string-append "speedup-x " (perf:fmt-x before-ms after-ms)))
+          (perf:bus-finish (hash-ref buf "bus" #f) buf before-ms after-ms)
           (perf:confirm spec buf profile)
           (perf:say buf (string-append "budget-used " (number->string (hash-ref buf "budget" 0))))
           (perf:say-intend spec buf before-ms after-ms)
@@ -1347,7 +1383,8 @@
                (hash-ref (perf:intend-seal spec) "effective-min-faster-pct" 20))
     (if (not (perf:install-seed (hash-ref spec "seed-path")))
         (perf:say buf "error empty-seed")
-        (let* ((profile (perf:collect ((hash-ref spec "regions-fn"))
+        (let* ((bus (perf:bus-start spec buf))
+               (profile (perf:collect ((hash-ref spec "regions-fn"))
                                       (hash "repeats" (hash-ref spec "profile-repeats" 3)
                                             "targets" (hash-ref spec "perf-targets" '()))))
                (child (perf:hot-child profile))
@@ -1375,6 +1412,11 @@
             (if (null? xs) #t (begin (perf:say buf (car xs)) (loop (cdr xs)))))
           (let loop ((xs (perf:hotspot-lines profile)))
             (if (null? xs) #t (begin (perf:say buf (car xs)) (loop (cdr xs)))))
+          (hash-set! buf "bus" bus)
+          (if bus
+              (perf:say buf (string-append "bus cct-records "
+                                           (number->string (perf:bus-publish-profile bus profile))))
+              #f)
           (let loop ((xs (perf:counter-lines profile)))
             (if (null? xs) #t (begin (perf:say buf (car xs)) (loop (cdr xs)))))
           (perf:say buf (string-append "hottest " hottest))

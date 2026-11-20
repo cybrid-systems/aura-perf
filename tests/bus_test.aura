@@ -1,0 +1,64 @@
+; bus_test.aura — aura-perf#10: the perf round's bus face, end to end
+; in one process: host + perf peer, CCT/hypothesis publication, trial
+; worldlines, KEEP/ROLLBACK verdicts, the shared audit, then an expert
+; peer installs a constraint and the next perf KEEP is gated by it.
+(require "std/bus" all:)
+(require "std/string" all:)
+(require "lib/perf/bus" all:)
+
+(define buf (hash "lines" '() "brief" '()))
+(define spec (hash "bus" (hash "workspace" 991)))
+
+(define bus (perf:bus-start spec buf))
+(display (if bus "start-ok" "start-FAIL")) (newline)
+
+(define profile
+  (hash "hotspots"
+        (list (hash "name" "bench-kernel" "self-ms" 10 "calls" 1
+                    "stack" (list "bench-kernel"))
+              (hash "name" "k-ref" "self-ms" 20 "calls" 4000
+                    "stack" (list "bench-kernel" "k-ref")))))
+(display (string-append "cct-records "
+                        (number->string (perf:bus-publish-profile bus profile))))
+(newline)
+
+(define k (perf:bus-hypothesis bus (hash "id" "cand-a" "target" "k-ref") 100))
+(display (string-append "hypothesis-key " (number->string k))) (newline)
+
+(define wl (perf:bus-trial bus))
+(display (string-append "verdict-" (perf:bus-verdict bus wl #t 50))) (newline)
+(define wl2 (perf:bus-trial bus))
+(display (string-append "verdict-" (perf:bus-verdict bus wl2 #f 0))) (newline)
+
+(define a (bus:audit (hash-ref bus "session") 0))
+(display (string-append "audit-positive "
+                        (if (and (bus:ok? a) (> (car (cdr a)) 0)) "#t" "#f")))
+(newline)
+
+(perf:bus-finish bus buf 100 50)
+(display "finish-ok") (newline)
+
+; The host kept serving after perf detached: an expert peer attaches,
+; installs a constraint and reads the SAME audit perf wrote.
+(define e (bus:attach "" 991 0 127 255))
+(display (if (bus:ok? e) "expert-ok" "expert-FAIL")) (newline)
+(define esid (car (cdr e)))
+(define ic (bus:install-constraint esid "allow-small"
+             "(lambda (ctx) (<= (ctx 'new-value) 100))"))
+(display (if (bus:ok? ic) "expert-install-ok" "expert-install-FAIL")) (newline)
+(define ea (bus:audit esid 0))
+(display (string-append "expert-sees-perf-audit "
+                        (if (and (bus:ok? ea) (> (car (cdr ea)) 0)) "#t" "#f")))
+(newline)
+(bus:detach esid)
+
+; Perf returns; the installed constraint now gates its KEEP — a 200 ms
+; verdict is rejected, not bypassed.
+(define bus2 (perf:bus-start spec buf))
+(define wl3 (perf:bus-trial bus2))
+(define v (perf:bus-verdict bus2 wl3 #t 200))
+(display (string-append "rejected "
+                        (if (string-prefix? v "constraint-rejected") "#t" "#f")))
+(newline)
+(perf:bus-finish bus2 buf 100 50)
+(display (if (bus:ok? (bus:unhost 991)) "unhost-ok" "unhost-FAIL")) (newline)

@@ -983,6 +983,10 @@
                                                 "candidates" (hash-ref buf "results" '())
                                                 "memory" (hash-ref buf "memory" '()))))))
             (perf:memory-save (perf:memory-path spec) (hash-ref buf "memory" '()))
+          ; aura-perf#28: the report is on disk; keep the bus host up for the
+          ; linger window so harness/maintainer can attach and query this
+          ; round's committed evidence. No bus -> no-op.
+          (perf:bus-linger (hash-ref buf "bus" #f) spec buf)
           ; The process exit follows intend-met. A met intend is success even
           ; when the demo's extra 50% bar, keep count, or child name differs.
           (if (and (eq? (hash-ref spec "require-success" #f) #t)

@@ -7,8 +7,11 @@
 ; coordinator's constraint gate — a rejection downgrades the verdict to
 ; ROLLBACK, there is no local bypass. Workers stay on the internal job
 ; exchange (that is one tool's own mechanics); the bus is the inter-tool
-; main path: after perf detaches, the host keeps serving, so harness or
-; maintainer can attach and query the same audit and image.
+; main path: after perf detaches, the host keeps serving for a linger
+; window (default 60s, AURA_PERF_BUS_LINGER_S or the spec's "bus" hash
+; "linger-s"), so harness or maintainer can attach and query the same
+; audit and image. The coordinator lives in this process: when the window
+; closes (or stdin reaches EOF) the host unhosts and the round exits.
 ;
 ; Enabled by the spec's "bus" hash ("workspace" N) or the environment
 ; AURA_PERF_BUS_WORKSPACE=N. Without either, every function is a no-op
@@ -43,7 +46,7 @@
 
 (export perf:bus-start perf:bus-publish-profile perf:bus-hypothesis
         perf:bus-trial perf:bus-verdict perf:bus-finish perf:bus-mid
-        perf:bus-workspace)
+        perf:bus-workspace perf:bus-linger-seconds perf:bus-linger)
 
 (define (perf:bus-workspace spec)
   (let ((cfg (hash-ref spec "bus" (hash))))
@@ -172,9 +175,10 @@
                   (string-append "constraint-rejected: " (bus:message r))))
             (begin (bus:rollback sid wl) "rolled")))))
 
-; Summary metrics, the real mutation projections, then detach. The host
-; keeps serving for the next tool; the coordinator rolls back whatever
-; this session left pending (the delivered disconnect semantics).
+; Summary metrics, the real mutation projections, then detach. The
+; coordinator rolls back whatever this session left pending (the delivered
+; disconnect semantics). The host lives in this process: it keeps serving
+; until perf:bus-linger's window closes (aura-perf#28).
 (define (perf:bus-finish bus buf before-ms after-ms)
   (if (not bus)
       #f
@@ -188,4 +192,55 @@
                                        (number->string (if (bus:ok? a) (car (cdr a)) -1))
                                        " ws=" (number->string (hash-ref bus "workspace")))))
         (bus:detach sid)
-        (perf:bus-say buf "bus detached (host stays for harness/maintainer)"))))
+        (perf:bus-say buf "bus detached (host lingers for harness/maintainer)"))))
+
+; The post-round serve window (aura-perf#28). The coordinator is this
+; process, so the bus only outlives the round while the process stays up.
+; Precedence: AURA_PERF_BUS_LINGER_S, then the spec's "bus" hash "linger-s",
+; then 60 seconds. 0 disables the window (the round exits right after the
+; report, the pre-#28 behavior).
+(define (perf:bus-linger-seconds spec)
+  (let* ((env (getenv "AURA_PERF_BUS_LINGER_S"))
+         (n (if (and (string? env) (> (string-length env) 0))
+                (string->number env)
+                #f)))
+    (if (and (number? n) (>= n 0))
+        n
+        (let ((cfg (hash-ref spec "bus" (hash))))
+          (let ((s (hash-ref cfg "linger-s" 60)))
+            (if (and (number? s) (>= s 0)) s 60))))))
+
+; Serve the bus after the report is written: harness/maintainer attach and
+; query the round's committed evidence. Returns when the window expires or
+; stdin reaches EOF (a supervising runner closes stdin to end the window
+; early); then unhosts. A bus-less round is a no-op. The poll granularity is
+; ~50ms; char-ready? sees hangup as readable, and read-line then reports EOF.
+(define (perf:bus-linger bus spec buf)
+  (if (not bus)
+      #f
+      (let ((secs (perf:bus-linger-seconds spec))
+            (ws (hash-ref bus "workspace")))
+        (if (<= secs 0)
+            (begin
+              (bus:unhost ws)
+              (perf:bus-say buf "bus host closed (linger 0s, exit after report)")
+              (display "bus host closed (linger 0s, exit after report)") (newline)
+              #f)
+            (let ((deadline (+ (monotonic-ms) (* secs 1000))))
+              (perf:bus-say buf (string-append "bus host serving ws=" (number->string ws)
+                                               " linger-s=" (number->string secs)
+                                               " (EOF on stdin ends the window)"))
+              (display "bus host serving ws=") (display ws)
+              (display " linger-s=") (display secs)
+              (display " (EOF on stdin ends the window)") (newline)
+              (let loop ()
+                (if (char-ready?)
+                    (if (eof-object? (read-line))
+                        #f
+                        (loop))
+                    (if (< (monotonic-ms) deadline)
+                        (begin (shell "sleep 0.05") (loop))
+                        #f)))
+              (bus:unhost ws)
+              (perf:bus-say buf "bus host closed (linger window ended)")
+              (display "bus host closed (linger window ended)") (newline))))))

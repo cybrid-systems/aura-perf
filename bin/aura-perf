@@ -179,6 +179,13 @@ case "$cmd" in
     rc=$?
     sh tests/exit_test.sh
     exit_rc=$?
+    # aura-perf#28: the post-round host linger window. Self-skips when the
+    # resolved Aura has no std/bus (the v0.2.0 CI pin).
+    linger_rc=0
+    if command -v python3 >/dev/null 2>&1; then
+      python3 tests/bus_linger_test.py
+      linger_rc=$?
+    fi
     set -e
     if [ "$rc" -ne 0 ]; then
       echo "aura-perf: aura test failed." >&2
@@ -193,6 +200,9 @@ case "$cmd" in
     fi
     if [ "$rc" -ne 0 ]; then
       exit "$rc"
+    fi
+    if [ "$linger_rc" -ne 0 ]; then
+      exit "$linger_rc"
     fi
     exit "$exit_rc"
     ;;

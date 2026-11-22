@@ -386,6 +386,29 @@ def _load_phase(port: int, seconds: float, phase: str) -> dict:
     return stats
 
 
+def _fetch_repro(aura: str, env: dict[str, str], ws: int, worldline: int) -> dict:
+    """Ask the coordinator for the reproduction package of a worldline.
+
+    The query runs in its own process: it is a one-shot artifact fetch,
+    and the answer must not depend on the state of a long-lived peer.
+    """
+    script = ROOT / "scripts" / "joint_repro.aura"
+    if not script.is_file():
+        return {"ok": False, "reason": f"the repro client is missing: {script}"}
+    run_env = dict(env)
+    run_env["JOINT_REPRO_WS"] = str(ws)
+    run_env["JOINT_REPRO_WL"] = str(worldline)
+    rc, out = _run([aura, str(script)], run_env, timeout=60)
+    for line in out.splitlines():
+        if not line.startswith("repro="):
+            continue
+        payload = line[len("repro="):].rstrip("|")
+        if payload.startswith("{"):
+            return {"ok": True, "json": payload}
+        return {"ok": False, "reason": payload or "the repro query failed", "rc": rc}
+    return {"ok": False, "reason": f"the repro client did not answer (rc={rc})", "out": out[-6000:]}
+
+
 def _harness_judge(harness_dir: Path, ws: int, worldline: int, grant_token: str,
                    aura: str, env: dict[str, str], port: int,
                    baseline_policy: str, host: str = "127.0.0.1",
@@ -485,7 +508,7 @@ def _harness_judge(harness_dir: Path, ws: int, worldline: int, grant_token: str,
         # it and the coordinator refuses. That refusal is the no-false-
         # The reproduction package, then the control's refusal attempt:
         # the package is the verdict the offline re-run checks.
-        out["repro"] = harness.bus_repro(worldline)
+        out["repro"] = _fetch_repro(aura, env, ws, worldline)
         # commit evidence: a known-harmful candidate cannot land.
         if control_worldline and control_token:
             harness.bus_grant(int(control_token), control_worldline)

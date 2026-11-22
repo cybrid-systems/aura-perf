@@ -1,0 +1,30 @@
+;; The reproduction package of a kept candidate (aura#5397).
+;;
+;; The nightly asks the coordinator for the package and archives it
+;; verbatim; `aura bus-repro FILE` then re-runs the admission decision
+;; offline and must land on the same verdict.
+;;
+;; The query runs in its own process: it is a one-shot artifact fetch,
+;; and the coordinator's answer must not depend on a long-lived peer's
+;; state.
+;;
+;;   JOINT_REPRO_WS      the bus workspace id
+;;   JOINT_REPRO_WL      the worldline id
+(require "std/bus" all:)
+
+(define ws (string->number (getenv "JOINT_REPRO_WS")))
+(define wl (string->number (getenv "JOINT_REPRO_WL")))
+
+(if (or (not ws) (not wl))
+    (begin (display "repro=missing-environment|") (newline))
+    (let ((ms (bus:attach "" ws 3 127 255)))
+      (if (not (bus:ok? ms))
+          (begin (display "repro=") (display (bus:code ms)) (display "|") (newline))
+          (let ((sid (car (cdr ms))))
+            (bus:project-nodes sid)
+            (let ((rp (bus:repro sid wl)))
+              (display "repro=")
+              (display (if (bus:ok? rp) (list-ref rp 5) (bus:code rp)))
+              (display "|")
+              (newline)
+              (bus:detach sid))))))

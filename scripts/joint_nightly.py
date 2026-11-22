@@ -483,14 +483,14 @@ def _harness_judge(harness_dir: Path, ws: int, worldline: int, grant_token: str,
         out["judge"] = judged
         # The negative control is never applied: the judge tries to keep
         # it and the coordinator refuses. That refusal is the no-false-
+        # The reproduction package, then the control's refusal attempt:
+        # the package is the verdict the offline re-run checks.
+        out["repro"] = harness.bus_repro(worldline)
         # commit evidence: a known-harmful candidate cannot land.
         if control_worldline and control_token:
             harness.bus_grant(int(control_token), control_worldline)
             refused = harness.bus_judge(control_worldline, "pass")
             out["control_judge"] = refused
-        # The reproduction package: the lane re-runs the decision offline.
-        repro = harness.bus_repro(worldline)
-        out["repro"] = repro
     except Exception as exc:
         out["error"] = str(exc)
     finally:
@@ -729,6 +729,7 @@ def main() -> int:
                 # The reproduction package: the verdict must reproduce
                 # offline, with no coordinator and no live bus.
                 repro = judged.get("repro") or {}
+                report.notes.append("repro: {}".format(repro))
                 packages = report_dir / "packages.jsonl"
                 packages.write_text((repro.get("json") or "") + "\n")
                 if repro.get("json"):

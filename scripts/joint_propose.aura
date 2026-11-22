@@ -1,0 +1,119 @@
+;; joint_propose.aura — the proposer peer of the three-repo joint nightly
+;; (aura#5397).
+;;
+;; perf attaches to the host's workspace bus (role 1, caps
+;; read|publish|trial: no keep bit — the judge decides), asks the host
+;; for its define names, and proposes a candidate that rewrites SEVERAL
+;; pure policy functions at once: one source-carrier patch per function,
+;; all in ONE worldline, so the host's KEEP applies the set atomically.
+;;
+;; The node ids come from the host (bus:defines): they live in the
+;; host's own workspace AST, so a proposer must not guess them.
+;;
+;; The output the lane reads:
+;;   wl=<worldline>|<ok|failed>
+(require "std/bus" all:)
+
+(define ws (string->number (getenv "AURA_PERF_BUS_WORKSPACE")))
+(define sid 0)
+
+(define (say line) (display line) (newline))
+
+(define (find-node nodes name)
+  (let loop ((rows nodes))
+    (if (null? rows)
+        -1
+        (if (string=? (car (car rows)) name)
+            (car (cdr (car rows)))
+            (loop (cdr rows))))))
+
+(define s (bus:attach "" ws 1 7 255))
+(if (not (bus:ok? s))
+    (begin (say "attach=failed") (exit 1))
+    (begin
+      (set! sid (car (cdr s)))
+      ; The host's define names and their node ids.
+      (define d (bus:defines sid))
+      (if (not (bus:ok? d))
+          (begin (say "defines=failed") (exit 1))
+          (begin
+            (define rows (list-ref d 3))
+            (define choose-node (find-node rows "choose-fn"))
+            (define admit-node (find-node rows "admit-fn"))
+            (define ttl-node (find-node rows "ttl-fn"))
+            (say (string-append "nodes=" (number->string choose-node) ","
+                                 (number->string admit-node) ","
+                                 (number->string ttl-node)))
+            ; The trial: one worldline carries every patch.
+            (define tr (bus:trial sid 3))
+            (define wl (car (cdr tr)))
+            (define (patch node body) (patch2 wl node body))
+            (define (patch2 target node body)
+              (define src (bus:publish-source sid body))
+              (if (not (bus:ok? src))
+                  #f
+                  (bus:ok? (bus:publish-patch sid node bus:source-field
+                                            (car (cdr src)) target 0))))
+            ; Two policy functions in one candidate: the host applies them
+            ; together or not at all.
+            ;
+            ; The candidate picks the eviction kernel by the miss rate:
+            ; a workload that misses often wants the frequency kernel
+            ; (tinylfu keeps what is actually used), a workload that hits
+            ; wants the recency one. The judge measures the choice on
+            ; its own hidden key set.
+            (define ok1 (patch choose-node
+                             "(lambda (dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl)
+                                (if (> (if (> (+ dhits dmisses) 0)
+                                         (quotient (* 100 dmisses) (+ dhits dmisses))
+                                         0)
+                                    20)
+                                    \"lfu|flat\"
+                                    \"lru|flat\"))"))
+            ; The round's negative control: the same rule with the
+            ; known-harmful kernel (ttl_aware evicts what is about to be
+            ; used). The statistics must reject it, and it is never
+            ; applied to the live workspace.
+            (define ctrl-tr (bus:trial sid 3))
+            (define ctrl-wl (car (cdr ctrl-tr)))
+            (define okc (patch2 ctrl-wl choose-node
+                               "(lambda (dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl)
+                                  (if (> (if (> (+ dhits dmisses) 0)
+                                           (quotient (* 100 dmisses) (+ dhits dmisses))
+                                           0)
+                                      20)
+                                      \"ttl_aware|flat\"
+                                      \"lru|flat\"))"))
+            (define ok2 (if (>= admit-node 0)
+                             (patch admit-node "(lambda (nkeys dgets) dgets)")
+                             #t))
+            (if (and ok1 ok2 okc)
+                (begin
+                  ; The evidence five-tuple: a nonzero workload, seed and
+                  ; verifier, and the coordinator's own candidate digest.
+                  (define dg (bus:candidate-digest sid wl))
+                  (define ev (bus:bind-evidence sid wl 0 (car (cdr dg)) 7 42 31))
+                  ; The control carries its own five-tuple: it is a
+                  ; candidate of this round like any other.
+                  (define cdg (bus:candidate-digest sid ctrl-wl))
+                  (define cev (bus:bind-evidence sid ctrl-wl 0 (car (cdr cdg)) 7 42 31))
+                  (say (string-append "wl=" (number->string wl) "|"
+                                      (if (bus:ok? ev) "ok" "failed")
+                                      "|control=" (number->string ctrl-wl)
+                                      "|"
+                                      (if (bus:ok? cev) "ok" "failed")))
+                  ; The trial lives as long as this session: a disconnect
+                  ; withdraws the pending trial, so the proposer holds the
+                  ; worldline open until the judge has decided.
+                  (if (and (bus:ok? ev) (bus:ok? cev))
+                      (begin
+                        (say "holding")
+                        (let ((line (read-line)))
+                          (say (string-append "released="
+                                              (if (string? line) line "eof")))
+                          (exit 0))
+                        (exit 0))
+                      (exit 1)))
+                (begin
+                  (say (string-append "wl=" (number->string wl) "|failed"))
+                  (exit 1)))))))

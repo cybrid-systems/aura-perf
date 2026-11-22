@@ -1,0 +1,93 @@
+# The three-repo joint nightly (aura#5397).
+#
+# aura-redis hosts the workspace and owns the real RESP data plane,
+# aura-perf proposes, aura-harness judges. The lane pins three repo
+# commits, runs a phase-switching load (read/write ratio, TTL peak,
+# poison storm) against the real server, and measures the four v0.3.1
+# acceptance criteria plus the held-out net benefit on real load.
+#
+# It is a nightly, not a PR gate: it needs the real data plane and it
+# runs for minutes. A regression fails the lane.
+name: Joint nightly (three repos)
+
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+    inputs:
+      phase_seconds:
+        description: "the seconds per load phase (default 20)"
+        required: false
+        default: "20"
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  AURA_BUILD_JOBS: "0"
+  AURA_CI: "1"
+  CCACHE_DISABLE: 1
+
+jobs:
+  joint:
+    name: three-repo closed loop
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: ghcr.io/cybrid-systems/dev:v1.0.7
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: aura-perf
+
+      # The three repos at pinned commits: a run must be reproducible,
+      # so the lane names the commit of each repo it ran against.
+      - name: Check out aura-redis (the host)
+        uses: actions/checkout@v4
+        with:
+          repository: cybrid-systems/aura-redis
+          path: aura-redis
+          ref: ${{ vars.AURA_REDIS_REF || 'main' }}
+
+      - name: Check out aura-harness (the judge)
+        uses: actions/checkout@v4
+        with:
+          repository: cybrid-systems/aura-harness
+          path: aura-harness
+          ref: ${{ vars.AURA_HARNESS_REF || 'main' }}
+
+      - name: Build Aura (the bus + the stdlib)
+        working-directory: aura-perf
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/cybrid-systems/aura.git aura-src
+          cd aura-src
+          python3 build.py build --target aura
+
+      - name: Build the real RESP data plane
+        working-directory: aura-redis
+        run: ./scripts/build-native.sh
+
+      - name: The three-repo closed loop
+        working-directory: aura-perf
+        env:
+          AURA_BIN: ${{ github.workspace }}/aura-perf/aura-src/build/aura
+          # the judge loads the bus stdlib from the core checkout
+          AURA_LIB: ${{ github.workspace }}/aura-perf/aura-src/lib
+          AURA_REDIS_DIR: ${{ github.workspace }}/aura-redis
+          AURA_HARNESS_DIR: ${{ github.workspace }}/aura-harness
+          AURA_PERF_DIR: ${{ github.workspace }}/aura-perf
+        run: |
+          set -euo pipefail
+          python3 scripts/joint_nightly.py \
+            --report "${{ github.workspace }}/joint-report" \
+            --phase-seconds "${{ github.event.inputs.phase_seconds || '20' }}"
+
+      - name: The report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: joint-report
+          path: joint-report
+          if-no-files-found: ignore

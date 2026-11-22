@@ -21,13 +21,17 @@ AURA = os.environ.get("AURA_BIN", "aura")
 WS = 994
 
 HOST = """(require "std/bus" all:)
-(set-code "(define (choose-fn x) (+ x 1))")
+(set-code "(define (choose-fn x) (+ x 1)) (define (admit-fn x) 1)")
 (eval-current)
 (define h (bus:host {ws}))
 (define ms (bus:attach "" {ws} 3 127 255))
 (define msid (car (cdr ms)))
 (bus:project-nodes msid)
 (bus:publish msid 9 40)
+; The host's define names and node ids (aura#5397): the ids live in the
+; host's workspace AST, so only the host can answer.
+(display "DEFS=") (display (list-ref (bus:defines msid) 3)) (display "|")
+(newline)
 (display "HOST-READY") (newline)
 (let loop ()
   (let ((l (read-line)))
@@ -89,6 +93,16 @@ PERF = """(require "std/bus" all:)
 (display (string-append "digest="
                         (if (and (bus:ok? dg) (> (car (cdr dg)) 0)) "ok" "FAIL")))
 (newline)
+; The multi-function proposal (aura#5397): one worldline carries a patch
+; per function, so the host's KEEP applies the set atomically.
+(define dn (perf:bus-define-nodes bus))
+(display (string-append "defs="
+                        (if dn "ok" "FAIL"))) (newline)
+(define mwl (perf:bus-propose-multi bus
+                               (list (list "choose-fn" "(lambda (x) (+ x 10))")
+                                     (list "admit-fn" "(lambda (x) 7)"))
+                               7 42 31))
+(display (string-append "mwl=" (number->string mwl))) (newline)
 (perf:bus-finish bus buf 100 50)
 (display "perf-done") (newline)
 ; The run buffer carries the attach/proposal report lines.
@@ -156,7 +170,14 @@ def main():
             if hostp.poll() is not None:
                 break
             time.sleep(0.1)
-        line = hostp.stdout.readline() if ready else ""
+        # The host prints its define names before the ready marker, so
+        # read until the marker rather than one line.
+        line = ""
+        if ready:
+            for _ in range(20):
+                line = hostp.stdout.readline()
+                if not line or "HOST-READY" in line:
+                    break
         if not ready or "HOST-READY" not in line:
             print("FAIL attach: external host never became ready")
             print(line, hostp.stdout.read() if hostp.poll() is not None else "")
@@ -172,6 +193,7 @@ def main():
             ("keep-bit=0", "perf holds no keep bit"),
             ("signals=ok", "perf consumed the host's baseline metric"),
             ("digest=ok", "candidate digest committed (patch bytes in the image)"),
+            ("defs=ok", "perf asked the host for its define names"),
             ("state=0", "worldline is pending, not kept"),
             ("perf-done", "perf detached cleanly"),
         ]
@@ -184,6 +206,17 @@ def main():
                     pass
         if not wl_ok:
             print("FAIL attach: no proposal worldline")
+            print(out, r.stderr[:400])
+            fail = 1
+        mwl_ok = False
+        for ln in out.splitlines():
+            if ln.startswith("mwl="):
+                try:
+                    mwl_ok = int(ln[4:]) > 0
+                except ValueError:
+                    pass
+        if not mwl_ok:
+            print("FAIL attach: no multi-function proposal worldline")
             print(out, r.stderr[:400])
             fail = 1
         for marker, what in checks:

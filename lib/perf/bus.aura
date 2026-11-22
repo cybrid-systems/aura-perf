@@ -47,7 +47,8 @@
 (export perf:bus-start perf:bus-publish-profile perf:bus-hypothesis
         perf:bus-trial perf:bus-verdict perf:bus-finish perf:bus-mid
         perf:bus-workspace perf:bus-linger-seconds perf:bus-linger
-        perf:bus-host-enabled? perf:bus-propose perf:bus-subscribe-signals)
+        perf:bus-host-enabled? perf:bus-propose perf:bus-propose-multi
+        perf:bus-subscribe-signals perf:bus-define-nodes)
 
 (define (perf:bus-workspace spec)
   (let ((cfg (hash-ref spec "bus" (hash))))
@@ -245,6 +246,70 @@
                                                             " node=" (number->string node)
                                                             " pending (judge decides)"))
                                         wl))))))))))))))
+
+; The host's live define names and their node ids (aura#5397). The node
+; ids belong to the host's own workspace AST, so a peer that wants to
+; rewrite a named function asks the host instead of guessing an id.
+; Returns a hash of name -> node, or #f when the host does not publish
+; them (an older host).
+(define (perf:bus-define-nodes bus)
+  (if (not bus)
+      #f
+      (let* ((sid (hash-ref bus "session"))
+             (d (bus:defines sid)))
+        (if (not (bus:ok? d))
+            #f
+            (let ((rows (list-ref d 3)))
+              (let loop ((xs rows) (acc (hash)))
+                (if (null? xs)
+                    acc
+                    (loop (cdr xs)
+                          (hash-set! acc (car (car xs)) (car (cdr (car xs))))))))))))
+
+; Propose a candidate that rewrites SEVERAL pure policy functions at once
+; (aura#5397): the target set is a list of (name body) pairs, and every
+; function becomes one source-carrier patch in the SAME worldline. The
+; host's KEEP applies the set atomically: one broken body anywhere in
+; the set leaves every function byte-identical.
+;
+; The node ids come from the host (bus:defines), so the proposer never
+; guesses a host-local id. Returns the worldline id, or -1 with a report
+; line on failure.
+(define (perf:bus-propose-multi bus targets workload seed verifier)
+  (if (not bus)
+      -1
+      (if (null? targets)
+          -1
+          (let* ((sid (hash-ref bus "session"))
+                 (buf (hash-ref bus "buf" #f))
+                 (nodes (perf:bus-define-nodes bus))
+                 (tr (bus:trial sid 3)))
+            (if (not (bus:ok? tr))
+                (begin (perf:bus-report bus buf "trial" tr) -1)
+                (if (not nodes)
+                    (begin (perf:bus-report bus buf "defines" "the host does not publish its define names")
+                           -1)
+                    (let ((wl (car (cdr tr))))
+                      (let loop ((xs targets) (ok #t))
+                        (if (or (not ok) (null? xs))
+                            (if (not ok) -1 wl)
+                            (let* ((name (car (car xs)))
+                                   (body (car (cdr (car xs))))
+                                   (node (hash-ref nodes name -1)))
+                              (if (< node 0)
+                                  (begin (perf:bus-report bus buf "publish-patch"
+                                                         (string-append "unknown target " name))
+                                         (loop (cdr xs) #f))
+                                  (let ((src (bus:publish-source sid body)))
+                                    (if (not (bus:ok? src))
+                                        (begin (perf:bus-report bus buf "publish-source" src)
+                                               (loop (cdr xs) #f))
+                                        (let ((patch (bus:publish-patch sid node bus:source-field
+                                                                (car (cdr src)) wl 0)))
+                                          (if (not (bus:ok? patch))
+                                              (begin (perf:bus-report bus buf "publish-patch" patch)
+                                                     (loop (cdr xs) #f))
+                                              (loop (cdr xs) #t))))))))))))))))
 
 ; Consume the host's signals (aura-perf#27): subscribe the metrics
 ; channel, query its latest rows, and read the CCT hotspots aggregate.

@@ -79,6 +79,16 @@ pure-policy candidate for the judge:
    workload = the workload id, seed = the replay seed, verifier = the
    proposer version — all nonzero.
 
+`perf:bus-propose-multi bus targets workload seed verifier` proposes a
+candidate that rewrites **several** pure policy functions at once
+(aura#5397). `targets` is a list of `(name body)` pairs. The node ids
+come from the host (`perf:bus-define-nodes` → `bus:defines`): they live
+in the host's own workspace AST, so a proposer must not guess them. One
+source-carrier patch per function goes into **one** worldline, so the
+host's KEEP applies the set atomically — one broken body anywhere in
+the set leaves every function byte-identical. The evidence five-tuple
+binds the whole set: the candidate digest covers every committed patch.
+
 The function returns the worldline id and perf does **not** keep: the
 loan stays outstanding with the pending worldline and the judge decides
 (scoped grant → KEEP with evidence re-check → canary observation). A perf

@@ -158,7 +158,10 @@ def _redis_server(redis_dir: Path, port: int) -> subprocess.Popen | None:
     if binary is None:
         return None
     proc = subprocess.Popen(
-        [str(binary), "--port", str(port), "--maxmemory", "20000",
+        # The memory limit is the probe's yardstick: the churn has to
+        # exceed it (so the eviction path runs) and the hidden set has
+        # to fit in it (so it is a share of the keyspace).
+        [str(binary), "--port", str(port), "--maxmemory", "200000",
          # The server starts on the age-based kernel: without a memory
          # limit and an eviction policy there is nothing to measure.
          "--evict", "lru"],
@@ -438,9 +441,6 @@ def _harness_judge(harness_dir: Path, ws: int, worldline: int, grant_token: str,
             step("activate the control's grant")
             ctrl_grant = harness.bus_grant(int(control_token), control_worldline)
             out["control_grant"] = ctrl_grant
-        # The candidate's grant again: the control's grant was activated
-        # last, and only the grant scoped to a worldline may keep it.
-        harness.bus_grant(int(grant_token), worldline)
         # The held-out measurement: the judge owns a hidden key set on
         # the real data plane and measures the candidate's eviction
         # kernel against the baseline's. The proposer never sees that
@@ -457,8 +457,13 @@ def _harness_judge(harness_dir: Path, ws: int, worldline: int, grant_token: str,
         windows = heldout.get("windows") or [window]
         ctrl_windows = heldout.get("control_windows") or [ctrl_window]
         if control_worldline and control_token:
+            # The control's evidence binds under the control's own grant:
+            # a scoped grant reaches nothing else.
             out["control_gate"] = harness.bus_gate(
                 control_worldline, 700, 7, 42, 31, len(ctrl_windows), 0, 1, 1, ctrl_windows)
+        # The candidate's grant again: only the grant scoped to a
+        # worldline may bind that worldline's evidence or keep it.
+        harness.bus_grant(int(grant_token), worldline)
         if not heldout.get("ok"):
             out["gate"] = {"ok": False, "detail": heldout.get("detail")}
             out["judge"] = {"ok": False, "verdict": "none",
@@ -714,10 +719,12 @@ def main() -> int:
                     if after != before:
                         break
                     time.sleep(0.2)
+                verdict = judged.get("judge") or {}
                 report.set("self-adaptation", kept and after != before,
                            f"the kept policy is live (evict {before} -> {after})"
                            if kept and after != before else
-                           f"the judge did not keep: {judged.get('judge')}")
+                           "the judge did not keep: {} {}".format(
+                               verdict.get("reason", "?"), verdict.get("message", "")).strip())
 
                 # The reproduction package: the verdict must reproduce
                 # offline, with no coordinator and no live bus.
@@ -742,6 +749,10 @@ def main() -> int:
                            f"held-out net benefit {benefit} ppm")
                 # The measurement itself, so a failing night says why.
                 heldout = judged.get("heldout") or {}
+                after = _info(port)
+                report.notes.append(
+                    "server after the probe: used={} evicted={} keys={}".format(
+                        after.get("used_memory"), after.get("evicted"), after.get("keys")))
                 report.notes.append(
                     "held-out: baseline={} candidate={} control={} windows={} control-windows={}".format(
                         (heldout.get("candidate") or {}).get("baseline"),

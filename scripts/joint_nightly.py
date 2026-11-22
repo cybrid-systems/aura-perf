@@ -736,12 +736,18 @@ def main() -> int:
                 # The held-out net benefit: the judge measured the kept
                 # policy against the pre-switch baseline on the hidden
                 # folds the proposer never saw.
-                gate = judged.get("gate") or {}
-                benefit = 0
-                if isinstance(gate, dict):
-                    benefit = int(gate.get("benefit_ppm") or 0)
+                measured = judged.get("heldout") or {}
+                benefit = int(measured.get("window") or 0)
                 report.set("hidden-net-benefit", benefit > 0,
                            f"held-out net benefit {benefit} ppm")
+                # The measurement itself, so a failing night says why.
+                heldout = judged.get("heldout") or {}
+                report.notes.append(
+                    "held-out: baseline={} candidate={} control={} windows={} control-windows={}".format(
+                        (heldout.get("candidate") or {}).get("baseline"),
+                        (heldout.get("candidate") or {}).get("candidate"),
+                        (heldout.get("control") or {}).get("candidate"),
+                        heldout.get("windows"), heldout.get("control_windows")))
 
                 # No false commit: the round's negative control was
                 # refused by the coordinator, so a known-harmful candidate

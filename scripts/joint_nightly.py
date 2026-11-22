@@ -730,6 +730,9 @@ def main() -> int:
                 # offline, with no coordinator and no live bus.
                 repro = judged.get("repro") or {}
                 report.notes.append("repro: {}".format(repro))
+                report.notes.append("gate verdicts: candidate={} control={}".format(
+                    (judged.get("gate") or {}).get("verdict"),
+                    (judged.get("control_gate") or {}).get("verdict")))
                 packages = report_dir / "packages.jsonl"
                 packages.write_text((repro.get("json") or "") + "\n")
                 if repro.get("json"):

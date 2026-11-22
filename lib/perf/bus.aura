@@ -46,7 +46,8 @@
 
 (export perf:bus-start perf:bus-publish-profile perf:bus-hypothesis
         perf:bus-trial perf:bus-verdict perf:bus-finish perf:bus-mid
-        perf:bus-workspace perf:bus-linger-seconds perf:bus-linger)
+        perf:bus-workspace perf:bus-linger-seconds perf:bus-linger
+        perf:bus-host-enabled? perf:bus-propose perf:bus-subscribe-signals)
 
 (define (perf:bus-workspace spec)
   (let ((cfg (hash-ref spec "bus" (hash))))
@@ -69,28 +70,51 @@
         (set! i (+ i 1))))
     h))
 
-; Host + attach + project the workspace nodes. Returns the bus handle
-; (a hash) or #f; says why on failure. Caps: read|publish|trial|keep|
-; rollback (31) — perf ACCEPTS constraints, it does not write them.
+; Attach-only (aura-perf#27): the workspace is hosted by an external tool
+; (aura-redis). Enabled when the spec's "bus" hash "host" is #f OR
+; AURA_PERF_BUS_HOST=0. perf then only ATTACHES, with caps read|publish|
+; trial (7): it mines signals and proposes candidates, it never holds
+; keep/rollback/constraint-write — the judge decides.
+(define (perf:bus-host-enabled? spec)
+  (let ((env (getenv "AURA_PERF_BUS_HOST")))
+    (if (and (string? env) (string=? env "0"))
+        #f
+        (not (eq? (hash-ref (hash-ref spec "bus" (hash)) "host" #t) #f)))))
+
+; Host + attach + project the workspace nodes, or attach-only to the
+; external host. Returns the bus handle (a hash) or #f; says why on
+; failure. Self-host caps: read|publish|trial|keep|rollback (31) — perf
+; ACCEPTS constraints, it does not write them. Attach-only caps: 7.
 (define (perf:bus-start spec buf)
   (let ((ws (perf:bus-workspace spec)))
     (if (<= ws 0)
         #f
-        (let ((h (bus:host ws)))
-          (if (not (bus:ok? h))
-              (begin
-                (perf:bus-say buf (string-append "bus host-failed " (bus:message h)))
-                #f)
-              (let ((s (bus:attach "" ws 1 31 255)))
-                (if (not (bus:ok? s))
-                    (begin
-                      (perf:bus-say buf (string-append "bus attach-failed " (bus:message s)))
-                      #f)
-                    (let ((sid (car (cdr s))))
-                      (bus:project-nodes sid)
-                      (perf:bus-say buf (string-append "bus attached ws=" (number->string ws)
-                                                   " role=perf session=" (number->string sid)))
-                      (hash "session" sid "workspace" ws "key" 1)))))))))
+        (let ((host? (perf:bus-host-enabled? spec)))
+          (let ((h (if host? (bus:host ws) (list "ok"))))
+            (if (not (bus:ok? h))
+                (begin
+                  (perf:bus-say buf (string-append "bus host-failed " (bus:message h)))
+                  #f)
+                (let ((s (bus:attach "" ws 1 (if host? 31 7) 255)))
+                  (if (not (bus:ok? s))
+                      (begin
+                        (perf:bus-say buf (string-append "bus attach-failed " (bus:message s)))
+                        #f)
+                      (let ((sid (car (cdr s))))
+                        (if host? (bus:project-nodes sid) #f)
+                        (perf:bus-say buf (string-append "bus attached ws=" (number->string ws)
+                                                     " role=perf session=" (number->string sid)
+                                                     " mode=" (if host? "self-host" "attach-only")
+                                                     " caps=" (number->string (list-ref s 3))))
+                        (hash "session" sid "workspace" ws "key" 1
+                              "host" host? "caps" (list-ref s 3) "buf" buf
+                              ; The workspace generation the host reported.
+                              ; A fresh host has KEPT nothing: baseline 0;
+                              ; each live KEEP advances it by one. The host
+                              ; may publish its current value under the
+                              ; spec's "bus" hash "baseline" key.
+                              "baseline" (hash-ref (hash-ref spec "bus" (hash))
+                                                   "baseline" 0)))))))))))
 
 ; Unique names in stack order (callers before callees), so a parent's
 ; batch index is always backward.
@@ -159,32 +183,129 @@
       (let ((r (bus:trial (hash-ref bus "session") 1)))
         (if (bus:ok? r) (car (cdr r)) -1))))
 
-; The verdict. KEEP runs the coordinator's current constraint set; a
-; rejection is reported, never bypassed. Returns "kept", "rolled",
-; "constraint-rejected: <why>", or "no-bus".
+; Report a failed bus step without crashing (aura-perf#27): loan-exhausted,
+; image-full, constraint-rejected and host disconnects are records, not
+; exceptions. Returns the record's code (or "no-bus").
+(define (perf:bus-report bus buf what r)
+  (let ((code (if (bus:record? r) (bus:code r) "no-bus"))
+        (msg (if (bus:record? r) (bus:message r) "")))
+    (perf:bus-say buf (string-append "bus " what " failed: "
+                                 (if (string? code) code "?")
+                                 (if (and (string? msg) (> (string-length msg) 0))
+                                     (string-append " (" msg ")") "")))
+    code))
+
+; Propose a pure-policy candidate to the host's judge (aura-perf#27,
+; aura#5378/#5379). Opens a trial on the patches channel, publishes the
+; candidate define source as a source-carrier patch naming the target
+; define node, computes the coordinator's candidate digest and binds the
+; five-tuple evidence: baseline = the workspace generation the host
+; reported (0 for a fresh host that has KEPT nothing), candidate = digest,
+; workload/seed/verifier nonzero. perf does NOT keep: the loan stays
+; outstanding with the pending worldline and the judge decides; a
+; disconnect (or crash) lets the coordinator roll it back. Returns the
+; worldline id, or -1 with a report line on failure.
+(define (perf:bus-propose bus node source workload seed verifier)
+  (if (not bus)
+      -1
+      (let* ((sid (hash-ref bus "session"))
+             (buf (hash-ref bus "buf" #f))
+             (tr (bus:trial sid 3)))
+        (if (not (bus:ok? tr))
+            (begin (perf:bus-report bus buf "trial" tr) -1)
+            (let ((wl (car (cdr tr))))
+              (let ((src (bus:publish-source sid source)))
+                (if (not (bus:ok? src))
+                    (begin (perf:bus-report bus buf "publish-source" src)
+                           ; caps 7 holds no rollback bit: detach/exit lets
+                           ; the coordinator withdraw the pending trial.
+                           -1)
+                    (let ((patch (bus:publish-patch sid node bus:source-field
+                                                    (car (cdr src)) wl 0)))
+                      (if (not (bus:ok? patch))
+                          (begin (perf:bus-report bus buf "publish-patch" patch)
+                                 ; no rollback bit (caps 7); coordinator reclaims
+                                 -1)
+                          (let ((d (bus:candidate-digest sid wl)))
+                            (if (not (bus:ok? d))
+                                (begin (perf:bus-report bus buf "candidate-digest" d)
+                                       ; no rollback bit (caps 7); coordinator reclaims
+                                       -1)
+                                (let ((ev (bus:bind-evidence sid wl
+                                                             (hash-ref bus "baseline" 0)
+                                                             (car (cdr d))
+                                                             workload seed verifier)))
+                                  (if (not (bus:ok? ev))
+                                      (begin (perf:bus-report bus buf "bind-evidence" ev)
+                                             ; no rollback bit (caps 7); coordinator reclaims
+                                             -1)
+                                      (begin
+                                        (perf:bus-say buf (string-append
+                                                            "bus-proposed wl=" (number->string wl)
+                                                            " node=" (number->string node)
+                                                            " pending (judge decides)"))
+                                        wl))))))))))))))
+
+; Consume the host's signals (aura-perf#27): subscribe the metrics
+; channel, query its latest rows, and read the CCT hotspots aggregate.
+; Returns the metrics rows ((key value) ...), or '() with a report line
+; when the host is gone or the read fails.
+(define (perf:bus-subscribe-signals bus buf)
+  (if (not bus)
+      '()
+      (let* ((sid (hash-ref bus "session"))
+             (sub (bus:subscribe sid 1)))
+        (if (not (bus:ok? sub))
+            (begin (perf:bus-report bus buf "subscribe" sub) '())
+            (let ((q (bus:query sid 1 0 0)))
+              (if (not (bus:ok? q))
+                  (begin (perf:bus-report bus buf "query-metrics" q) '())
+                  (let ((rows (list-ref q 4))
+                        (hs (bus:hotspots sid 5)))
+                    (if (bus:ok? hs)
+                        (perf:bus-say buf (string-append
+                                            "bus signals metrics=" (number->string (length rows))
+                                            " hotspots=" (number->string (car (cdr hs)))))
+                        (perf:bus-report bus buf "hotspots" hs))
+                    rows)))))))
+
+; The verdict. In self-host mode KEEP runs the coordinator's current
+; constraint set; a rejection is reported, never bypassed. Returns
+; "kept", "rolled", "constraint-rejected: <why>", or "no-bus". In
+; attach-only mode (caps 7) perf holds no keep/rollback bit: the verdict
+; is the judge's, so the worldline is left pending and "proposed" is
+; returned (aura-perf#27).
 (define (perf:bus-verdict bus wl pass heldout-ms)
   (if (or (not bus) (< wl 0))
       "no-bus"
-      (let ((sid (hash-ref bus "session")))
-        (if pass
-            (let ((r (bus:keep sid wl 0
-                               (if (and (number? heldout-ms) (>= heldout-ms 0))
-                                   heldout-ms 0))))
-              (if (bus:ok? r)
-                  "kept"
-                  (string-append "constraint-rejected: " (bus:message r))))
-            (begin (bus:rollback sid wl) "rolled")))))
+      (if (not (hash-ref bus "host" #t))
+          "proposed"
+          (let ((sid (hash-ref bus "session")))
+            (if pass
+                (let ((r (bus:keep sid wl 0
+                                   (if (and (number? heldout-ms) (>= heldout-ms 0))
+                                       heldout-ms 0))))
+                  (if (bus:ok? r)
+                      "kept"
+                      (string-append "constraint-rejected: " (bus:message r))))
+                (begin (bus:rollback sid wl) "rolled"))))))
 
 ; Summary metrics, the real mutation projections, then detach. The
 ; coordinator rolls back whatever this session left pending (the delivered
-; disconnect semantics). The host lives in this process: it keeps serving
-; until perf:bus-linger's window closes (aura-perf#28).
+; disconnect semantics). In self-host mode the host lives in this process
+; and keeps serving until perf:bus-linger's window closes (aura-perf#28);
+; in attach-only mode the external host keeps serving and the judge keeps
+; the pending proposals perf left (aura-perf#27).
 (define (perf:bus-finish bus buf before-ms after-ms)
   (if (not bus)
       #f
       (let ((sid (hash-ref bus "session")))
-        (bus:publish sid 900001 (if (and (number? before-ms) (>= before-ms 0)) before-ms 0))
-        (bus:publish sid 900002 (if (and (number? after-ms) (>= after-ms 0)) after-ms 0))
+        (let ((p1 (bus:publish sid 900001 (if (and (number? before-ms) (>= before-ms 0)) before-ms 0)))
+              (p2 (bus:publish sid 900002 (if (and (number? after-ms) (>= after-ms 0)) after-ms 0))))
+          ; A gone host (disconnect) or a full image is reported, not fatal:
+          ; the round's file report is already the human-facing evidence.
+          (if (not (bus:ok? p1)) (perf:bus-report bus buf "publish-summary" p1) #f)
+          (if (not (bus:ok? p2)) (perf:bus-report bus buf "publish-summary" p2) #f))
         (bus:project-patches sid)
         (bus:project-worldlines sid)
         (let ((a (bus:audit sid 0)))
@@ -192,7 +313,9 @@
                                        (number->string (if (bus:ok? a) (car (cdr a)) -1))
                                        " ws=" (number->string (hash-ref bus "workspace")))))
         (bus:detach sid)
-        (perf:bus-say buf "bus detached (host lingers for harness/maintainer)"))))
+        (perf:bus-say buf (if (hash-ref bus "host" #t)
+                              "bus detached (host lingers for harness/maintainer)"
+                              "bus detached (external host keeps serving; pending proposals await the judge)")))))
 
 ; The post-round serve window (aura-perf#28). The coordinator is this
 ; process, so the bus only outlives the round while the process stays up.
@@ -216,7 +339,9 @@
 ; early); then unhosts. A bus-less round is a no-op. The poll granularity is
 ; ~50ms; char-ready? sees hangup as readable, and read-line then reports EOF.
 (define (perf:bus-linger bus spec buf)
-  (if (not bus)
+  (if (or (not bus) (not (hash-ref bus "host" #t)))
+      ; Attach-only (aura-perf#27): the host is another process; perf has
+      ; already detached and there is nothing here to serve or unhost.
       #f
       (let ((secs (perf:bus-linger-seconds spec))
             (ws (hash-ref bus "workspace")))

@@ -329,7 +329,20 @@
                                                            " key=" (number->string k)
                                                            " base-ms=" (number->string baseline)))
                               #f)
-                          (hash-set! rec "bus-wl" (perf:bus-trial bus))
+                          ; Attach-only (aura-perf#27): propose the candidate
+                          ; with evidence now and leave the worldline pending
+                          ; for the judge; perf holds no keep bit. Self-host
+                          ; keeps the v0.3.0 shape: open the trial here, the
+                          ; verdict below runs KEEP/ROLLBACK.
+                          (hash-set! rec "bus-wl"
+                                     (if (and bus (not (hash-ref bus "host" #t)))
+                                         (perf:bus-propose bus
+                                                           (hash-ref spec "bus-node" 0)
+                                                           (hash-ref cand "genome" "")
+                                                           (perf:bus-mid (hash-ref spec "target" "bench-kernel"))
+                                                           (perf:bus-mid (hash-ref cand "id" "?"))
+                                                           31)
+                                         (perf:bus-trial bus)))
                           (loop (cdr xs) (cons rec acc)))))))
     (perf:write-jobs records)
     (let* ((fp-before (evo:source-fingerprint))

@@ -182,9 +182,14 @@ case "$cmd" in
     # aura-perf#28: the post-round host linger window. Self-skips when the
     # resolved Aura has no std/bus (the v0.2.0 CI pin).
     linger_rc=0
+    attach_rc=0
     if command -v python3 >/dev/null 2>&1; then
       python3 tests/bus_linger_test.py
       linger_rc=$?
+      # aura-perf#27: attach-only mode against an external host bus.
+      # Self-skips when the resolved Aura has no std/bus.
+      python3 tests/bus_attach_test.py
+      attach_rc=$?
     fi
     set -e
     if [ "$rc" -ne 0 ]; then
@@ -203,6 +208,9 @@ case "$cmd" in
     fi
     if [ "$linger_rc" -ne 0 ]; then
       exit "$linger_rc"
+    fi
+    if [ "$attach_rc" -ne 0 ]; then
+      exit "$attach_rc"
     fi
     exit "$exit_rc"
     ;;

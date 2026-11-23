@@ -188,13 +188,19 @@
 ; image-full, constraint-rejected and host disconnects are records, not
 ; exceptions. Returns the record's code (or "no-bus").
 (define (perf:bus-report bus buf what r)
-  (let ((code (if (bus:record? r) (bus:code r) "no-bus"))
-        (msg (if (bus:record? r) (bus:message r) "")))
-    (perf:bus-say buf (string-append "bus " what " failed: "
-                                 (if (string? code) code "?")
-                                 (if (and (string? msg) (> (string-length msg) 0))
-                                     (string-append " (" msg ")") "")))
-    code))
+  ; A string result is a local refusal ("unknown target ..."): show it,
+  ; do not collapse it into the old opaque "no-bus" line.
+  (if (bus:record? r)
+      (let ((code (bus:code r))
+            (msg (bus:message r)))
+        (perf:bus-say buf (string-append "bus " what " failed: "
+                                     (if (string? code) code "?")
+                                     (if (and (string? msg) (> (string-length msg) 0))
+                                         (string-append " (" msg ")") "")))
+        code)
+      (let ((text (if (string? r) r "no-bus")))
+        (perf:bus-say buf (string-append "bus " what " failed: " text))
+        "no-bus")))
 
 ; Propose a pure-policy candidate to the host's judge (aura-perf#27,
 ; aura#5378/#5379). Opens a trial on the patches channel, publishes the

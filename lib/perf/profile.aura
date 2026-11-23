@@ -16,7 +16,7 @@
         perf:select-child perf:find-bin perf:tool-status perf:read-proc
         perf:engine-snap perf:collect perf:hottest perf:hot-child
         perf:measure-live perf:compile-snap perf:compile-delta
-        perf:region-sample perf:statm-resident)
+        perf:region-sample perf:statm-resident perf:stat-text)
 
 (require "std/string" all:)
 (require "std/process" all:)

@@ -738,20 +738,29 @@ def main() -> int:
                 # The self-adaptation: the kept policy reaches the live
                 # data plane without a restart — the server's eviction
                 # kernel changes because the host's choose-fn changed.
-                before = _live_policy(port)
-                deadline = time.monotonic() + 30
-                after = before
-                while time.monotonic() < deadline:
-                    after = _live_policy(port)
-                    if after != before:
-                        break
-                    time.sleep(0.2)
+                # Keep a little traffic on the server while we wait: the
+                # candidate's choose-fn reads the tick's delta, and a
+                # completely quiet server reports zero deltas, so even a
+                # correctly applied policy would pick the baseline. The
+                # judge already ran against the quiet server, so this
+                # probe cannot pollute its measurements.
                 verdict = judged.get("judge") or {}
+                before = _live_policy(port)
+                after = before
+                with BackgroundLoad(port):
+                    deadline = time.monotonic() + 30
+                    while time.monotonic() < deadline:
+                        after = _live_policy(port)
+                        if after != before:
+                            break
+                        time.sleep(0.2)
                 report.set("self-adaptation", kept and after != before,
                            f"the kept policy is live (evict {before} -> {after})"
                            if kept and after != before else
-                           "the judge did not keep: {} {}".format(
-                               verdict.get("reason", "?"), verdict.get("message", "")).strip())
+                           ("the judge did not keep: {} {}".format(
+                               verdict.get("reason", "?"), verdict.get("message", "")).strip()
+                            if not kept else
+                            f"the kept policy never reached the live plane (evict {before} -> {after})"))
 
                 # The reproduction package: the verdict must reproduce
                 # offline, with no coordinator and no live bus.

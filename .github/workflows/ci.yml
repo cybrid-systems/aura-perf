@@ -4,26 +4,27 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     # #5397: the bus contract tests need the current Aura stdlib
-    # (std/bus and bus:defines), which v0.2.0 does not ship. Build the
-    # core checkout in the same toolchain image the joint nightly uses.
-    container:
-      image: ghcr.io/cybrid-systems/aura-ci:latest
+    # (std/bus and bus:defines). The rolling `nightly` release is built
+    # from core main by dist.yml; use its tarball instead of rebuilding
+    # the compiler on every run.
     steps:
       - uses: actions/checkout@v4
-      - name: Build Aura (bus + stdlib)
+      - name: Install Aura nightly
         run: |
-          git clone --depth 1 https://github.com/cybrid-systems/aura.git aura-src
-          cd aura-src
-          python3 build.py build --target aura
-          echo "AURA_BIN=$GITHUB_WORKSPACE/aura-src/build/aura" >> "$GITHUB_ENV"
+          curl -fsSL -o /tmp/aura-nightly.tgz \
+            https://github.com/cybrid-systems/aura/releases/download/nightly/aura-nightly-linux-x86_64.tar.gz
+          mkdir -p /opt/aura
+          tar -xzf /tmp/aura-nightly.tgz -C /opt/aura --strip-components=1
+          /opt/aura/bin/aura --version
+          echo "AURA_BIN=/opt/aura/bin/aura" >> "$GITHUB_ENV"
       - name: Install perf
         run: |
-          apt-get update
-          apt-get install -y linux-tools-generic linux-tools-common
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-generic linux-tools-common
           # Software events are enough when the host PMU is missing.
           # Lower paranoid when the runner allows it; otherwise the example
           # records why perf did not select a hotspot.
-          sysctl -w kernel.perf_event_paranoid=1 || true
+          sudo sysctl -w kernel.perf_event_paranoid=1 || true
           echo "perf candidates:"
           find /usr/lib/linux-tools /usr/bin /usr/libexec -name perf -type f 2>/dev/null || true
           if bin="$(sh scripts/find-perf.sh)"; then

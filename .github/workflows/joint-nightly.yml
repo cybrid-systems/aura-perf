@@ -57,13 +57,15 @@ jobs:
           path: aura-harness
           ref: ${{ vars.AURA_HARNESS_REF || 'main' }}
 
-      - name: Build Aura (the bus + the stdlib)
+      - name: Install Aura nightly (the bus + the stdlib)
         working-directory: aura-perf
         run: |
           set -euo pipefail
-          git clone --depth 1 https://github.com/cybrid-systems/aura.git aura-src
-          cd aura-src
-          python3 build.py build --target aura
+          curl -fsSL -o /tmp/aura-nightly.tgz \
+            https://github.com/cybrid-systems/aura/releases/download/nightly/aura-nightly-linux-x86_64.tar.gz
+          mkdir -p aura-nightly
+          tar -xzf /tmp/aura-nightly.tgz -C aura-nightly --strip-components=1
+          ./aura-nightly/bin/aura --version
 
       - name: Build the real RESP data plane
         working-directory: aura-redis
@@ -72,9 +74,9 @@ jobs:
       - name: The three-repo closed loop
         working-directory: aura-perf
         env:
-          AURA_BIN: ${{ github.workspace }}/aura-perf/aura-src/build/aura
+          AURA_BIN: ${{ github.workspace }}/aura-perf/aura-nightly/bin/aura
           # the judge loads the bus stdlib from the core checkout
-          AURA_LIB: ${{ github.workspace }}/aura-perf/aura-src/lib
+          AURA_LIB: ${{ github.workspace }}/aura-perf/aura-nightly/lib
           AURA_REDIS_DIR: ${{ github.workspace }}/aura-redis
           AURA_HARNESS_DIR: ${{ github.workspace }}/aura-harness
           AURA_PERF_DIR: ${{ github.workspace }}/aura-perf

@@ -1,0 +1,3 @@
+expert-refuse llm-leaf-22222222 site=k-ref
+negative-skip llm-sum-33333333 class=flat-hot hot-node=k-ref
+((llm-spine-11111111) 1 (llm-leaf-22222222) (llm-leaf-22222222 refused k-ref) reject llm-leaf-22222222 protected 2 #t 2 (llm-spine-11111111) 0 () 0 ((k-ref 1) (bench-kernel 0)) #t ((k-length 1)) bench-kernel sum-scan k-ref 2 10 352 (k u m 3 99 4) (linear-scan wrong-scale))

@@ -1,13 +1,26 @@
 ; Optimization proposers.
 ; perf:rule-propose is deterministic: it materializes the strategy's
 ; ordered catalog ids and never reads the held-out input.
-; perf:llm-propose is the plug-in point for a model. It does not open a
-; network connection and does not read an API key.
+; perf:llm-propose asks a model for candidates, from the profile as text.
+; The model only proposes. Its candidates are catalog entries that the
+; same gate judges as any other, and nothing in its reply is copied
+; into a decision.
+;
+; The wiring is the environment, under the names std/llm reads:
+;   LLM_API_KEY    the key. aura-perf never writes it anywhere.
+;   LLM_BASE_URL   the OpenAI-compatible base, e.g. https://api.minimax.cn/v1
+;   LLM_MODEL      the model id, e.g. MiniMax-M3.1-Flash
+; A key without an endpoint or a model is not used: it is never sent to
+; std/llm's default provider. Without all three the proposer answers
+; no-provider, and the round runs on perf:rule-propose alone.
 
-(export perf:rule-propose perf:llm-propose perf:strategy-source
-        perf:revise-order perf:order-of)
+(export perf:rule-propose perf:llm-propose perf:llm-lines perf:llm-options
+        perf:strategy-source perf:revise-order perf:order-of)
 
+(require "std/llm" all:)
 (require "lib/perf/util" all:)
+(require "lib/perf/query" all:)
+(require "lib/perf/memory" all:)
 
 (define (perf:catalog-get catalog id)
   (let loop ((xs (if (list? catalog) catalog '())))
@@ -36,11 +49,582 @@
               (if (and (number? n) (> n 0)) n 1))))
     (perf:take (perf:collect-order catalog order '()) k)))
 
+; ── The model proposer ──────────────────────────────────────────
+
+; How many of the model's candidates one run trials. The spec's "llm"
+; hash "budget" replaces it. The allowance is not the intend's budget:
+; the model's trials never take one away from the rule path.
+(define PERF-LLM-BUDGET 2)
+; The model thinks before it writes, and the thinking is paid out of
+; max_tokens: too small a budget ends the reply at finish=length with
+; an empty body. At reasoning_effort low the model spent 180 to 470
+; reasoning tokens on the sum-scan profile. This is an order of
+; magnitude over that.
+(define PERF-LLM-MAX-TOKENS 8192)
+; Seconds per call: LLM_TIMEOUT in the environment, then this.
+(define PERF-LLM-TIMEOUT-S 120)
+; The caps that keep a reply a candidate.
+(define PERF-LLM-MAX-GENOME 4096)
+(define PERF-LLM-MAX-THOUGHT 200)
+(define PERF-LLM-MAX-SOURCE 2000)
+(define PERF-LLM-EVIDENCE-CHARS 16000)
+; The hottest rows are the evidence; a perf report with hundreds of
+; symbols is not. perf:hotspots returns them hottest first.
+(define PERF-LLM-MAX-HOTSPOTS 40)
+
+; Primitives a candidate may never name: each one acts on something
+; other than its return value. A trial child runs with the sandbox off
+; (mutate:rebind needs that), so this is the one check before the
+; model's source reaches a process. It is hygiene, not the boundary:
+; the checksum and the held-out gate are what decide a candidate.
+; A namespaced name is allowed only when it is a define the evidence
+; showed, so no orch:, fiber:, mutate:, evo: or bus: call comes from a
+; model.
+(define PERF-LLM-FORBIDDEN
+  '("shell" "write-file" "read-file" "append-file" "delete-file"
+    "rename-file" "set-code" "eval" "eval-current" "load" "require"
+    "import" "exit" "error" "display" "newline" "write" "read" "getenv"
+    "setenv" "set!" "set-car!" "set-cdr!" "vector-set!" "string-set!"
+    "query" "workspace" "typecheck-current" "current-source" "fork"
+    "exec" "system" "chdir" "sleep" "with-capability" "with-pinned"))
+
+(define (perf:llm-fail error detail)
+  (hash "ok" #f "error" error "detail" detail
+        "candidates" '() "rejected" '()))
+
+(define (perf:llm-positive v)
+  (if (and (number? v) (> v 0)) v #f))
+
+; An option as text: a non-empty string, or #f.
+(define (perf:llm-opt opts name)
+  (let ((v (hash-ref opts name #f)))
+    (if (and (string? v) (> (string-length v) 0)) v #f)))
+
+; The options of one run: the spec's "llm" hash over the environment.
+; A name the hash leaves out comes from the variable std/llm reads, so
+; wiring a provider is exported variables and no spec change:
+;   LLM_API_KEY   the key. aura-perf never writes it anywhere.
+;   LLM_BASE_URL  the OpenAI-compatible base, e.g. https://api.minimax.cn/v1
+;   LLM_MODEL     the model id, e.g. MiniMax-M3.1-Flash
+;   LLM_TIMEOUT   seconds per call
+(define (perf:llm-options spec)
+  (let ((opts (let ((o (hash-ref spec "llm" #f))) (if (hash? o) o (hash))))
+        (env (lambda (name)
+               (let ((e (try (getenv name) (catch (x) #f))))
+                 (if (and (string? e) (> (string-length e) 0)) e #f)))))
+    (hash "key" (or (perf:llm-opt opts "key") (env "LLM_API_KEY"))
+          "base-url" (or (perf:llm-opt opts "base-url") (env "LLM_BASE_URL"))
+          "model" (or (perf:llm-opt opts "model") (env "LLM_MODEL"))
+          "timeout" (or (perf:llm-positive (hash-ref opts "timeout" #f))
+                        (perf:llm-positive
+                          (try (string->number (getenv "LLM_TIMEOUT")) (catch (x) #f))))
+          "budget" (hash-ref opts "budget" #f)
+          "max-tokens" (hash-ref opts "max-tokens" #f)
+          "chat" (hash-ref opts "chat" #f))))
+
+; Who to call, and under which budget. The options are ctx "llm". The
+; proposer reads no environment of its own: a ctx without options is a
+; run without a provider, whatever the shell holds.
+; A spec's own "chat" procedure carries its own authentication, so the
+; key is optional for it. "refusal" is #f, or (error . detail): the
+; reason no call is made. A key without an endpoint or a model is not
+; used: it is never sent to std/llm's default provider.
+(define (perf:llm-config ctx)
+  (let* ((opts (let ((o (hash-ref ctx "llm" #f))) (if (hash? o) o (hash))))
+         (own (hash-ref opts "chat" #f))
+         (key (perf:llm-opt opts "key"))
+         (base (perf:llm-opt opts "base-url"))
+         (model (perf:llm-opt opts "model"))
+         (budget (let ((b (hash-ref opts "budget" #f)))
+                   (if (and (number? b) (>= b 0)) b PERF-LLM-BUDGET)))
+         (refusal (cond ((<= budget 0)
+                         (cons "disabled" "the spec's llm budget is 0"))
+                        ((not (procedure? own))
+                         (cond ((not key) (cons "no-provider" ""))
+                               ((or (not base) (not model))
+                                (cons "no-endpoint"
+                                      "LLM_API_KEY is set; LLM_BASE_URL and LLM_MODEL must say where it goes. A key is never sent to a default provider."))
+                               (else #f)))
+                        (else #f))))
+    (hash "chat" (if (procedure? own) own llm:chat)
+          "key" (if (string? key) key "")
+          "model" (if (string? model) model "chat")
+          "budget" budget
+          "max-tokens" (let ((n (perf:llm-positive (hash-ref opts "max-tokens" #f))))
+                         (if n n PERF-LLM-MAX-TOKENS))
+          "timeout" (let ((n (perf:llm-positive (hash-ref opts "timeout" #f))))
+                      (if n n PERF-LLM-TIMEOUT-S))
+          "refusal" refusal)))
+
+; Text on its way to a report line. A provider's error or a model's
+; sentence can quote anything; the key is not one of them.
+(define (perf:llm-redact cfg text)
+  (let ((k (hash-ref cfg "key" "")))
+    (cond ((not (string? text)) "")
+          ((> (string-length k) 0) (string-replace text k "[redacted]"))
+          (else text))))
+
+(define (perf:llm-trim s)
+  (let ((n (string-length s)))
+    (let ((a (let loop ((i 0))
+               (if (and (< i n) (<= (string-ref s i) 32)) (loop (+ i 1)) i))))
+      (if (>= a n)
+          ""
+          (let loop ((j (- n 1)))
+            (if (and (> j a) (<= (string-ref s j) 32))
+                (loop (- j 1))
+                (substring s a (+ j 1))))))))
+
+; The model's id as a file-name-safe slug. The runtime owns the rest of
+; the id: the llm- prefix says who proposed it, and the genome's tag
+; makes the id the same text on every run, which is what the negative
+; memory is keyed by.
+(define (perf:llm-slug v)
+  (let ((n (if (string? v) (string-length v) 0)))
+    (let loop ((i 0) (acc '()) (dash #f))
+      (if (or (>= i 24) (>= i n))
+          (let ((cs (if (and (pair? acc) (= (car acc) 45)) (cdr acc) acc)))
+            (if (null? cs) "cand" (list->string (reverse cs))))
+          (let ((c (string-ref v i)))
+            (cond ((or (and (>= c 48) (<= c 57))
+                       (and (>= c 65) (<= c 90))
+                       (and (>= c 97) (<= c 122)))
+                   (loop (+ i 1) (cons c acc) #f))
+                  ((or (null? acc) dash) (loop (+ i 1) acc dash))
+                  (else (loop (+ i 1) (cons 45 acc) #t))))))))
+
+(define (perf:llm-one-line v)
+  (if (string? v)
+      (perf:llm-trim (string-replace (string-replace v "\n" " ")
+                                     (list->string (list 13)) " "))
+      ""))
+
+; A genome wrapped in backticks (a model's habit) is the source inside
+; them. Only the runs at the two ends go: a quasiquote in the body stays.
+(define (perf:llm-unfence v)
+  (if (not (string? v))
+      v
+      (let* ((t (perf:llm-trim v))
+             (n (string-length t))
+             (a (let loop ((i 0))
+                  (if (and (< i n) (= (string-ref t i) 96)) (loop (+ i 1)) i)))
+             (b (let loop ((j (- n 1)))
+                  (if (and (> j a) (= (string-ref t j) 96)) (loop (- j 1)) j))))
+        (if (>= a n)
+            ""
+            (perf:llm-trim (substring t a (+ b 1)))))))
+
+(define (perf:llm-clip text n)
+  (if (> (string-length text) n)
+      (string-append (substring text 0 n) "...")
+      text))
+
+; The reply's candidate list: the "candidates" of a JSON object, or a
+; bare JSON array. #f when the reply is not that. An empty list is an
+; empty answer.
+;
+; The reply is read in three spellings, and the first that is JSON is
+; it: as it is; without the fence that opens and closes it; as the
+; object inside a sentence around it. A fence inside the reply is the
+; model's own text, and stays.
+(define (perf:llm-last-char t c)
+  (let loop ((i (- (string-length t) 1)))
+    (cond ((< i 0) -1)
+          ((= (string-ref t i) c) i)
+          (else (loop (- i 1))))))
+
+; The text from the first `open` to the last `close`, or "".
+(define (perf:llm-inside t open close)
+  (let ((a (string-index t (list->string (list open)) 0))
+        (b (perf:llm-last-char t close)))
+    (if (and (>= a 0) (> b a))
+        (substring t a (+ b 1))
+        "")))
+
+; A fence that opens the reply is not part of it: its first line (the
+; opening fence and whatever names the language) and a fence that
+; closes the reply go.
+(define (perf:llm-unfence-reply t)
+  (let ((n (string-length t))
+        (fence-at (lambda (s i)
+                    (and (>= i 0) (< (+ i 2) (string-length s))
+                         (= (string-ref s i) 96)
+                         (= (string-ref s (+ i 1)) 96)
+                         (= (string-ref s (+ i 2)) 96)))))
+    (if (not (fence-at t 0))
+        t
+        (let* ((body (let loop ((i 3))
+                       (if (and (< i n) (not (= (string-ref t i) 10)))
+                           (loop (+ i 1))
+                           (if (< i n) (+ i 1) n))))
+               (u (perf:llm-trim (substring t body n))))
+          (if (fence-at u (- (string-length u) 3))
+              (perf:llm-trim (substring u 0 (- (string-length u) 3)))
+              u)))))
+
+(define (perf:llm-json content)
+  (let ((t (perf:llm-unfence-reply (perf:llm-trim content))))
+    (let loop ((texts (list t (perf:llm-inside t 123 125))))
+      (if (null? texts)
+          #f
+          (let ((v (try (json-parse (car texts)) (catch (e) #f))))
+            (if (or (hash? v) (list? v))
+                v
+                (loop (cdr texts))))))))
+
+(define (perf:llm-decode content)
+  (if (not (string? content))
+      #f
+      (let ((v (perf:llm-json content)))
+        (cond ((not (or (hash? v) (list? v))) #f)
+              ((hash? v)
+               (let ((cs (hash-ref v "candidates" #f)))
+                 (if (list? cs) cs #f)))
+              (else v)))))
+
+(define (perf:llm-rows ctx key)
+  (let ((v (hash-ref ctx key #f)))
+    (if (list? v) v '())))
+
+(define (perf:llm-field raw key)
+  (let ((v (if (hash? raw) (hash-ref raw key #f) #f)))
+    (if (and (string? v) (> (string-length v) 0)) v #f)))
+
+(define (perf:llm-row-of rows name)
+  (let loop ((xs rows))
+    (if (null? xs)
+        #f
+        (if (and (hash? (car xs)) (string=? (hash-ref (car xs) "name" "") name))
+            (car xs)
+            (loop (cdr xs))))))
+
+(define (perf:llm-entry-target entry fallback)
+  (let ((t (if (hash? entry) (hash-ref entry "target" #f) #f)))
+    (if (string? t) t fallback)))
+
+(define (perf:llm-forbidden-token? form allowed)
+  (let loop ((ts (perf:ident-tokens form)))
+    (if (null? ts)
+        #f
+        (if (or (perf:member? PERF-LLM-FORBIDDEN (car ts))
+                (and (>= (string-index (car ts) ":" 0) 0)
+                     (not (perf:member? allowed (car ts)))))
+            #t
+            (loop (cdr ts))))))
+
+; The same text under this target is already a candidate: in this
+; reply, or in the catalog the rule path trials.
+(define (perf:llm-duplicate? ctx target squash seen)
+  (let ((key (string-append target "\n" squash))
+        (catalog (perf:llm-rows ctx "catalog"))
+        (fallback (hash-ref ctx "target" "")))
+    (or (perf:member? seen key)
+        (let loop ((xs catalog))
+          (if (null? xs)
+              #f
+              (if (and (string=? (perf:llm-entry-target (car xs) fallback) target)
+                       (let ((g (hash-ref (car xs) "genome" #f)))
+                         (and (string? g)
+                              (string=? (perf:squash g) squash))))
+                  #t
+                  (loop (cdr xs))))))))
+
+; One object of the reply as a candidate, or the reason it is not one.
+; The candidate is built from four fields. Whatever else the reply says
+; about it (a decision, a verdict, a timing) is left behind: it cannot
+; reach the gate.
+(define (perf:llm-one raw cfg ctx seen)
+  (let* ((target (perf:llm-field raw "target"))
+         (genome (perf:llm-unfence (perf:llm-field raw "genome")))
+         (row (if (string? target) (perf:llm-row-of (perf:llm-rows ctx "targets") target) #f))
+         (form (if (and (hash? row) (string? genome)
+                        (<= (string-length genome) PERF-LLM-MAX-GENOME))
+                   (perf:sole-define genome target)
+                   ""))
+         (squash (perf:squash form))
+         (reason (cond ((not (string? target)) "no-target")
+                       ((not row) "unknown-target")
+                       ((not (string? genome)) "no-genome")
+                       ((> (string-length genome) PERF-LLM-MAX-GENOME) "genome-too-long")
+                       ((string=? form "") "not-one-define")
+                       ; The parameter list is the original's: its
+                       ; callers still call it the way they do now.
+                       ((not (string=? (perf:squash (perf:define-header form))
+                                       (perf:squash (perf:define-header (hash-ref row "source" "")))))
+                        "header-changed")
+                       ((perf:llm-forbidden-token?
+                          form
+                          (map (lambda (r) (hash-ref r "name" ""))
+                               (append (perf:llm-rows ctx "targets")
+                                       (perf:llm-rows ctx "context"))))
+                        "forbidden-token")
+                       ((perf:llm-duplicate? ctx target squash seen) "duplicate")
+                       (else ""))))
+    (if (string=? reason "")
+        (hash "ok" #t
+              "key" (string-append target "\n" squash)
+              "cand" (hash "id" (string-append "llm-"
+                                               (perf:llm-slug (perf:llm-field raw "id"))
+                                               "-" (perf:text-tag form))
+                           "target" target
+                           "genome" form
+                           "thought" (perf:llm-redact
+                                        cfg
+                                        (perf:llm-clip (perf:llm-one-line (hash-ref raw "thought" #f))
+                                                       PERF-LLM-MAX-THOUGHT))
+                           "proposer" "llm"))
+        (hash "ok" #f "reason" reason))))
+
+; The accepted candidates and the rejected objects, each with its
+; reason. Past the allowance a candidate is over-budget: the model is
+; asked for no more than the allowance to begin with.
+(define (perf:llm-each raws cfg ctx)
+  (let loop ((xs raws) (i 1) (cands '()) (rejected '()) (seen '()))
+    (if (null? xs)
+        (list (reverse cands) (reverse rejected))
+        (let ((one (if (>= (length cands) (hash-ref cfg "budget" 0))
+                      (hash "ok" #f "reason" "over-budget")
+                      (perf:llm-one (car xs) cfg ctx seen))))
+          (if (eq? (hash-ref one "ok" #f) #t)
+              (loop (cdr xs) (+ i 1)
+                    (cons (hash-ref one "cand") cands) rejected
+                    (cons (hash-ref one "key") seen))
+              (loop (cdr xs) (+ i 1)
+                    cands
+                    (cons (hash "index" i "reason" (hash-ref one "reason" "?")) rejected)
+                    seen))))))
+
+(define (perf:llm-chat cfg system user)
+  (try ((hash-ref cfg "chat") system user
+        (hash "max_tokens" (hash-ref cfg "max-tokens" PERF-LLM-MAX-TOKENS)
+              "reasoning_effort" "low"
+              "temperature" 0.2)
+        (hash-ref cfg "timeout" PERF-LLM-TIMEOUT-S))
+       (catch (e)
+         (hash "ok" #f "error" "chat-error" "content" ""))))
+
+(define (perf:llm-accept reply cfg ctx)
+  (let ((error (if (hash? reply) (hash-ref reply "error" #f) #f)))
+    (if (not (and (hash? reply) (eq? (hash-ref reply "ok" #f) #t)))
+        (perf:llm-fail (perf:llm-redact
+                         cfg
+                         (if (string? error)
+                             (if (string=? error "") "chat-failed" error)
+                             "bad-reply"))
+                       "")
+        (let ((raws (perf:llm-decode (hash-ref reply "content" #f))))
+          (if (eq? raws #f)
+              (perf:llm-fail "unparsable" "the reply is not the candidates JSON")
+              (let* ((got (perf:llm-each raws cfg ctx))
+                     (cands (car got))
+                     (rejected (car (cdr got))))
+                (if (null? cands)
+                    (perf:llm-fail "no-candidates" "")
+                    (hash "ok" #t "error" "" "detail" ""
+                          "candidates" cands "rejected" rejected))))))))
+
+; ── The prompts ─────────────────────────────────────────────────
+
+(define (perf:llm-system cfg)
+  (string-append
+    "You propose performance optimizations for a program written in Aura, a Scheme-like Lisp.\n"
+    "You read a measured profile and return candidate rewrites, one define each. You do not\n"
+    "decide whether a candidate is accepted: every candidate is tried in an isolated process,\n"
+    "and a deterministic gate keeps it only if it returns exactly the original result on the\n"
+    "checksum inputs and on every held-out sample, and is faster than the required margin. A\n"
+    "wrong or slower candidate is simply discarded, so a correct rewrite with a clear\n"
+    "algorithmic win is worth more than a clever one.\n"
+    "\n"
+    "Answer with one JSON object and nothing else:\n"
+    "{\"candidates\":[{\"id\":\"short-slug\",\"target\":\"define-name\",\"thought\":\"one sentence: why it is faster\",\"genome\":\"(define (define-name args) ...)\"}]}\n"
+    "\n"
+    "Rules:\n"
+    "- \"target\" is one of the rebindable defines in the evidence. \"genome\" is the complete\n"
+    "  replacement of that define: a single (define ...) form with the same name and the same\n"
+    "  parameter list, and no other top-level form.\n"
+    "- The define must return exactly the same value as the original for every input.\n"
+    "- Use only the defines and the primitives the original program already uses. No I/O, no\n"
+    "  shell, no ffi, no change to any other define, no mutable global state.\n"
+    "- Never rebind a protected define. Do not repeat an idea that is already in the catalog\n"
+    "  or that failed before on this hotspot.\n"
+    "- Return at most " (number->string (hash-ref cfg "budget" 0)) " candidates, most promising\n"
+    "  first. {\"candidates\":[]} is a valid answer when the evidence supports no rewrite.\n"))
+
+; The evidence as text: the profile lines the report prints, the numbers
+; the gate compares, the defines this run may rebind with their source,
+; the defines the hot code calls, and what has been tried already.
+; Text only: nothing here is an image or a data URL.
+(define (perf:llm-protecting rows flag)
+  (let loop ((xs rows) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (loop (cdr xs)
+              (if (= (hash-ref (car xs) "protected" 0) flag)
+                  (cons (car xs) acc)
+                  acc)))))
+
+; One shared character budget, spent left to right: a target with a
+; long program shows its first defines whole and names the rest.
+(define (perf:llm-sources rows left)
+  (let loop ((xs rows) (left left) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (let* ((r (car xs))
+               (name (string-append (hash-ref r "name" "?")
+                                    (if (= (hash-ref r "protected" 0) 1) " [protected]" "")))
+               (src (let ((s (hash-ref r "source" "")))
+                      (if (string? s) s "")))
+               (room (min left PERF-LLM-MAX-SOURCE)))
+          (if (<= room 0)
+              (loop (cdr xs) left
+                    (cons (string-append "- " name ": [source left out: the evidence budget was spent]")
+                          acc))
+              (let ((text (if (> (string-length src) room)
+                              (string-append (substring src 0 room) "...")
+                              src)))
+                (loop (cdr xs) (- left (string-length text))
+                      (append (reverse (list (string-append name ":") text)) acc))))))))
+
+(define (perf:llm-gate-lines gate)
+  (if (not (hash? gate))
+      '()
+      (append
+        (list (string-append
+                "gate: a candidate is kept only when it returns the original result on the checksum"
+                " inputs and on every held-out sample, and its held-out median is at least "
+                (number->string (hash-ref gate "pct" 0)) "% below the reference of "
+                (number->string (hash-ref gate "ref-ms" -1)) " ms"))
+        (if (number? (hash-ref gate "site-pct" #f))
+            (list (string-append "gate: a candidate also passes when the time of the define it"
+                                 " replaced drops by at least "
+                                 (number->string (hash-ref gate "site-pct" 0)) "%"))
+            '())
+        (list (string-append
+                "baseline: the original program's held-out median is "
+                (number->string (hash-ref gate "raw-ms" -1)) " ms, samples "
+                (perf:join (map (lambda (s) (if (number? s) (number->string s) "?"))
+                                (let ((v (hash-ref gate "raw-samples" '())))
+                                  (if (list? v) v '())))
+                           ",")
+                ", on a held-out input of size " (number->string (hash-ref gate "heldout-n" 0)))))))
+
+(define (perf:llm-catalog-lines ctx)
+  (let ((fallback (hash-ref ctx "target" "")))
+    (let loop ((xs (perf:llm-rows ctx "catalog")) (acc '()))
+      (if (null? xs)
+          (reverse acc)
+          (let ((e (car xs))
+                (t (perf:llm-field (car xs) "thought")))
+            (loop (cdr xs)
+                  (cons (string-append "- " (hash-ref e "id" "?")
+                                       ", rebinds " (perf:llm-entry-target e fallback)
+                                       (if t (string-append ": " (perf:llm-one-line t)) ""))
+                        acc)))))))
+
+; The ideas that failed on this hotspot in the runs before, with the
+; gate's reason: the same list perf:filter-negative skips by.
+(define (perf:llm-failed-lines ctx)
+  (let loop ((xs (perf:neg-query (perf:llm-rows ctx "memory")
+                                 (hash-ref ctx "class" "")
+                                 (hash-ref ctx "hot-node" "")))
+             (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (loop (cdr xs)
+              (cons (string-append "- " (hash-ref (car xs) "idea" "?") ": "
+                                   (hash-ref (car xs) "reason" ""))
+                    acc)))))
+
+(define (perf:llm-evidence ctx)
+  (let ((profile (let ((p (hash-ref ctx "profile" #f))) (if (hash? p) p (hash))))
+        (plan (let ((p (hash-ref ctx "plan" #f))) (if (hash? p) p (hash))))
+        (targets (perf:llm-rows ctx "targets")))
+    (perf:join
+      (append
+        (list (string-append "target: " (hash-ref ctx "label" "target"))
+              "language: Aura, a Scheme-like Lisp. Times are milliseconds."
+              (string-append "mined: class=" (hash-ref plan "class" "")
+                             " hot-node=" (hash-ref plan "hotspot" "")
+                             " site=" (hash-ref plan "site" "")
+                             " prefix=" (perf:join (hash-ref plan "prefix" '()) ">"))
+              (string-append "hottest: " (hash-ref ctx "hottest" ""))
+              (string-append "hot-child: " (hash-ref ctx "hot-child" ""))
+              (perf:tool-line profile))
+        (perf:take (perf:hotspot-lines profile) PERF-LLM-MAX-HOTSPOTS)
+        (perf:counter-lines profile)
+        (perf:llm-gate-lines (hash-ref ctx "gate" #f))
+        (list ""
+              "rebindable defines (a candidate replaces exactly one: same name, same parameters):")
+        (perf:llm-sources (perf:llm-protecting targets 0) PERF-LLM-EVIDENCE-CHARS)
+        (list ""
+              "defines the hot code calls (read-only context; do not change them):")
+        (perf:llm-sources (append (perf:llm-protecting targets 1) (perf:llm-rows ctx "context"))
+                          PERF-LLM-EVIDENCE-CHARS)
+        (list ""
+              "already in the catalog (the rule path trials these; do not duplicate):")
+        (perf:llm-catalog-lines ctx)
+        (list ""
+              (string-append "failed before on hot-node " (hash-ref ctx "hot-node" "")
+                             " (do not propose again):"))
+        (perf:llm-failed-lines ctx))
+      "\n")))
+
+; ── The proposer ────────────────────────────────────────────────
+
+; ctx carries the evidence (label, plan, profile, hot-child, hottest,
+; hotspots, class, hot-node, targets, context, target, catalog, memory,
+; gate) and the options under "llm" (perf:llm-options): key, base-url,
+; model, timeout, budget, max-tokens, chat.
+;
+; Returns a hash. ok is #t only with at least one candidate, and then
+; candidates are catalog entries (id, target, genome, thought,
+; proposer). Otherwise error names why no call was made or why the
+; reply gave nothing: no-provider, no-endpoint, no-site, disabled, the
+; transport's own error, unparsable, no-candidates. rejected lists the
+; objects the reply gave that are not candidates, with the reason.
+; Every string here is fit for a report line: none holds the key.
 (define (perf:llm-propose ctx)
-  (hash "ok" #f
-        "error" "no-provider"
-        "detail" "Plug-in for an external model. The example uses perf:rule-propose and does not call the network."
-        "candidates" '()))
+  (let* ((c (if (hash? ctx) ctx (hash)))
+         (cfg (perf:llm-config c))
+         (refusal (or (hash-ref cfg "refusal" #f)
+                      (if (null? (perf:llm-rows c "targets"))
+                          (cons "no-site" "no define of this run has a body to rebind")
+                          #f))))
+    (if refusal
+        (perf:llm-fail (car refusal) (perf:llm-redact cfg (cdr refusal)))
+        (let* ((t0 (monotonic-ms))
+               (reply (perf:llm-chat cfg (perf:llm-system cfg) (perf:llm-evidence c)))
+               (r (perf:llm-accept reply cfg c)))
+          (hash-set! r "ms" (- (monotonic-ms) t0))
+          (hash-set! r "model" (hash-ref cfg "model"))
+          (hash-set! r "budget" (hash-ref cfg "budget"))
+          r))))
+
+; The proposer's report lines. A run without a provider says so in one
+; line, as it always has.
+(define (perf:llm-lines llm)
+  (if (not (hash? llm))
+      (list "llm-proposer bad-reply")
+      (if (eq? (hash-ref llm "ok" #f) #t)
+          (append
+            (list (string-append "llm-proposer ok model=" (hash-ref llm "model" "?")
+                                 " ms=" (number->string (hash-ref llm "ms" 0))
+                                 " candidates=" (number->string (length (hash-ref llm "candidates" '())))
+                                 " rejected=" (number->string (length (hash-ref llm "rejected" '())))))
+            (map (lambda (c)
+                   (string-append "llm-candidate " (hash-ref c "id" "?")
+                                  " target=" (hash-ref c "target" "?")
+                                  " thought=" (hash-ref c "thought" "")))
+                 (hash-ref llm "candidates" '()))
+            (map (lambda (r)
+                   (string-append "llm-rejected " (number->string (hash-ref r "index" 0))
+                                  " " (hash-ref r "reason" "?")))
+                 (hash-ref llm "rejected" '())))
+          (let ((detail (hash-ref llm "detail" "")))
+            (if (and (string? detail) (> (string-length detail) 0))
+                (list (string-append "llm-proposer " (hash-ref llm "error" "?"))
+                      (string-append "llm-proposer-detail " detail))
+                (list (string-append "llm-proposer " (hash-ref llm "error" "?"))))))))
 
 (define (perf:quote-ids ids)
   (let loop ((xs ids) (acc ""))

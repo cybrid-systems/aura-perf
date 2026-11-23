@@ -4,7 +4,7 @@
 
 ## 试一下
 
-一条命令跑完测量、挖掘、试验、门控和报告。不需要虚拟环境，不需要 API key，不需要配置文件。需要 [Aura v0.2.0](https://github.com/cybrid-systems/aura/releases/tag/v0.2.0)（nightly `cf7353373`）。`perf` 可用时用它的 task-clock；没有二进制或没有 PMU 时改用 region timer，并在报告里写明，不把缺的计数器写成 0。
+一条命令跑完测量、挖掘、试验、门控和报告。不需要虚拟环境，不需要配置文件，默认也不需要 API key（可选的模型提议者要，见「模型提议者」）。需要 [Aura v0.2.0](https://github.com/cybrid-systems/aura/releases/tag/v0.2.0)（nightly `cf7353373`）。`perf` 可用时用它的 task-clock；没有二进制或没有 PMU 时改用 region timer，并在报告里写明，不把缺的计数器写成 0。
 
 命令装上以后，**在任何目录**都能跑：
 
@@ -146,6 +146,43 @@ spec 就是一个普通的 Aura 文件。它 require 运行时（仓库根目录
   然能用（运行时退回那条 define 的 null job 的树）。
 - **几毫秒上的百分比不算数。** site 地板还要求绝对差值站得住（10 ms）：10% 的地板
   要 100 ms 的 base，20% 的地板要 50 ms。
+
+
+## 模型提议者
+
+默认不联网、不读密钥，候选都来自 `perf:rule-propose`。把三个环境变量给出以后，同一轮会多问一次模型（经 `std/llm` 的 `llm:chat`，OpenAI 兼容协议）：
+
+```sh
+export LLM_API_KEY=…                              # 密钥只放环境
+export LLM_BASE_URL=https://api.minimax.cn/v1
+export LLM_MODEL=MiniMax-M3.1-Flash
+aura-perf autotune
+```
+
+- **模型看到的只是文本。** 报告里那几行 `hotspot … self-ms= … calls= … stack=…` 和 `counter …`，门要比的数（基线中位和样本、参照物、地板），这一轮可以 rebind 的 define 的源码（protected 的标出来），catalog 里已有的想法，这个热点上失败过的想法。没有截图，也没有 data URL。接上提议者，就是把这些文本发给 `LLM_BASE_URL` 那一端，目标源码也在其中。
+- **模型的回答是一份 JSON**：`{"candidates":[{"id":…,"target":…,"thought":…,"genome":…}]}`。`genome` 是那一个 define 的完整替换源码。运行时只取这四个字段，回答里其余的（`keep`、`decision`、`heldout-ms`）一概丢下：它们到不了门。
+- **模型没有 KEEP 权。** 候选进同一轮 trial，过同一道门：checksum、protected、held-out、地板、总线上的约束。对的才留，错的照样 `ROLLBACK reason=checksum`。一条模型候选失败（写错、更慢、装不上）只是它自己的 ROLLBACK，规则路径的下一轮照常。
+- **不占 intend 的预算。** 一次运行最多 trial `"llm"` 的 `budget` 条模型候选（缺省 2），和 intend 的 `budget` 分开记：`budget-used` 是规则路径的 trial 数，`llm-budget-used` 是模型的。
+- **调用预算。** `reasoning_effort=low`，`max_tokens` 8192（模型先想再写，想的部分也算在里面；这台机器上 low 用了 180–470 个 reasoning token），一次调用 120 秒超时。`LLM_TIMEOUT` 改超时。spec 的 `"llm"` hash 可以改 `budget`、`max-tokens`、`timeout`，或换一个和 `llm:chat` 同契约的 `chat` 过程；`budget` 为 0 是关掉。
+- **不是候选的回答不进 trial。** target 不在可 rebind 的 define 里、`genome` 不是恰好一个同名同参数的 `(define …)`、点名了有副作用的原语（`shell`、`write-file`、`set!`、`eval`……）、和 catalog 里某条只差排版：各记一行 `llm-rejected <序号> <原因>`。protected 的 define 由封了印的那道边界拒绝（`expert-refuse`）。
+- **降级。** 没有密钥是 `llm-proposer no-provider`；只有密钥、没有端点或模型是 `no-endpoint`，密钥不会被发到 std/llm 的缺省厂商；端点不通或调用失败，`llm-proposer` 那一行写传输层自己的错误。三种情况规则路径照常走。
+- **密钥不落盘。** 它不出现在任何报告行，也不出现在 `out/` 下的任何文件里。
+
+报告里多出来的几行（接 MiniMax 跑内置例子的一次）：
+
+```
+llm-proposer ok model=MiniMax-M3.1-Flash ms=41821 candidates=1 rejected=1
+llm-candidate llm-unroll-sum-scan-by-two-46b6277c target=bench-kernel thought=Unroll the bounded scan by two elements to reduce loop-condition and recursive-call overhead ...
+llm-rejected 2 not-one-define
+round 1 candidates linear-scan,llm-unroll-sum-scan-by-two-46b6277c
+candidate llm-unroll-sum-scan-by-two-46b6277c PASS reason=gate-pass heldout-ms=264 ref-ms=337 ...
+kernel KEEP id=linear-scan heldout-ms=8
+llm-budget-used 1
+```
+
+模型那条过了门（264 ms 对参照 337 ms），同一轮里 `linear-scan` 更快（8 ms），KEEP 的是 `linear-scan`。判定是门给的。另外两次模型看了证据回答 `{"candidates":[]}`，报告写 `llm-proposer no-candidates`。
+
+`aura-perf test` 用本机的假 provider 跑真实的一轮（`tests/llm_proposer_test.py`）：对的候选被门 KEEP，错的连同回答里的 `"keep": true` 一起被 checksum 打回、规则路径接着 KEEP 自己的，端点不通时这一轮和没有 provider 的那一轮相同；每一轮都逐个文件查密钥。
 
 ## 这次实测
 

@@ -51,7 +51,7 @@ hotspot block-ahead?     self-ms=67   calls=900 share=0
 - **稳态而不是第一个样本。** held-out 应该丢掉第一次（预热）再取中位，并把丢掉的那次写在报告里。
 - **目标自己的测试命令当 checksum。** spec 可以给一条命令（`aura test`），运行时的门跑它、读它的退出码和 golden 差异。
 - **`ast:snapshot` / `ast:restore`** 已经在用（回滚 ✓）；**`evo:trial`** 已经在用（worldline ✓）；**`orch:parallel`** 已经在用（一轮候选并行 ✓）；**`engine:metrics`** 已经在用（KEEP 的编译计数 ✓）。
-- **fiber**：LLM proposer 那一路（`perf:llm-propose` 现在是 `no-provider` 的插口）应该跑在 fiber 上，不占门的时间。
+- **fiber**：LLM proposer 那一路（`perf:llm-propose` 已经接上 std/llm，aura-perf#29；调用还是同步的）应该跑在 fiber 上，不占门的时间。
 - **`ast:unparse` / `current-source`** 的 round trip 现在是坏的（findings 9、10）：那是 Aura 的两条 P0，aura-perf 不改 Aura，但目标程序要知道（目标可以把会写成科学计数法的字面量换掉）。
 
 ## 策略：aura-perf 该怎么变
@@ -141,7 +141,7 @@ spec 给一条命令和它的 golden，运行时跑它、读退出码。aura-run
 
 ### 9. LLM proposer 的契约扩到一组改动
 
-`perf:llm-propose` 的插口在 ✓，但契约还假设一个候选一个 define。模型提的往往是「这几处一起改」，所以候选 hash 要能带一组，模型返回的也要是同一份 hash（现在的要求 ✓，扩到一组 ✓）。
+`perf:llm-propose` 接上了模型（aura-perf#29）：一条候选就是一条 catalog 条目，一个 define，从文本证据提出来，由同一道门判。契约仍然假设一个候选一个 define。模型提的往往是「这几处一起改」，所以候选 hash 要能带一组，模型返回的也要是同一份 hash（一个 define ✓，扩到一组还没）。
 
 ## 顺序
 

@@ -6,7 +6,8 @@
         perf:nth perf:string-ref-ok? perf:char-at
         perf:named-let-reentrant? perf:named-let-fault-text
         perf:mutate-ops-present? perf:mutate-ops-fault-text
-        perf:verdict-speedup perf:extract-define)
+        perf:verdict-speedup perf:extract-define perf:sole-define
+        perf:define-header perf:squash perf:text-tag perf:ident-tokens)
 
 (require "std/string" all:)
 
@@ -297,6 +298,117 @@
               (if (perf:define-at? source i name)
                   (perf:balanced-form source i)
                   (loop (+ i 1))))))))
+
+; Source that is one `(define ...)` form of `name` and nothing else
+; (whitespace and `;` line comments aside): the text of that form. ""
+; for anything else: a second form, a form of another define, or no form
+; at all.
+(define (perf:skip-blank s i)
+  (let ((n (string-length s)))
+    (if (>= i n)
+        i
+        (let ((c (perf:char-at s i)))
+          (cond ((<= c 32) (perf:skip-blank s (+ i 1)))
+                ((= c 59)
+                 (let loop ((j (+ i 1)))
+                   (if (or (>= j n) (= (perf:char-at s j) 10))
+                       (perf:skip-blank s (+ j 1))
+                       (loop (+ j 1)))))
+                (else i))))))
+
+(define (perf:sole-define source name)
+  (if (or (not (string? source)) (not (string? name)) (string=? name ""))
+      ""
+      (let* ((s source)
+             (n (string-length s))
+             (start (perf:skip-blank s 0)))
+        (if (or (>= start n) (not (perf:define-at? s start name)))
+            ""
+            (let* ((form (perf:balanced-form s start))
+                   ; what follows the form must be blank too
+                   (end (perf:skip-blank s (+ start (string-length form)))))
+              (if (or (string=? form "") (< end n))
+                  ""
+                  form))))))
+
+; The parameter list of a define, as text: "(name args ...)". "" for the
+; curried spelling `(define name (lambda ...))`.
+(define (perf:define-header form)
+  (if (not (string? form))
+      ""
+      (let ((k (perf:skip-ws form 7)))
+        (if (and (< k (string-length form)) (= (perf:char-at form k) 40))
+            (perf:balanced-form form k)
+            ""))))
+
+; The text with every whitespace character removed: two spellings of one
+; form that differ only in layout compare equal.
+(define (perf:squash s)
+  (let ((n (string-length s)))
+    (let loop ((i 0) (acc '()))
+      (if (>= i n)
+          (list->string (reverse acc))
+          (loop (+ i 1)
+                (if (<= (perf:char-at s i) 32)
+                    acc
+                    (cons (perf:char-at s i) acc)))))))
+
+; Eight hex digits of a text (FNV-1a, 32 bits): a short, stable name for
+; content. The same text is the same tag; a different text is another one.
+(define (perf:text-tag text)
+  (let ((n (string-length text)))
+    (let loop ((i 0) (h 2166136261))
+      (if (>= i n)
+          (let ((d (number->string h 16)))
+            (let pad ((k (string-length d)) (z ""))
+              (if (>= k 8)
+                  (string-append z d)
+                  (pad (+ k 1) (string-append z "0")))))
+          (loop (+ i 1)
+                (modulo (* (bitwise-xor h (string-ref text i)) 16777619)
+                        4294967296))))))
+
+(define (perf:ident-char? c)
+  (or (and (>= c 48) (<= c 57))
+      (and (>= c 65) (<= c 90))
+      (and (>= c 97) (<= c 122))
+      ; ! $ % & * + - . / : < = > ? @ ^ _ ~
+      (perf:member? '(33 36 37 38 42 43 45 46 47 58 60 61 62 63 64 94 95 126) c)))
+
+; The identifier tokens of source text: what is left once strings and
+; comments are skipped. A token flushes on the text before it, so the
+; result is a vocabulary and not a parse: positions are not kept.
+(define (perf:flush-token s start i acc)
+  (if (< start 0) acc (cons (substring s start i) acc)))
+
+(define (perf:ident-tokens s)
+  (let ((n (string-length s)))
+    (let loop ((i 0) (start -1) (acc '()))
+      (if (>= i n)
+          (reverse (perf:flush-token s start n acc))
+          (let ((c (perf:char-at s i)))
+            (cond ((= c 34)
+                   (loop (perf:skip-string s i)
+                         -1
+                         (perf:flush-token s start i acc)))
+                  ((= c 59)
+                   (let scan ((j (+ i 1)))
+                     (if (or (>= j n) (= (perf:char-at s j) 10))
+                         (loop j -1 (perf:flush-token s start i acc))
+                         (scan (+ j 1)))))
+                  ((and (= c 35) (< (+ i 1) n) (= (perf:char-at s (+ i 1)) 124))
+                   (let scan ((j (+ i 2)))
+                     (if (or (>= (+ j 1) n)
+                             (and (= (perf:char-at s j) 124)
+                                  (= (perf:char-at s (+ j 1)) 35)))
+                         (loop (if (>= (+ j 1) n) n (+ j 2))
+                               -1
+                               (perf:flush-token s start i acc))
+                         (scan (+ j 1)))))
+                  ((perf:ident-char? c)
+                   (loop (+ i 1) (if (< start 0) i start) acc))
+                  (else
+                   (loop (+ i 1) -1 (perf:flush-token s start i acc)))))))))
 
 (define (perf:verdict-speedup before-ms after-ms before-samples after-samples)
   (string-append "speedup-x=" (perf:fmt-x before-ms after-ms)

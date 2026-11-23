@@ -7,7 +7,7 @@
 (define (perf:help)
   (list
     (hash "verb" "autotune"
-          "needs" "aura; perf optional (task-clock). No API key."
+          "needs" "aura; perf optional (task-clock). No API key: LLM_API_KEY, LLM_BASE_URL and LLM_MODEL add the model proposer."
           "summary" "Measure the target, mine, trial, gate, write out/report.txt. Exits 0 only when intend-met=1.")
     (hash "verb" "recheck"
           "needs" "out/evidence.json from autotune. No perf, no rebuild."
@@ -19,8 +19,8 @@
           "needs" "same as sysinfo, plus a short /proc sample. Set AURA_PERF_CHECK_SEC to lengthen it (default 1)."
           "summary" "CPU, memory, disk, network, and interrupt deltas. Missing PMU stays missing.")
     (hash "verb" "test"
-          "needs" "aura test. No perf."
-          "summary" "Run the value-level tests.")
+          "needs" "aura test, python3. No perf, no API key."
+          "summary" "Run the value-level tests, then the round tests.")
     (hash "verb" "help"
           "needs" "nothing"
           "summary" "List these verbs.")))

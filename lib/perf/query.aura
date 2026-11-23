@@ -1,8 +1,12 @@
 ; Query primitives over a profile value produced by perf:collect
 ; or by the perf/gprof parsers. Profiles are plain hashes, so these
-; functions do not touch the workspace.
+; functions do not touch the workspace. The *-lines functions render a
+; profile as report lines; the report and the model proposer read the
+; same text.
 
-(export perf:hotspots perf:stacks perf:counters perf:delta)
+(export perf:hotspots perf:stacks perf:counters perf:delta
+        perf:hotspot-lines perf:counter-lines perf:note-lines
+        perf:tool-line)
 
 (require "lib/perf/util" all:)
 
@@ -105,3 +109,43 @@
                                          (hash-ref a "hotspots" '()))
           "counters" (perf:counter-delta (hash-ref b "counters" (hash))
                                          (hash-ref a "counters" (hash))))))
+
+(define (perf:hotspot-lines profile)
+  (let loop ((xs (perf:hotspots profile)) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (let ((h (car xs)))
+          (loop (cdr xs)
+                (cons (string-append
+                        "hotspot " (hash-ref h "name" "?")
+                        " self-ms=" (number->string (hash-ref h "self-ms" 0))
+                        " calls=" (number->string (hash-ref h "calls" 0))
+                        " share=" (number->string (hash-ref h "share" 0))
+                        " alloc-pages=" (number->string (hash-ref h "alloc-pages" 0))
+                        " measure=" (hash-ref h "measure" "")
+                        " source=" (hash-ref h "source" "")
+                        " stack=" (perf:join (hash-ref h "stack" '()) ">"))
+                      acc))))))
+
+(define (perf:counter-lines profile)
+  (let ((c (perf:counters profile)))
+    (let loop ((ks (if (hash? c) (sort (hash-keys c) string<?) '())) (acc '()))
+      (if (null? ks)
+          (reverse acc)
+          (loop (cdr ks)
+                (cons (string-append "counter " (car ks) "="
+                                     (number->string (hash-ref c (car ks) 0)))
+                      acc))))))
+
+(define (perf:note-lines profile)
+  (let loop ((xs (if (hash? profile) (hash-ref profile "notes" '()) '())) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (loop (cdr xs) (cons (string-append "note " (car xs)) acc)))))
+
+(define (perf:tool-line profile)
+  (let ((t (if (hash? profile) (hash-ref profile "tools" (hash)) (hash))))
+    (string-append "tools perf=" (hash-ref t "perf" "?")
+                   " gprof=" (hash-ref t "gprof" "?")
+                   " gmon=" (hash-ref t "gmon" "?")
+                   " paranoid=" (hash-ref t "paranoid" "?"))))

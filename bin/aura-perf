@@ -15,8 +15,9 @@
 # runtime as (require "lib/perf/loop" all:); the repository root is put
 # on AURA_PATH for the run.
 #
-# Needs Aura v0.2.0 on PATH, or AURA_BIN pointing at it. No API key, no
-# virtualenv, no config file.
+# Needs Aura v0.2.0 on PATH, or AURA_BIN pointing at it. No virtualenv,
+# no config file. No API key either, until the model proposer is wired
+# with LLM_API_KEY, LLM_BASE_URL and LLM_MODEL (see Environment).
 set -eu
 
 # ── where is the repository? ─────────────────────────────────────────
@@ -45,7 +46,7 @@ aura-perf - an optimization runtime for agents
              no perf, no rebuild
   sysinfo    export this machine's inventory to out/sysinfo.txt and .json
   check      CPU, memory, disk, network and interrupt deltas (1 s sample)
-  test       run the value-level tests
+  test       run the value-level tests, then the round tests (python3)
   help       this text
   install    link this command into ~/.local/bin (or $PREFIX/bin)
 
@@ -54,6 +55,14 @@ Environment:
   AURA_PATH       where std/* lives (default: <aura prefix>/lib)
   AURA_PERF_CHECK_SEC   lengthen the check sample (default 1)
   PERF_BIN        a perf binary that can count task-clock (optional)
+  LLM_API_KEY      the model proposer's key. With LLM_BASE_URL and
+                   LLM_MODEL set too, autotune asks the model for
+                   candidates from the profile; the same gate judges
+                   them, and the model never keeps one. Unset, no call is
+                   made. The key is written to no report and no file.
+  LLM_BASE_URL     an OpenAI-compatible base, e.g. https://api.minimax.cn/v1
+  LLM_MODEL        the model id, e.g. MiniMax-M3.1-Flash
+  LLM_TIMEOUT      seconds per call (default 120)
 
 An external spec is a normal Aura file. It names the target program, the
 regions to time, the inputs, the oracle, the protected defines and the
@@ -183,6 +192,7 @@ case "$cmd" in
     # resolved Aura has no std/bus (the v0.2.0 CI pin).
     linger_rc=0
     attach_rc=0
+    llm_rc=0
     if command -v python3 >/dev/null 2>&1; then
       python3 tests/bus_linger_test.py
       linger_rc=$?
@@ -190,6 +200,10 @@ case "$cmd" in
       # Self-skips when the resolved Aura has no std/bus.
       python3 tests/bus_attach_test.py
       attach_rc=$?
+      # aura-perf#29: the model proposer in a real round, against a
+      # fake provider on localhost. No network, no key.
+      python3 tests/llm_proposer_test.py
+      llm_rc=$?
     fi
     set -e
     if [ "$rc" -ne 0 ]; then
@@ -211,6 +225,9 @@ case "$cmd" in
     fi
     if [ "$attach_rc" -ne 0 ]; then
       exit "$attach_rc"
+    fi
+    if [ "$llm_rc" -ne 0 ]; then
+      exit "$llm_rc"
     fi
     exit "$exit_rc"
     ;;

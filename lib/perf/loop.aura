@@ -5,7 +5,8 @@
 
 (export perf:optimize perf:autotune perf:job-record perf:site-context
         perf:null-body perf:null-id perf:cand-baseline perf:split-reference
-        perf:run-targets)
+        perf:run-targets perf:llm-context perf:llm-round-candidates
+        perf:rule-results)
 
 (require "std/evo-core" all:)
 (require "std/evo" all:)
@@ -398,6 +399,7 @@
                     (perf:audit-decision (perf:cand-target spec (car xs))
                                          "ROLLBACK" "missing-result" (hash "id" id)))
                   (hash-set! result "site" (perf:candidate-site (car xs)))
+                  (perf:tag-result! result (car xs))
                   (let* ((raw (perf:raw-of spec))
                          (cand-target (perf:cand-target spec (car xs)))
                          (site (perf:site-context spec result
@@ -705,46 +707,6 @@
               (string-append acc (if (string=? acc "") "" ",")
                              (number->string (car xs)))))))
 
-(define (perf:hotspot-lines profile)
-  (let loop ((xs (perf:hotspots profile)) (acc '()))
-    (if (null? xs)
-        (reverse acc)
-        (let ((h (car xs)))
-          (loop (cdr xs)
-                (cons (string-append
-                        "hotspot " (hash-ref h "name" "?")
-                        " self-ms=" (number->string (hash-ref h "self-ms" 0))
-                        " calls=" (number->string (hash-ref h "calls" 0))
-                        " share=" (number->string (hash-ref h "share" 0))
-                        " alloc-pages=" (number->string (hash-ref h "alloc-pages" 0))
-                        " measure=" (hash-ref h "measure" "")
-                        " source=" (hash-ref h "source" "")
-                        " stack=" (perf:join (hash-ref h "stack" '()) ">"))
-                      acc))))))
-
-(define (perf:counter-lines profile)
-  (let ((c (perf:counters profile)))
-    (let loop ((ks (if (hash? c) (sort (hash-keys c) string<?) '())) (acc '()))
-      (if (null? ks)
-          (reverse acc)
-          (loop (cdr ks)
-                (cons (string-append "counter " (car ks) "="
-                                     (number->string (hash-ref c (car ks) 0)))
-                      acc))))))
-
-(define (perf:note-lines profile)
-  (let loop ((xs (if (hash? profile) (hash-ref profile "notes" '()) '())) (acc '()))
-    (if (null? xs)
-        (reverse acc)
-        (loop (cdr xs) (cons (string-append "note " (car xs)) acc)))))
-
-(define (perf:tool-line profile)
-  (let ((t (if (hash? profile) (hash-ref profile "tools" (hash)) (hash))))
-    (string-append "tools perf=" (hash-ref t "perf" "?")
-                   " gprof=" (hash-ref t "gprof" "?")
-                   " gmon=" (hash-ref t "gmon" "?")
-                   " paranoid=" (hash-ref t "paranoid" "?"))))
-
 (define (perf:protected spec)
   (let ((intend (hash-ref spec "intend" (hash))))
     (if (hash? intend) (hash-ref intend "protected" '()) '())))
@@ -771,53 +733,183 @@
                (if (and (number? n) (> n 0)) n 1)))
          (k (let ((left (perf:budget-left spec buf)))
               (if (< left k0) left k0))))
-    (let loop ((xs (hash-ref split "refused" '())))
-      (if (null? xs)
-          #t
-          (begin
-            (perf:say buf (string-append "expert-refuse "
-                                         (hash-ref (car xs) "id" "?")
-                                         " site="
-                                         (hash-ref (car xs) "target"
-                                                   (hash-ref (car xs) "site" "?"))))
-            (perf:note buf "reject" (hash-ref (car xs) "id" "?") "protected")
-            (perf:bump buf "rollback")
-            (perf:audit-decision (hash-ref (car xs) "target" "protected")
-                                 "ROLLBACK" "protected-define"
-                                 (hash "id" (hash-ref (car xs) "id" "")
-                                       "class" (hash-ref spec "class" "")
-                                       "hot-node" (hash-ref spec "hot-node" "")))
-            (hash-set! buf "memory"
-                       (perf:neg-remember (hash-ref buf "memory" '())
-                                          (hash-ref spec "class" "")
-                                          (hash-ref spec "hot-node" "")
-                                          (hash-ref (car xs) "id" "")
-                                          "protected"))
-            (hash-set! buf "refused"
-                       (cons (hash-ref (car xs) "id" "")
-                             (hash-ref buf "refused" '())))
-            (hash-set! buf "results"
-                       (append (hash-ref buf "results" '())
-                               (list (hash "id" (hash-ref (car xs) "id" "")
-                                           "target" (hash-ref (car xs) "target"
-                                                              (hash-ref (car xs) "site" ""))
-                                           "status" "refused"
-                                           "checksum-ok" 1
-                                           "mismatches" 0
-                                           "heldout-ms" -1
-                                           "fidelity" "not-tried"
-                                           "live-unchanged" 1))))
-            (loop (cdr xs)))))
-    (let loop ((xs (hash-ref filtered "skipped" '())))
-      (if (null? xs)
-          #t
-          (begin
-            (perf:say buf (string-append "negative-skip "
-                                         (hash-ref (car xs) "id" "?")
-                                         " class=" (hash-ref spec "class" "")
-                                         " hot-node=" (hash-ref spec "hot-node" "")))
-            (loop (cdr xs)))))
+    (perf:refuse-each spec buf (hash-ref split "refused" '()))
+    (perf:say-skips buf spec (hash-ref filtered "skipped" '()))
     (perf:take (hash-ref filtered "ok" '()) k)))
+
+; A candidate the sealed intend protects is refused before any trial.
+; The refusal is a decision: the report counts it, and the audit and
+; the negative memory keep it.
+(define (perf:refuse-each spec buf refused)
+  (let loop ((xs (if (list? refused) refused '())))
+    (if (null? xs)
+        #t
+        (let* ((c (car xs))
+               (id (hash-ref c "id" "?")))
+          (perf:say buf (string-append "expert-refuse " id
+                                       " site=" (hash-ref c "target"
+                                                          (hash-ref c "site" "?"))))
+          (perf:note buf "reject" id "protected")
+          (perf:bump buf "rollback")
+          (perf:audit-decision (hash-ref c "target" "protected")
+                               "ROLLBACK" "protected-define"
+                               (hash "id" (hash-ref c "id" "")
+                                     "class" (hash-ref spec "class" "")
+                                     "hot-node" (hash-ref spec "hot-node" "")))
+          (hash-set! buf "memory"
+                     (perf:neg-remember (hash-ref buf "memory" '())
+                                        (hash-ref spec "class" "")
+                                        (hash-ref spec "hot-node" "")
+                                        (hash-ref c "id" "")
+                                        "protected"))
+          (hash-set! buf "refused"
+                     (cons (hash-ref c "id" "") (hash-ref buf "refused" '())))
+          (hash-set! buf "results"
+                     (append (hash-ref buf "results" '())
+                             (list (hash "id" (hash-ref c "id" "")
+                                         "target" (hash-ref c "target"
+                                                            (hash-ref c "site" ""))
+                                         "status" "refused"
+                                         "checksum-ok" 1
+                                         "mismatches" 0
+                                         "heldout-ms" -1
+                                         "fidelity" "not-tried"
+                                         "live-unchanged" 1))))
+          (loop (cdr xs))))))
+
+; An idea that failed on this hotspot before is skipped, not trialed.
+(define (perf:say-skips buf spec skipped)
+  (let loop ((xs (if (list? skipped) skipped '())))
+    (if (null? xs)
+        #t
+        (begin
+          (perf:say buf (string-append "negative-skip "
+                                       (hash-ref (car xs) "id" "?")
+                                       " class=" (hash-ref spec "class" "")
+                                       " hot-node=" (hash-ref spec "hot-node" "")))
+          (loop (cdr xs))))))
+
+; ── The model's candidates in a round ───────────────────────────
+
+; What the model is shown. The profile and the plan the report already
+; names, the gate's numbers, and the source of every define this run
+; may rebind. A protected define is in there too, marked: the model is
+; told not to rebind it, and the sealed boundary refuses it if it does.
+(define (perf:llm-named? rows name)
+  (let loop ((xs rows))
+    (if (null? xs)
+        #f
+        (if (and (hash? (car xs)) (string=? (hash-ref (car xs) "name" "") name))
+            #t
+            (loop (cdr xs))))))
+
+; One row per define that has a body: its name, its source, and whether
+; the intend protects it. A name already listed is skipped.
+(define (perf:llm-rows-for spec names taken)
+  (let ((protected (perf:protected spec)))
+    (let loop ((xs (if (list? names) names '())) (acc '()))
+      (if (null? xs)
+          (reverse acc)
+          (let* ((n (car xs))
+                 (body (if (and (string? n) (not (string=? n ""))
+                                (not (perf:llm-named? taken n))
+                                (not (perf:llm-named? acc n)))
+                          (perf:null-body spec n)
+                          "")))
+            (loop (cdr xs)
+                  (if (string=? body "")
+                      acc
+                      (cons (hash "name" n
+                                  "source" body
+                                  "protected" (if (perf:member? protected n) 1 0))
+                            acc))))))))
+
+; The defines the profiled code calls: every name on a hotspot's stack.
+(define (perf:llm-stack-names profile)
+  (let loop ((hs (perf:hotspots profile)) (acc '()))
+    (if (null? hs)
+        acc
+        (loop (cdr hs)
+              (append acc (let ((s (hash-ref (car hs) "stack" '())))
+                            (if (list? s) s '())))))))
+
+; The proposer's ctx: the evidence and the options of one run. The
+; profile and the plan the report already names, the gate's numbers, and
+; the source of every define this run may rebind. A protected define is
+; in there too, marked: the model is told not to rebind it, and the
+; sealed boundary refuses it if it does.
+(define (perf:llm-context spec buf plan profile child hottest refs)
+  (let* ((seal (perf:intend-seal spec))
+         (targets (perf:llm-rows-for spec (perf:run-targets spec) '()))
+         (context (perf:llm-rows-for
+                    spec
+                    (append (let ((p (hash-ref plan "prefix" #f)))
+                              (if (list? p) p '()))
+                            (perf:llm-stack-names profile))
+                    targets)))
+    (hash "llm" (perf:llm-options spec)
+          "label" (hash-ref spec "label" "sum-scan")
+          "plan" plan
+          "profile" profile
+          "hot-child" child
+          "hottest" hottest
+          "hotspots" (perf:hotspots profile)
+          "class" (hash-ref spec "class" "")
+          "hot-node" (hash-ref spec "hot-node" "")
+          "target" (hash-ref spec "target" "bench-kernel")
+          "targets" targets
+          "context" context
+          "catalog" (perf:catalog spec)
+          "memory" (hash-ref buf "memory" '())
+          "gate" (hash "pct" (hash-ref seal "effective-min-faster-pct" 20)
+                       "site-pct" (hash-ref seal "site-min-faster-pct" #f)
+                       "heldout-n" (hash-ref spec "heldout-n" 0)
+                       "raw-ms" (hash-ref refs "raw-ms" -1)
+                       "raw-samples" (hash-ref refs "raw-samples" '())
+                       "ref-ms" (hash-ref refs "gate-ms" -1)))))
+
+; The model's candidates that reach a trial. They pass the two filters
+; the rule path's candidates pass: the sealed protected boundary and
+; the negative memory of this hotspot. They come out of the proposer's
+; own allowance, never out of the intend's budget, so a model's trial
+; cannot take one away from the rule path.
+(define (perf:llm-round-candidates spec llm buf)
+  (let* ((cands (if (and (hash? llm) (eq? (hash-ref llm "ok" #f) #t))
+                    (let ((cs (hash-ref llm "candidates" '())))
+                      (if (list? cs) cs '()))
+                    '()))
+         (split (perf:split-protected cands (perf:protected spec)))
+         (filtered (perf:filter-negative (hash-ref split "ok" '())
+                                         (hash-ref buf "memory" '())
+                                         (hash-ref spec "class" "")
+                                         (hash-ref spec "hot-node" "")))
+         (k (if (hash? llm) (hash-ref llm "budget" 0) 0)))
+    (perf:refuse-each spec buf (hash-ref split "refused" '()))
+    (perf:say-skips buf spec (hash-ref filtered "skipped" '()))
+    (perf:take (hash-ref filtered "ok" '()) (if (number? k) k 0))))
+
+; A model's candidate says so on its result, with its thought: the
+; evidence keeps the provenance.
+(define (perf:tag-result! result cand)
+  (let loop ((ks (list "proposer" "thought")))
+    (if (null? ks)
+        #t
+        (let ((v (hash-ref cand (car ks) #f)))
+          (if (string? v) (hash-set! result (car ks) v) #f)
+          (loop (cdr ks))))))
+
+; The results the rule path owns. A model's candidate that could not be
+; applied, timed or judged is that candidate's ROLLBACK, not a reason
+; for the rule path to stop.
+(define (perf:rule-results results)
+  (let loop ((xs (if (list? results) results '())) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (loop (cdr xs)
+              (if (and (hash? (car xs))
+                       (string=? (hash-ref (car xs) "proposer" "") "llm"))
+                  acc
+                  (cons (car xs) acc))))))
 
 (define (perf:choose-winner spec results best plan child hottest out buf baseline pct)
   (if best
@@ -925,6 +1017,8 @@
           (perf:bus-finish (hash-ref buf "bus" #f) buf before-ms after-ms)
           (perf:confirm spec buf profile)
           (perf:say buf (string-append "budget-used " (number->string (hash-ref buf "budget" 0))))
+          (perf:say buf (string-append "llm-budget-used "
+                                       (number->string (hash-ref buf "llm-budget" 0))))
           (perf:say-intend spec buf before-ms after-ms)
           (perf:say buf (string-append "profile-elapsed-before-ms "
                                        (number->string (hash-ref delta "elapsed-before-ms" 0))
@@ -1393,7 +1487,7 @@
   (let* ((memory-path (perf:memory-path spec))
          (buf (hash "lines" '() "brief" '()
                     "memory" (perf:memory-load memory-path) "results" '()
-                    "keep" 0 "rollback" 0 "after-ms" -1 "budget" 0))
+                    "keep" 0 "rollback" 0 "after-ms" -1 "budget" 0 "llm-budget" 0))
         (out (hash-ref spec "out-dir" "out")))
     (perf:ensure-dirs out)
     (hash-set! spec "min-speedup-pct"
@@ -1408,13 +1502,11 @@
                (hottest (perf:hottest profile))
                (seal (perf:intend-seal spec))
                (plan (perf:opening-plan spec buf profile seal))
-               (ctx (hash "plan" plan
-                          "profile" profile
-                          "hot-child" child
-                          "hottest" hottest
-                          "hotspots" (perf:hotspots profile)))
-               (llm (perf:llm-propose ctx))
                (refs (perf:measure-references spec buf out))
+               ; The model proposes from the profile and from the
+               ; baseline the gate compares against, before any trial.
+               (llm (perf:llm-propose
+                      (perf:llm-context spec buf plan profile child hottest refs)))
                (baseline (hash-ref refs "gate-ms" -1))
                (pct (hash-ref spec "min-speedup-pct" 20)))
           (hash-set! buf "before-ms" (hash-ref refs "raw-ms" -1))
@@ -1450,7 +1542,7 @@
                                        (perf:join (map (lambda (s) (string-append " " s))
                                                        (perf:order-of plan))
                                                   "")))
-          (perf:say buf (string-append "llm-proposer " (hash-ref llm "error" "?")))
+          (perf:say-each buf (perf:llm-lines llm))
           (perf:say buf (string-append "process-state region="
                                        (hash-ref profile "region-measure" "in-process")
                                        " held-out=trial-child comparable=0"))
@@ -1462,13 +1554,28 @@
                                                (number->string (hash-ref live "task-clock" -1)))))
                 #f))
           (let* ((cands (perf:round-candidates spec plan buf))
+                 (llm-cands (perf:llm-round-candidates spec llm buf))
+                 (all (append cands llm-cands))
                  (results (begin
-                            (perf:say buf (string-append "round 1 candidates " (perf:ids cands)))
+                            (perf:say buf (string-append "round 1 candidates " (perf:ids all)))
                             (hash-set! buf "budget"
                                        (+ (hash-ref buf "budget" 0) (length cands)))
-                            (perf:trial-round spec cands out buf baseline)))
+                            (hash-set! buf "llm-budget" (length llm-cands))
+                            ; The model's candidates join the catalog, so
+                            ; the round measures the null of each define
+                            ; they rebind, and a winner's entry is found
+                            ; like any other's. Their ids are in no
+                            ; strategy order: perf:rule-propose never
+                            ; proposes them, and the next round's plan
+                            ; does not carry them.
+                            (if (pair? llm-cands)
+                                (hash-set! spec "catalog"
+                                           (append (perf:catalog spec) llm-cands))
+                                #f)
+                            (perf:trial-round spec all out buf baseline)))
                  (best (perf:best-passing spec results baseline pct (perf:raw-of spec))))
-            (let ((winner (perf:choose-winner spec results best plan child hottest out buf baseline pct)))
+            (let ((winner (perf:choose-winner spec (perf:rule-results results) best
+                                              plan child hottest out buf baseline pct)))
               (if (not winner)
                   (perf:say buf "kernel unchanged")
                   (let ((entry (perf:entry (perf:catalog spec) (hash-ref winner "id" ""))))

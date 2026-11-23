@@ -31,6 +31,7 @@ spec 是目标项目和运行时之间的那份约定，运行时按它工作：
 | `null-genome-fn` | 别的 define 的 null 源码：`(target -> 源码)` 的过程 | 无 |
 | `label` | 报告第一行的名字 | `sum-scan` |
 | `worker` | 跑一个候选的子进程脚本 | `examples/sum-scan/worker.aura` |
+| `llm` | 模型提议者的选项：`budget`（一次运行 trial 几条模型候选）、`max-tokens`、`timeout`（秒）、`chat`。密钥、端点和模型来自环境（`LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`） | `budget` 2、`max-tokens` 8192、`timeout` 120、std/llm 的 `llm:chat` |
 
 ### 1. 证据是可查询的值，策略直接调用
 
@@ -77,7 +78,7 @@ Agent 不接收报告。一次采集得到一个 profile 值，里面有 `cct`�
 | `redundant-pass` | `bench-kernel` | 正确但 task-clock 不降 |
 | `linear-scan` | `bench-kernel` | task-clock 下降 |
 
-LLM proposer 仍然只是插口。它如果要参与，必须填进同一张候选 hash，不能只返回一段建议。
+LLM proposer 已经接上模型（13）：它的候选就是上面这张表里的一条 catalog 条目，由同一道门判，不是一段建议。
 
 度量：一次运行里至少一条假设被拒绝、一条 checksum 失败、一条无加速、一条 KEEP，且 KEEP 后的 CCT 差分方向和 `expect` 一致。
 
@@ -179,6 +180,19 @@ Checksum 失败的候选不做 held-out。正确的候选先在 `screen-n` 上�
 
 KEEP 时若 `AURA_SANDBOX=off`，读 compile 组的 `cascade_full_count` 和 `module_dirty_recompiles`。示例里 `world-rebuilt=0`。这是证据，不是另一道会把正确加速打回去的门。
 
+### 13. 模型提议者只提议
+
+`perf:llm-propose` 经 `std/llm` 的 `llm:chat` 问一次模型（aura-perf#29）。接线（三个环境变量）和调用预算写在 README 的「模型提议者」里。这里是边界：
+
+- **证据是文本。** 报告自己打印的 `hotspot` / `counter` 行、门要比的数、可 rebind 的 define 的源码、catalog 和这个热点上的负例。不送图，不塞 data URL，也不交 perf script 原文。
+- **回答只变成候选 hash。** `id`、`target`、`genome`、`thought`、`proposer`。回答里的判定字段不复制，所以到不了门。
+- **和规则候选走同一条路。** 封了印的 protected 边界、负例记忆、trial 子进程、checksum、held-out、地板、总线上的约束。模型没有 KEEP 权。
+- **是加法。** 模型候选出自己的 allowance（spec 的 `llm` hash `budget`，缺省 2），不动 intend 的预算；一条模型候选的失败不算规则路径的 trial 基础设施故障，第二轮照常。
+- **进 trial 之前的检查。** target 是这一轮可 rebind 的 define；`genome` 恰好是一个同名同参数的 `(define …)`，没有第二个顶层 form；不点名有副作用的原语（`shell`、`write-file`、`set!`、`eval`……），带命名空间的名字只能是证据里出现过的 define；和 catalog 里某条只差排版的是重复。这是卫生检查，不是边界：边界仍然是 checksum 和 held-out。
+- **密钥不落盘。** 传输层的错误文本和模型的句子进报告之前，密钥被换成 `[redacted]`。
+
+度量：报告的 `llm-proposer`、`llm-candidate`、`llm-rejected`、`llm-budget-used` 行。测试：`tests/llm_propose_test.aura`（提议者本身，chat 是传入的过程，不碰网络）、`tests/llm_round_test.aura`（候选怎么进一轮）、`tests/llm_proposer_test.py`（真实的一轮，对面是本机的假 provider）。
+
 ## 部分
 
 ### 观察、试探、证明、提交是同一语言
@@ -205,5 +219,6 @@ Trial 在子进程的 `evo:trial` 里做，live 指纹不变；过门才在父�
 1. 已做：目标程序的测量 → CCT → `perf:mine` → 策略基因 → protected 拒绝 → 并行 trial（每条 worldline 一棵 CCT）→ KEEP → 负例按 class + hot-node → intend 门。
 2. 已做：`aura-perf sysinfo` 和 `aura-perf check` 把机器库存收成 Aura 值。缺工具就写 skipped。
 3. 下一步：语义火焰，然后才是 kernel 下沉、c2c 采样和外部 trace。
+4. 已做：模型提议者经 `std/llm` 接上，候选是 catalog 条目，走同一道门，没有 KEEP 权（13）。
 
 不要做的：HTML/SVG 火焰图、perf script 原文进模型、给人看的仪表盘或审批页。

@@ -1,0 +1,143 @@
+; tests/llm_round_test.aura — aura-perf#29: a model's candidates in a
+; round.
+;
+; They pass the two filters the rule path's candidates pass (the sealed
+; protected boundary and the negative memory of the hotspot), they come
+; out of their own allowance, and a model's result is never one of the
+; rule path's. The expert-refuse and negative-skip lines the filters
+; say are part of this output.
+
+(require "lib/perf/loop" all:)
+
+(define spec
+  (hash "target" "bench-kernel"
+        "seed-path" "examples/sum-scan/seed.aura"
+        "intend" (hash "protected" (list "k-ref" "k-length"))
+        "catalog"
+        (list (hash "id" "linear-scan" "target" "bench-kernel"
+                    "genome" "(define (bench-kernel xs) (apply + xs))"
+                    "thought" "one spine walk")
+              (hash "id" "specialize-k-ref" "target" "k-ref"
+                    "genome" "(define (k-ref xs i) (car xs))"
+                    "thought" "wrong site"))))
+(hash-set! spec "class" "flat-hot")
+(hash-set! spec "hot-node" "k-ref")
+
+(define (buf-with memory)
+  (hash "lines" '() "brief" '() "memory" memory "results" '()
+        "keep" 0 "rollback" 0 "refused" '()))
+
+; A model's candidate as perf:llm-propose hands it over.
+(define (cand id target)
+  (hash "id" id "target" target "genome" (string-append "(define (" target " xs) xs)")
+        "thought" "" "proposer" "llm"))
+
+(define (ids cands)
+  (map (lambda (c) (hash-ref c "id" "?")) cands))
+
+(define spine (cand "llm-spine-11111111" "bench-kernel"))
+(define leaf (cand "llm-leaf-22222222" "k-ref"))
+(define sum (cand "llm-sum-33333333" "bench-kernel"))
+
+; ── 1. The filters ───────────────────────────────────────────────
+(define buf1
+  (buf-with (list (hash "class" "flat-hot" "hot-node" "k-ref"
+                        "idea" "llm-sum-33333333" "reason" "no-speedup"))))
+(define llm1 (hash "ok" #t "candidates" (list spine leaf sum) "budget" 2))
+(define got1 (perf:llm-round-candidates spec llm1 buf1))
+(define refused1 (car (hash-ref buf1 "results" '())))
+
+; ── 2. The allowance ─────────────────────────────────────────────
+(define buf2 (buf-with '()))
+(define llm2 (hash "ok" #t "candidates" (list spine sum) "budget" 1))
+(define got2 (perf:llm-round-candidates spec llm2 buf2))
+
+; ── 3. No provider, no candidate, nothing said ───────────────────
+(define buf3 (buf-with '()))
+(define got3 (perf:llm-round-candidates spec
+                                        (hash "ok" #f "error" "no-provider" "candidates" '())
+                                        buf3))
+
+; ── 4. What the model is shown of this run ───────────────────────
+(define profile
+  (hash "hotspots"
+        (list (hash "name" "bench-kernel" "self-ms" 1 "calls" 1 "share" 1
+                    "stack" (list "bench-kernel"))
+              (hash "name" "k-ref" "self-ms" 2 "calls" 9 "share" 2
+                    "stack" (list "bench-kernel" "k-ref"))
+              (hash "name" "k-length" "self-ms" 0 "calls" 1 "share" 0
+                    "stack" (list "bench-kernel" "k-length")))))
+(define ctx
+  (perf:llm-context spec (buf-with '())
+                    (hash "class" "flat-hot" "hotspot" "k-ref" "site" "bench-kernel"
+                          "prefix" (list "bench-kernel" "k-ref"))
+                    profile "k-ref" "bench-kernel"
+                    (hash "raw-ms" 354 "raw-samples" (list 344 351) "gate-ms" 352)))
+(define targets (hash-ref ctx "targets" '()))
+(define context (hash-ref ctx "context" '()))
+(define seed-bench
+  (perf:extract-define (perf:read-text "examples/sum-scan/seed.aura") "bench-kernel"))
+
+(define (rows rs)
+  (map (lambda (r) (list (hash-ref r "name" "?") (hash-ref r "protected" 0))) rs))
+
+(define (row-of rs name)
+  (let loop ((xs rs))
+    (if (null? xs)
+        (hash)
+        (if (string=? (hash-ref (car xs) "name" "") name)
+            (car xs)
+            (loop (cdr xs))))))
+
+; ── 5. The options: the spec's hash over the environment ─────────
+(define opts (perf:llm-options
+               (hash "llm" (hash "key" "k" "base-url" "u" "model" "m"
+                                 "budget" 3 "max-tokens" 99 "timeout" 4))))
+
+; ── 6. The rule path's results ───────────────────────────────────
+(define rule-results
+  (perf:rule-results (list (hash "id" "linear-scan" "status" "ok")
+                           (hash "id" "llm-spine-11111111" "status" "error"
+                                 "proposer" "llm")
+                           (hash "id" "wrong-scale" "status" "ok"))))
+
+(display (list
+          ; 1. The candidate for the target is trialed.
+          (ids got1)
+          ; The one for a protected define is refused the way a rule
+          ; candidate is: counted, briefed, kept in the memory.
+          (hash-ref buf1 "rollback" 0)
+          (hash-ref buf1 "refused" '())
+          (list (hash-ref refused1 "id" "?") (hash-ref refused1 "status" "?")
+                (hash-ref refused1 "target" "?"))
+          (car (hash-ref buf1 "brief" '()))
+          (length (hash-ref buf1 "memory" '()))
+          ; The idea that failed on this hotspot before is not trialed.
+          (perf:neg-blocked? (hash-ref buf1 "memory" '()) "flat-hot" "k-ref"
+                             "llm-sum-33333333")
+          ; The filters leave the catalog alone.
+          (length (hash-ref spec "catalog" '()))
+          ; 2. No more than the allowance, first come.
+          (ids got2)
+          (hash-ref buf2 "rollback" 0)
+          ; 3.
+          got3
+          (length (hash-ref buf3 "lines" '()))
+          ; 4. Every define the run may rebind, with its body from the
+          ;    seed; the protected one is marked, not hidden.
+          (rows targets)
+          (string=? (hash-ref (row-of targets "bench-kernel") "source" "") seed-bench)
+          ; The defines the hot stacks name, once each, outside the targets.
+          (rows context)
+          (hash-ref ctx "target" "?")
+          (hash-ref ctx "label" "?")
+          (hash-ref ctx "hot-node" "?")
+          (length (hash-ref ctx "catalog" '()))
+          (hash-ref (hash-ref ctx "gate" (hash)) "pct" "?")
+          (hash-ref (hash-ref ctx "gate" (hash)) "ref-ms" "?")
+          ; 5. What the spec names is what the run gets.
+          (map (lambda (k) (hash-ref opts k "?"))
+               (list "key" "base-url" "model" "budget" "max-tokens" "timeout"))
+          ; 6.
+          (ids rule-results)))
+(newline)

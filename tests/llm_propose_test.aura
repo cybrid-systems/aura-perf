@@ -1,0 +1,251 @@
+; tests/llm_propose_test.aura — aura-perf#29: the model proposer.
+;
+; perf:llm-propose reads no environment and reaches no network of its
+; own: the chat procedure is an option, so these cases run anywhere.
+; They pin what a model's reply may become: a catalog entry that the
+; gate judges like any other, and nothing else.
+
+(require "lib/perf/propose" all:)
+(require "lib/perf/util" all:)
+
+(define calls 0)
+(define seen-extra (hash))
+(define seen-timeout 0)
+(define seen-user "")
+(define seen-system "")
+
+(define (chat-with reply)
+  (lambda (system user extra timeout)
+    (set! calls (+ calls 1))
+    (set! seen-system system)
+    (set! seen-user user)
+    (set! seen-extra extra)
+    (set! seen-timeout timeout)
+    reply))
+
+(define (reply-of candidates)
+  (hash "ok" #t "error" "" "content" (json-encode (hash "candidates" candidates))))
+
+(define (fenced text)
+  (string-append "Here is my proposal:\n```json\n" text "\n```\n"))
+
+; A reply that is nothing but a fence.
+(define (fence-opened text)
+  (string-append "```json\n" text "\n```\n"))
+
+(define key "sk-test-key-1234567890")
+(define endpoint "https://example.invalid/v1")
+(define model "test-model")
+
+(define original
+  "(define (bench-kernel xs)\n  (let ((n (k-length xs)))\n    (let loop ((i 0) (acc 0))\n      (if (>= i n)\n          acc\n          (loop (+ i 1) (+ acc (k-ref xs i)))))))")
+(define spine
+  "(define (bench-kernel xs)\n  (let loop ((ys xs) (acc 0))\n    (if (null? ys)\n        acc\n        (loop (cdr ys) (+ acc (car ys))))))")
+
+; A rewrite the catalog does not have.
+(define fast "(define (bench-kernel xs)\n  (apply + xs))")
+
+(define targets
+  (list (hash "name" "bench-kernel" "source" original "protected" 0)
+        (hash "name" "k-ref" "source" "(define (k-ref xs i)\n  (list-ref xs i))"
+              "protected" 1)))
+
+; The evidence of a sum-scan round, as perf:llm-context would shape it.
+(define (evidence opts)
+  (hash "llm" opts
+        "label" "sum-scan"
+        "plan" (hash "class" "flat-hot" "hotspot" "k-ref" "site" "bench-kernel"
+                     "prefix" (list "bench-kernel" "k-ref"))
+        "profile"
+        (hash "tools" (hash "perf" "missing" "gprof" "missing" "gmon" "no-gmon"
+                            "paranoid" "3")
+              "hotspots"
+              (list (hash "name" "bench-kernel" "self-ms" 111 "calls" 1 "share" 50
+                          "stack" (list "bench-kernel"))
+                    (hash "name" "k-ref" "self-ms" 109 "calls" 4000 "share" 49
+                          "stack" (list "bench-kernel" "k-ref")))
+              "counters" (hash "proc.utime-ticks" 1))
+        "hot-child" "k-ref"
+        "hottest" "bench-kernel"
+        "class" "flat-hot"
+        "hot-node" "k-ref"
+        "target" "bench-kernel"
+        "targets" targets
+        "context"
+        (list (hash "name" "k-length" "source" "(define (k-length xs)\n  (length xs))"
+                    "protected" 1))
+        "catalog"
+        (list (hash "id" "linear-scan" "target" "bench-kernel" "genome" spine
+                    "thought" "one spine walk")
+              (hash "id" "specialize-k-ref" "target" "k-ref"
+                    "genome" "(define (k-ref xs i) (car xs))"
+                    "thought" "wrong site"))
+        "memory"
+        (list (hash "class" "flat-hot" "hot-node" "k-ref" "idea" "wrong-scale"
+                    "reason" "checksum")
+              (hash "class" "flat-hot" "hot-node" "other-node" "idea" "elsewhere"
+                    "reason" "no-speedup"))
+        "gate" (hash "pct" 20 "site-pct" #f "heldout-n" 6000 "raw-ms" 354
+                     "raw-samples" (list 344 351 364 354 361) "ref-ms" 352)))
+
+; A transport's successful reply: the content is the model's text.
+(define (replying content)
+  (hash "ok" #t "error" "" "content" content))
+
+; A wired provider: the key, the endpoint, the model, and what the
+; call is allowed to spend. "chat" is the transport.
+(define (options chat . rest)
+  (let ((o (hash "chat" chat "key" key "base-url" endpoint "model" model)))
+    (let loop ((xs rest))
+      (if (null? xs)
+          o
+          (begin
+            (hash-set! o (car xs) (car (cdr xs)))
+            (loop (cdr (cdr xs))))))))
+
+(define (has? text part)
+  (if (>= (string-index text part 0) 0) 1 0))
+
+(define (key? h k)
+  (if (member k (hash-keys h)) 1 0))
+
+(define (count r)
+  (list (if (eq? (hash-ref r "ok" #f) #t) "ok" (hash-ref r "error" "?"))
+        (length (hash-ref r "candidates" '()))
+        (length (hash-ref r "rejected" '()))))
+
+(define (reasons r)
+  (let loop ((xs (hash-ref r "rejected" '())) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (loop (cdr xs) (cons (hash-ref (car xs) "reason" "?") acc)))))
+
+(define (lines-with lines part)
+  (let loop ((xs lines) (found 0))
+    (if (null? xs)
+        found
+        (loop (cdr xs) (+ found (has? (car xs) part))))))
+
+; ── 1. No options is no provider, and no call ─────────────────────
+(define none (perf:llm-propose (evidence #f)))
+(define none-at (list (count none) calls))
+
+; ── 2. A key with no endpoint is not sent anywhere ────────────────
+(define key-only (perf:llm-propose (evidence (hash "key" key))))
+(define key-only-at (list (count key-only) calls))
+
+; ── 3. A candidate is four fields, whatever else the reply says ───
+(define good
+  (perf:llm-propose
+    (evidence (options (chat-with
+                         (replying
+                           (fenced
+                             (json-encode
+                               (hash "candidates"
+                                     (list (hash "id" "Spine Walk!" "target" "bench-kernel"
+                                                 "thought" "one pass over the list\ninstead of n index walks"
+                                                 "genome" (string-append "```\n" fast "\n```")
+                                                 "keep" #t "decision" "KEEP" "status" "gate-pass"
+                                                 "heldout-ms" 1 "checksum-ok" 1)))))))))))
+(define one (car (hash-ref good "candidates" '())))
+(define good-at (list (count good)
+                      (string=? (hash-ref one "id" "")
+                                (string-append "llm-Spine-Walk-" (perf:text-tag fast)))
+                      (string=? (hash-ref one "genome" "?") fast)
+                      (hash-ref one "target" "?")
+                      (hash-ref one "thought" "?")
+                      (hash-ref one "proposer" "?")
+                      ; the reply's verdict did not make it into the candidate
+                      (key? one "keep")
+                      (key? one "decision")
+                      (key? one "status")
+                      (key? one "heldout-ms")
+                      (key? one "checksum-ok")
+                      ; the call
+                      (hash-ref seen-extra "reasoning_effort" "?")
+                      (hash-ref seen-extra "max_tokens" "?")
+                      (key? seen-extra "model")
+                      seen-timeout
+                      ; the evidence: the profile as text, the source, what was tried
+                      (has? seen-user "hotspot k-ref self-ms=109 calls=4000")
+                      (has? seen-user "stack=bench-kernel>k-ref")
+                      (has? seen-user "gate: a candidate is kept only when")
+                      (has? seen-user original)
+                      (has? seen-user "k-ref [protected]:")
+                      (has? seen-user "(define (k-length xs)")
+                      (has? seen-user "- linear-scan, rebinds bench-kernel: one spine walk")
+                      (has? seen-user "- wrong-scale: checksum")
+                      ; a failure on another hotspot is not this one's
+                      (has? seen-user "elsewhere")
+                      ; text only
+                      (has? seen-user "image_url")
+                      (has? seen-user "data:")
+                      (has? seen-user key)
+                      (has? seen-system "You do not\n")
+                      (has? seen-system "Return at most 2 candidates")))
+
+; ── 4. What is not a candidate, and why ───────────────────────────
+(define bad
+  (perf:llm-propose
+    (evidence (options (chat-with (reply-of (list (hash "target" "bench-kernel" "genome" "(define (nope xs) xs)")
+                                                  (hash "target" "no-such-define" "genome" "(define (no-such-define xs) xs)")
+                                                  (hash "target" "bench-kernel"
+                                                        "genome" "(define (helper x) x) (define (bench-kernel xs) xs)")
+                                                  (hash "target" "bench-kernel"
+                                                        "genome" "(define (bench-kernel xs n) (car xs))")
+                                                  (hash "target" "bench-kernel"
+                                                        "genome" "(define (bench-kernel xs) (shell \"ls\"))")
+                                                  (hash "target" "bench-kernel"
+                                                        "genome" "(define (bench-kernel xs) (orch:spawn (lambda () xs)))")
+                                                  (hash "target" "bench-kernel"
+                                                        "genome" "; the catalog's linear-scan in another layout\n(define (bench-kernel xs)\n(let loop ((ys xs) (acc 0))\n(if (null? ys)\nacc\n(loop (cdr ys) (+ acc (car ys))))))")
+                                                  ; the words are in a string literal: that is text, not a call
+                                                  (hash "target" "bench-kernel"
+                                                        "genome" "(define (bench-kernel xs) (string-append \"shell read-file\" (symbol->string 'x)))"))))))))
+(define bad-at (list (count bad) (reasons bad)))
+
+; ── 5. A transport's error is reported, without the key ───────────
+(define leaked (perf:llm-propose (evidence (options (chat-with (hash "ok" #f
+                                                                    "error" (string-append "http-post: rejected " key)
+                                                                    "content" ""))))))
+(define leaked-lines (perf:llm-lines leaked))
+(define leaked-at (list (hash-ref leaked "error" "?")
+                         (hash-ref leaked "detail" "?")
+                         (lines-with leaked-lines key)
+                         leaked-lines))
+
+; ── 6. A reply that is not the contract ───────────────────────────
+(define wrong-shape (perf:llm-propose (evidence (options (chat-with (reply-of "soon"))))))
+(define not-json (perf:llm-propose (evidence (options (chat-with (hash "ok" #t "error" "" "content" "I have no idea."))))))
+(define empty (perf:llm-propose (evidence (options (chat-with (reply-of '()))))))
+(define threw (perf:llm-propose (evidence (options (lambda (a b c d) (error "boom"))))))
+(define array (perf:llm-propose (evidence (options (chat-with (replying (fence-opened (json-encode (list (hash "id" "spine" "target" "bench-kernel" "genome" fast))))))))))
+(define reply-at (list (count wrong-shape) (count not-json) (count empty) (count threw)
+                       (count array)))
+
+; ── 7. The allowance and the call's budget are the run's ───────────
+(define two (perf:llm-propose (evidence (options (chat-with (reply-of (list (hash "id" "spine" "target" "bench-kernel" "genome" fast)
+                                                                          (hash "id" "sum" "target" "bench-kernel" "genome" "(define (bench-kernel xs) (apply + xs))"))))
+                                            "budget" 1 "max-tokens" 2048 "timeout" 7))))
+(define off (perf:llm-propose (evidence (options (chat-with (reply-of (list (hash "id" "spine" "target" "bench-kernel" "genome" fast))))
+                                             "budget" 0))))
+(define no-site-e (evidence (options (chat-with (reply-of '())))))
+(hash-set! no-site-e "targets" '())
+(define no-site (perf:llm-propose no-site-e))
+(define budget-at (list (count two) (reasons two)
+                        (hash-ref seen-extra "max_tokens" "?")
+                        seen-timeout
+                        (has? seen-system "Return at most 1 candidates")
+                        (count off)
+                        (count no-site)
+                        ; every call above went to the option's own procedure
+                        calls))
+
+(display (list none-at
+               key-only-at
+               good-at
+               bad-at
+               leaked-at
+               reply-at
+               budget-at))
+(newline)

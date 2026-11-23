@@ -3,23 +3,27 @@ on: [push, pull_request]
 jobs:
   smoke:
     runs-on: ubuntu-latest
+    # #5397: the bus contract tests need the current Aura stdlib
+    # (std/bus and bus:defines), which v0.2.0 does not ship. Build the
+    # core checkout in the same toolchain image the joint nightly uses.
+    container:
+      image: ghcr.io/cybrid-systems/dev:v1.0.7
     steps:
       - uses: actions/checkout@v4
-      - name: Install Aura 0.2.0
+      - name: Build Aura (bus + stdlib)
         run: |
-          curl -fsSL -o /tmp/aura.tgz \
-            https://github.com/cybrid-systems/aura/releases/download/v0.2.0/aura-0.2.0-linux-x86_64.tar.gz
-          mkdir -p /opt/aura
-          tar -xzf /tmp/aura.tgz -C /opt/aura --strip-components=1
-          echo /opt/aura/bin >> "$GITHUB_PATH"
+          git clone --depth 1 https://github.com/cybrid-systems/aura.git aura-src
+          cd aura-src
+          python3 build.py build --target aura
+          echo "AURA_BIN=$GITHUB_WORKSPACE/aura-src/build/aura" >> "$GITHUB_ENV"
       - name: Install perf
         run: |
-          sudo apt-get update
-          sudo apt-get install -y linux-tools-generic linux-tools-common
+          apt-get update
+          apt-get install -y linux-tools-generic linux-tools-common
           # Software events are enough when the host PMU is missing.
           # Lower paranoid when the runner allows it; otherwise the example
           # records why perf did not select a hotspot.
-          sudo sysctl -w kernel.perf_event_paranoid=1 || true
+          sysctl -w kernel.perf_event_paranoid=1 || true
           echo "perf candidates:"
           find /usr/lib/linux-tools /usr/bin /usr/libexec -name perf -type f 2>/dev/null || true
           if bin="$(sh scripts/find-perf.sh)"; then

@@ -157,14 +157,11 @@ SPEC = """; The sum-scan target as an external spec, for the round tests
 (exit (if (and (hash? result) (= (hash-ref result "intend-met" 0) 1)) 0 1))
 """
 
-# A correct rewrite the catalog does not have: the spine walk in
-# another spelling. (apply + xs) is the sum too, and it runs in under a
-# millisecond here: a 0 ms reading fails perf:speedup-ok?, so the gate
-# rolls back the fastest rewrite of all as no-speedup.
-FAST = ("(define (bench-kernel xs)\n"
-        "  (let sum ((ys xs) (acc 0))\n"
-        "    (cond ((null? ys) acc)\n"
-        "          (else (sum (cdr ys) (+ acc (car ys)))))))")
+# A correct rewrite the catalog does not have: (apply + xs) is the sum.
+# On a fast machine it runs in under a millisecond and the held-out
+# median reads 0 ms, which the gate takes as the largest speedup there
+# is.
+FAST = "(define (bench-kernel xs)\n  (apply + xs))"
 # A rewrite with the right shape and the wrong result. The catalog's
 # wrong-scale doubles each element; this one triples, so the proposer
 # does not know it as a duplicate and the gate has to judge it.
@@ -244,8 +241,8 @@ def main():
     # ── 1. a faster, correct rewrite ──────────────────────────────
     tmp = Path(tempfile.mkdtemp(prefix="aura-perf-llm-keep-"))
     write_project(tmp)
-    ANSWER[0] = candidates({"id": "Spine walk", "target": "bench-kernel",
-                            "thought": "one pass over the list\nunder another name",
+    ANSWER[0] = candidates({"id": "Sum via apply", "target": "bench-kernel",
+                            "thought": "the library's own fold over the list\nin one call",
                             "genome": "```\n" + FAST + "\n```"})
     run = run_round(tmp, base)
     report = (tmp / "out" / "report.txt").read_text() if (tmp / "out" / "report.txt").is_file() else ""
@@ -283,7 +280,7 @@ def main():
     check.that("keep: the candidate is named", len(cand) == 1, str(cand))
     cid = cand[0].split()[1] if cand else "llm-?"
     check.that("keep: the genome's fences were not part of it",
-               "target=bench-kernel" in cand[0] and "under another name" in cand[0]
+               "target=bench-kernel" in cand[0] and "in one call" in cand[0]
                and "\n" not in cand[0], cand[0] if cand else "")
     check.that("keep: the candidate joined the rule path's round",
                f"round 1 candidates redundant-pass,{cid}" in lines,
@@ -299,7 +296,7 @@ def main():
     evidence = json.loads((tmp / "out" / "evidence.json").read_text())
     llm = [c for c in evidence["candidates"] if c.get("proposer") == "llm"]
     check.that("keep: the evidence keeps the provenance",
-               len(llm) == 1 and llm[0]["id"] == cid and llm[0].get("thought") == "one pass over the list under another name",
+               len(llm) == 1 and llm[0]["id"] == cid and llm[0].get("thought") == "the library's own fold over the list in one call",
                str(llm))
     check.that("keep: the evidence carries no key", not key_leaks(tmp, run), str(key_leaks(tmp, run)))
     shutil.rmtree(tmp, ignore_errors=True)

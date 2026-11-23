@@ -7,9 +7,14 @@
         perf:result-reject perf:effective-pct perf:reason perf:site-ok?
         perf:judged?)
 
+; A candidate median of 0 ms is a reading, not a missing one: the
+; kernel ran in less than the timer's resolution (a rewrite that hands
+; the list to a native fold does). Against a reference above 0 it is
+; the largest speedup there is. A reference of 0 has nothing to beat,
+; and -1 is no measurement at all.
 (define (perf:speedup-ok? baseline-ms cand-ms pct)
   (and (number? baseline-ms) (> baseline-ms 0)
-       (number? cand-ms) (> cand-ms 0)
+       (number? cand-ms) (>= cand-ms 0)
        (number? pct) (>= pct 0) (< pct 100)
        (<= (* cand-ms 100) (* baseline-ms (- 100 pct)))))
 

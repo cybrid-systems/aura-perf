@@ -24,6 +24,8 @@ aura-perf
 
 `aura-perf` 就是 `aura-perf autotune`。报告在 `out/report.txt`，第一行是结论，例如 `verdict intend-met=1 KEEP=3 ROLLBACK=6 speedup-x=81.25 (325ms->4ms n=5 spread=120->0ms)`。`speedup-x` 是两次 held-out 中位的比值。括号里是这两次中位（毫秒）、样本数 `n`，以及样本极差（最大减最小，`基线->优化后`）。同一台机器上基线中位会漂，极差写在结论行上。后面每个拒绝一行原因（`checksum`、`protected`、`screen-pruned`、`no-speedup`、`intend-bypass`、`misclassify` 等）。
 
+优化后的中位是 0 ms（比计时器的分辨率还快）时 `speedup-x` 写 `na`，`intend-met` 仍然是 1。
+
 退出码跟结论一致。`autotune` 在 `intend-met=1` 时是 0，否则非 0。`recheck` 没有 `out/evidence.json` 时非 0，并提示先跑 `aura-perf autotune`。未知动词非 0。`help`、`sysinfo`、`check` 是 0。
 
 改 `examples/sum-scan/policy.aura` 里的 intend 或策略基因之后，用上次写下的 `out/evidence.json` 重判门，不重新剖析，也不重建 workspace：

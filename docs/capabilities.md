@@ -166,6 +166,8 @@ intend 还可以带一个**按位点的地板** `site-min-faster-pct`。候选�
 catalog 条目可以写 `site`（默认是它 rebind 的那个 define）：改一个谓词的候选，赢的
 是调用方的时间。报告里有一行 `site <name> base-ms=… cand-ms=… floor-pct=…`。
 
+held-out 中位是 0 ms 也算数：候选比计时器的分辨率还快时，参照物大于 0 它就是过了地板的加速。以前 `perf:speedup-ok?` 把 0 当成没有读数，最快的改写（把列表直接交给 `apply +`）反而按 `no-speedup` 打回。参照物是 0 时没有可比的，仍是 `no-speedup`。这时结论行的 `speedup-x` 是 `na`，括号里照旧是两次中位。
+
 ### 10b. checksum 比的是同一个程序
 
 子进程把 job 当 JSON 读 ✗，而 JSON 不保留「读回来变成整数」的浮点（5.0 变成 5 ✗）。

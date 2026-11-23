@@ -15,6 +15,14 @@
                (if (perf:accept? 100 (row 10 1 0) 20) 1 0)
                (if (perf:speedup-ok? 164 12 20) 1 0)
                (if (perf:speedup-ok? 0 12 20) 1 0)
+               ; A 0 ms median is faster than the timer can tell: it
+               ; passes the gate and the un-rebound time too.
+               (if (perf:accept? 100 (row 0 1 1) 20) 1 0)
+               (if (perf:speedup-ok? 100 0 20) 1 0)
+               (if (string=? (perf:result-reject (row 0 1 1) 160 20 100) "") 1 0)
+               ; A reference of 0 has nothing to beat; -1 is no reading.
+               (if (perf:speedup-ok? 0 0 20) 1 0)
+               (if (perf:speedup-ok? 100 -1 20) 1 0)
                (if (perf:accept? 160 penalty 20 100) 1 0)
                (perf:result-reject penalty 160 20 100)))
 (newline)

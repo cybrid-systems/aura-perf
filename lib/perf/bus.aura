@@ -269,8 +269,9 @@
               (let loop ((xs rows) (acc (hash)))
                 (if (null? xs)
                     acc
-                    (loop (cdr xs)
-                          (hash-set! acc (car (car xs)) (car (cdr (car xs))))))))))))
+                    (begin
+                      (hash-set! acc (car (car xs)) (car (cdr (car xs))))
+                      (loop (cdr xs) acc)))))))))
 
 ; Propose a candidate that rewrites SEVERAL pure policy functions at once
 ; (aura#5397): the target set is a list of (name body) pairs, and every

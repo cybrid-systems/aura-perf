@@ -607,7 +607,11 @@ def main() -> int:
                 # negative control the statistics reject.
                 "AURA_BUS_GATE": "1",
                 "AURA_BUS_EVIDENCE": "1",
-                "AURA_BUS_GATE_THRESHOLD": "1",
+                # The bar: a candidate must beat the baseline by 0.5%
+                # after the multiple-comparison haircut. A bar of 1 ppm
+                # admits the negative control whenever the probe's noise
+                # is positive, which is not a decision.
+                "AURA_BUS_GATE_THRESHOLD": "5000",
                 "AURA_BUS_GATE_MIN_WINDOWS": "1",
             })
 

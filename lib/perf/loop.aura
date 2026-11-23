@@ -6,7 +6,7 @@
 (export perf:optimize perf:autotune perf:job-record perf:site-context
         perf:null-body perf:null-id perf:cand-baseline perf:split-reference
         perf:run-targets perf:llm-context perf:llm-round-candidates
-        perf:rule-results)
+        perf:rule-results perf:any-infra?)
 
 (require "std/evo-core" all:)
 (require "std/evo" all:)
@@ -537,12 +537,17 @@
                   (loop (cdr xs) best))
               (loop (cdr xs) best)))))))
 
+; Whether any trial of a round did not end in a verdict about its
+; candidate: the worker crashed, timed out or could not isolate. Such a
+; round gives the strategy nothing to revise on. A candidate that was
+; judged and failed (wrong, slow, a checksum that does not match) is
+; not this: the round goes on to its next round.
 (define (perf:any-infra? results)
   (let loop ((xs (if (list? results) results '())))
     (if (null? xs)
         #f
         (if (or (not (hash? (car xs)))
-                (not (string=? (hash-ref (car xs) "status" "") "ok")))
+                (not (perf:judged? (car xs))))
             #t
             (loop (cdr xs))))))
 

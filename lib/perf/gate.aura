@@ -4,7 +4,8 @@
 
 (export perf:speedup-ok? perf:accept? perf:intend-seal perf:gate-pct
         perf:gene-bypasses? perf:screen-prune? perf:covers?
-        perf:result-reject perf:effective-pct perf:reason perf:site-ok?)
+        perf:result-reject perf:effective-pct perf:reason perf:site-ok?
+        perf:judged?)
 
 (define (perf:speedup-ok? baseline-ms cand-ms pct)
   (and (number? baseline-ms) (> baseline-ms 0)
@@ -66,16 +67,36 @@
              (<= (* cand 100) (* base (- 100 pct)))))
       #f))
 
+; Why a trial did not finish, in the trial's own words.
+(define (perf:trial-error result)
+  (let ((e (hash-ref result "error" "")))
+    (if (and (string? e) (not (string=? e "")))
+        e
+        (string-append "trial-" (hash-ref result "status" "error")))))
+
+; Whether a trial ended in a verdict about its candidate. "ok" measured
+; it. "infeasible" (Aura #5255 on) measured it and found a hard
+; constraint violated. Any other status says the trial itself did not
+; finish: a worker that crashed, timed out or could not isolate is the
+; round's problem, not the candidate's.
+(define (perf:judged? result)
+  (let ((s (hash-ref result "status" "")))
+    (or (string=? s "ok") (string=? s "infeasible"))))
+
 (define (perf:result-reject result baseline-ms pct . rest)
   (let ((raw (perf:raw-ms rest))
         (held (if (hash? result) (hash-ref result "heldout-ms" -1) -1)))
     (cond
       ((not (hash? result)) "no-result")
-      ((not (string=? (hash-ref result "status" "") "ok"))
-       (let ((e (hash-ref result "error" "")))
-         (if (and (string? e) (not (string=? e "")))
-             e
-             (string-append "trial-" (hash-ref result "status" "error")))))
+      ((not (perf:judged? result)) (perf:trial-error result))
+      ; A constraint the candidate violated is the candidate's verdict.
+      ; The worker states one, checksum, and its mismatches are the
+      ; reason. Another constraint keeps the trial's own words.
+      ((string=? (hash-ref result "status" "") "infeasible")
+       (if (or (> (hash-ref result "mismatches" 0) 0)
+               (string=? (hash-ref result "fidelity" "") "checksum"))
+           "checksum"
+           (perf:trial-error result)))
       ((or (string=? (hash-ref result "fidelity" "") "checksum")
            (not (perf:flag-on? result "checksum-ok"))
            (> (hash-ref result "mismatches" 0) 0))

@@ -1,0 +1,71 @@
+; tests/infeasible_test.aura — Aura #5255 on, a trial that violates a
+; hard constraint ends "infeasible" (std/evo-core: evo:trial).
+;
+; That is the candidate's checksum failing, which the gate has always
+; rolled back. It is not a trial that did not finish. Read as one, it
+; stopped a fresh round at "strategy ROLLBACK reason=trial-infrastructure"
+; and no kernel was kept.
+
+(require "lib/perf/loop" all:)
+
+; What the worker writes for a candidate whose checksum does not match,
+; on a build with #5255.
+(define wrong
+  (hash "id" "wrong-scale" "status" "infeasible" "checksum-ok" 0
+        "live-unchanged" 1 "mismatches" 4 "heldout-ms" -1
+        "fidelity" "checksum" "dur-ms" 2018
+        "error" "infeasible: checksum"))
+
+; The same verdict on a build without #5255.
+(define wrong-old
+  (hash "id" "wrong-scale" "status" "ok" "checksum-ok" 0
+        "live-unchanged" 1 "mismatches" 4 "heldout-ms" -1
+        "fidelity" "checksum"))
+
+(define kept
+  (hash "id" "linear-scan" "status" "ok" "checksum-ok" 1
+        "live-unchanged" 1 "mismatches" 0 "heldout-ms" 8
+        "fidelity" "held-out"))
+
+; A constraint that is not the checksum: the trial's own words stay.
+(define other
+  (hash "id" "break-observable" "status" "infeasible" "checksum-ok" 0
+        "live-unchanged" 1 "mismatches" 0 "heldout-ms" 30
+        "fidelity" "held-out" "error" "infeasible: resp-reply-unchanged"))
+
+; Trials that did not finish.
+(define crashed (hash "id" "segv" "status" "error" "error" "no-result exit=139"))
+(define overrun (hash "id" "loop" "status" "timeout"
+                      "error" "timeout: 90000ms > 60000ms"))
+(define leaked (hash "id" "leak" "status" "isolation-violation"
+                     "error" "isolation-violation: live source changed"))
+
+(display (list
+          ; A verdict about the candidate, or a trial that did not finish.
+          (if (perf:judged? wrong) 1 0)
+          (if (perf:judged? kept) 1 0)
+          (if (perf:judged? crashed) 1 0)
+          (if (perf:judged? overrun) 1 0)
+          (if (perf:judged? leaked) 1 0)
+          ; The same reason on both builds.
+          (perf:result-reject wrong 300 20)
+          (perf:result-reject wrong-old 300 20)
+          (perf:reason wrong 300 20)
+          (if (perf:accept? 300 wrong 20) 1 0)
+          ; It was never measured: a site time cannot save it.
+          (perf:result-reject wrong 300 20 300
+                              (hash "site" "bench-kernel" "base" 100 "cand" 0 "pct" 10))
+          ; A constraint that is not the checksum.
+          (perf:result-reject other 300 20)
+          ; A trial that did not finish keeps its own words.
+          (perf:result-reject crashed 300 20)
+          (perf:result-reject overrun 300 20)
+          (perf:result-reject leaked 300 20)
+          ; A judged failure is not the round's infrastructure failing.
+          (if (perf:any-infra? (list kept wrong)) 1 0)
+          (if (perf:any-infra? (list kept crashed)) 1 0)
+          (if (perf:any-infra? (list kept overrun)) 1 0)
+          (if (perf:any-infra? (list kept leaked)) 1 0)
+          (if (perf:any-infra? (list kept "junk")) 1 0)
+          (if (perf:any-infra? '()) 1 0)))
+(newline)

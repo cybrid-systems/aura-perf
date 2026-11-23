@@ -123,3 +123,23 @@ arity mismatch: f expects 2 arguments, got 3
 上游：https://github.com/cybrid-systems/aura/issues/5296
 
 这条挡住了 aura-perf 对带变参函数的目标：每个候选的 checksum 都以 `car: not a pair` 失败，看起来像候选写错了，其实不是。aura-runner 的 `lib/phys.aura` 有 `(define (piece k x w h y . rest) ...)`，所以它的每个候选都这样失败。
+
+## 11. `evo:trial` 把违反约束的 trial 记成 `infeasible`
+
+Aura #5255 起（nightly `b242f5a8c` 上确认），evaluate 的结果违反硬约束时 `evo:trial` 给的 status 是 `infeasible`，不再是 `ok`：`constraints` 里有一项大于 0 就是。aura-perf 的 worker 只声明一条约束 `checksum`，所以 checksum 不过的候选现在写成：
+
+```
+candidate wrong-scale ROLLBACK reason=infeasible: checksum heldout-ms=-1 ref-ms=349 ...
+```
+
+aura-perf 原先把 status 不是 `ok` 的 trial 一律当成「trial 没跑完」。于是全新的一次运行（`out/memory.json` 还不存在，`wrong-scale` 进了 trial）在第一轮之后停下：
+
+```
+strategy ROLLBACK reason=trial-infrastructure
+kernel unchanged
+verdict intend-met=0
+```
+
+CI 上看不出来：前一步的 bus 测试先把 `wrong-scale` 和 `redundant-pass` 记进了负例，autotune 那一步把它们跳过了。
+
+aura-perf 不改 Aura。`perf:judged?` 把 `ok` 和 `infeasible` 都读成「对候选有了结论」；`perf:result-reject` 对 `infeasible` 给出 `checksum`（和 #5255 之前的报告一字不差），别的约束保留 trial 自己的话；`perf:any-infra?` 不再把它算成基础设施故障。`tests/infeasible_test.aura` 和 `tests/checksum_round_test.py` 盯着这条。

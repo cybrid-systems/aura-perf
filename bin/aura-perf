@@ -193,6 +193,7 @@ case "$cmd" in
     linger_rc=0
     attach_rc=0
     llm_rc=0
+    checksum_rc=0
     if command -v python3 >/dev/null 2>&1; then
       python3 tests/bus_linger_test.py
       linger_rc=$?
@@ -204,6 +205,10 @@ case "$cmd" in
       # fake provider on localhost. No network, no key.
       python3 tests/llm_proposer_test.py
       llm_rc=$?
+      # A fresh round whose first candidates fail (a checksum that does
+      # not match, a slower pass) goes on to its next round.
+      python3 tests/checksum_round_test.py
+      checksum_rc=$?
     fi
     set -e
     if [ "$rc" -ne 0 ]; then
@@ -228,6 +233,9 @@ case "$cmd" in
     fi
     if [ "$llm_rc" -ne 0 ]; then
       exit "$llm_rc"
+    fi
+    if [ "$checksum_rc" -ne 0 ]; then
+      exit "$checksum_rc"
     fi
     exit "$exit_rc"
     ;;

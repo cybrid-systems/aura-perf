@@ -97,6 +97,8 @@ intend 本身是 hash，不是 prompt 里的愿望：
 
 停止条件写在这份值里。`intend-met` 由 held-out 中位时间算，不由模型声称。预算是实际 launch 的 trial 数。
 
+候选自己失败（结果不对、更慢）是候选的 ROLLBACK，一轮接着走下一轮；只有 trial 本身没跑完（worker 崩了、超时、隔离不住）才是这一轮的 `trial-infrastructure`。Aura #5255 起，checksum 不过的 trial 状态是 `infeasible`：它量过了，结论是候选违反了约束，运行时按前一种读。
+
 和 PerfAgent 一类外层脚本的差别：没有第二套 Python 循环在「人盯着」推下一轮。策略顺序、保护边界、门限都在这次进程的 workspace 和 spec 里，审计能回溯。
 
 度量：`intend-met`、`budget-used`、`decisions KEEP/ROLLBACK`、held-out 前后中位。结论行把两次中位、样本数和极差写在比值后面，例如 `speedup-x=81.25 (325ms->4ms n=5 spread=120->0ms)`。进程退出码跟 `intend-met` 一致：成立是 0，不成立非 0。

@@ -31,6 +31,17 @@ ROOT = Path(__file__).resolve().parents[1]
 KEY = "sk-test-SECRET-0123456789abcdef"
 MODEL = "fake-model"
 
+# The strategy genes the spec carries: one rule candidate a round.
+# redundant-pass fails, and the round after it trials linear-scan.
+# wrong-scale is in the catalog and out of the order.
+ONE_AT_A_TIME = """; One rule candidate a round: redundant-pass fails, and the
+          ; round after it trials linear-scan. wrong-scale is in the
+          ; catalog and out of the order.
+          "genes" (list (hash "id" "gene-one-at-a-time" "ratio" 2 "actionable-ms" 1
+                                "per-round" 1
+                                "order" (list "specialize-k-ref" "redundant-pass"
+                                              "linear-scan")))"""
+
 
 def free_port():
     """A TCP port nobody is listening on right now."""
@@ -73,7 +84,8 @@ def candidates(*cands):
     return json.dumps({"candidates": list(cands)})
 
 
-SPEC = """; The sum-scan target as an external spec, for tests/llm_proposer_test.py.
+SPEC = """; The sum-scan target as an external spec, for the round tests
+; (tests/llm_proposer_test.py, tests/checksum_round_test.py).
 (require "lib/perf/loop" all:)
 (require "lib/perf/util" all:)
 (require "lib/perf/score" all:)
@@ -124,13 +136,7 @@ SPEC = """; The sum-scan target as an external spec, for tests/llm_proposer_test
           "screen-slack-ms" 5
           "intend" (hash "min-faster-pct" 10 "checksum" #t "budget" 4
                          "protected" (list "k-ref" "k-length"))
-          ; One rule candidate a round: redundant-pass fails, and the
-          ; round after it trials linear-scan. wrong-scale is in the
-          ; catalog and out of the order.
-          "genes" (list (hash "id" "gene-one-at-a-time" "ratio" 2 "actionable-ms" 1
-                                "per-round" 1
-                                "order" (list "specialize-k-ref" "redundant-pass"
-                                              "linear-scan")))
+          %(genes)s
           "call" call-kernel
           "count-defines" #t
           "regions-fn" regions
@@ -170,7 +176,7 @@ WRONG = ("(define (bench-kernel xs)\n"
          "          (loop (+ i 1) (+ acc (* (k-ref xs i) 3)))))))")
 
 
-def write_project(tmp):
+def write_project(tmp, genes=ONE_AT_A_TIME):
     """A fresh project: the example's target, the spec, and no memory."""
     scan = tmp / "examples" / "sum-scan"
     (tmp / "perf").mkdir(parents=True)
@@ -182,7 +188,8 @@ def write_project(tmp):
         "specialize": json.dumps("(define (k-ref xs i) (car xs))"),
         "wrong": json.dumps((cands / "wrong-scale.aura").read_text().rstrip("\n")),
         "redundant": json.dumps((cands / "redundant-pass.aura").read_text().rstrip("\n")),
-        "linear": json.dumps((cands / "linear-scan.aura").read_text().rstrip("\n"))})
+        "linear": json.dumps((cands / "linear-scan.aura").read_text().rstrip("\n")),
+        "genes": genes})
 
 
 class Check:
@@ -202,9 +209,14 @@ class Check:
         return self.that(name, len(hits) == 1, f"want exactly one line starting {prefix!r}, got {hits}")
 
 
-def run_round(tmp, base_url):
+def run_round(tmp, base_url=None):
+    """One autotune of the project. With a base URL the proposer is wired
+    to it. Without one no LLM_* variable reaches the round, whatever the
+    shell holds."""
     REQUESTS.clear()
-    env = dict(os.environ, LLM_API_KEY=KEY, LLM_BASE_URL=base_url, LLM_MODEL=MODEL)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LLM_")}
+    if base_url is not None:
+        env.update(LLM_API_KEY=KEY, LLM_BASE_URL=base_url, LLM_MODEL=MODEL)
     return subprocess.run([str(ROOT / "bin" / "aura-perf"), "autotune", "perf/spec.aura"],
                           cwd=tmp, env=env, stdin=subprocess.DEVNULL,
                           capture_output=True, text=True, timeout=600)

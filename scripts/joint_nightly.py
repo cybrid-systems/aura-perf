@@ -180,7 +180,16 @@ def _live_policy(port: int) -> str:
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=2.0) as sock:
             sock.sendall(_command("EVICT"))
-            return sock.recv(64).decode("utf-8", "replace").strip()
+            raw = sock.recv(64)
+            # The data plane answers with a RESP bulk string ($3\r\nlfu\r\n).
+            if raw.startswith(b"$"):
+                head, _, rest = raw.partition(b"\r\n")
+                try:
+                    n = int(head[1:])
+                except ValueError:
+                    n = len(rest)
+                return rest[:n].decode("utf-8", "replace")
+            return raw.decode("utf-8", "replace").strip()
     except OSError:
         return ""
 
@@ -585,6 +594,10 @@ def main() -> int:
             json.dumps(phase_stats, indent=2, sort_keys=True) + "\n")
         ops = sum(p["ops"] for p in phase_stats)
         report.notes.append(f"load phases: {len(phase_stats)} ({ops} ops)")
+        # The pre-judge live kernel. The judge's own held-out probe sets
+        # EVICT per fold, so sampling after the judge would erase the
+        # baseline this criterion is about.
+        before_live = _live_policy(port)
 
         with tempfile.TemporaryDirectory(prefix="joint-") as tmp:
             xdg = tmp
@@ -745,7 +758,7 @@ def main() -> int:
                 # judge already ran against the quiet server, so this
                 # probe cannot pollute its measurements.
                 verdict = judged.get("judge") or {}
-                before = _live_policy(port)
+                before = before_live
                 after = before
                 with BackgroundLoad(port):
                     deadline = time.monotonic() + 30

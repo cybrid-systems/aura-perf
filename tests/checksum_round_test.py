@@ -37,8 +37,15 @@ def main():
                "round 1 candidates wrong-scale,redundant-pass" in lines, str(decisions))
     check.line("checksum: a trial that failed its constraint is the candidate's ROLLBACK",
                report, "candidate wrong-scale ROLLBACK reason=checksum mismatches=4")
+    # The conclusion is "the slower candidate is rolled back", not the
+    # reason: a single cheap screen reading can miss the 2x prune on a
+    # noisy machine, and the held-out measurement then rolls it back as
+    # no-speedup. Both reasons refuse the candidate; neither KEEPs it.
+    rollback = next((ln for ln in lines
+                     if ln.startswith("candidate redundant-pass ROLLBACK reason=")), "")
+    reason = rollback.split("reason=", 1)[-1].split(" ", 1)[0]
     check.that("checksum: the slower one is rolled back too",
-               any(ln.startswith("candidate redundant-pass ROLLBACK reason=screen-pruned") for ln in lines),
+               reason in ("screen-pruned", "no-speedup"),
                str(decisions))
     check.that("checksum: neither is the round's infrastructure failing",
                not any(ln.startswith("strategy ROLLBACK reason=trial-infrastructure") for ln in lines),

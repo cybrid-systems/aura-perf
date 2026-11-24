@@ -194,6 +194,7 @@ case "$cmd" in
     attach_rc=0
     llm_rc=0
     checksum_rc=0
+    joint_rc=0
     if command -v python3 >/dev/null 2>&1; then
       python3 tests/bus_linger_test.py
       linger_rc=$?
@@ -209,6 +210,10 @@ case "$cmd" in
       # not match, a slower pass) goes on to its next round.
       python3 tests/checksum_round_test.py
       checksum_rc=$?
+      # aura-perf#30: an agent that cannot boot leaves a report with
+      # its log, not a cleanup traceback.
+      python3 tests/joint_agent_absent_test.py
+      joint_rc=$?
     fi
     set -e
     if [ "$rc" -ne 0 ]; then
@@ -236,6 +241,9 @@ case "$cmd" in
     fi
     if [ "$checksum_rc" -ne 0 ]; then
       exit "$checksum_rc"
+    fi
+    if [ "$joint_rc" -ne 0 ]; then
+      exit "$joint_rc"
     fi
     exit "$exit_rc"
     ;;

@@ -98,6 +98,11 @@ def _drain(proc: subprocess.Popen, sink: list[str]) -> None:
         pass
 
 
+def _tail(lines: list[str], limit: int = 20) -> list[str]:
+    """The last few lines of a child's log, newline-free."""
+    return [line.rstrip("\n") for line in lines[-limit:]]
+
+
 def _run(cmd: list[str], env: dict[str, str], timeout: int = 300,
          cwd: str | None = None) -> tuple[int, str]:
     try:
@@ -638,6 +643,7 @@ def main() -> int:
             # must not trip the guard and skip the boot.
             agent_cwd = Path(tempfile.mkdtemp(prefix="joint-agent-"))
             shutil.copytree(redis_dir / "src", agent_cwd / "src")
+            agent: subprocess.Popen | None = None
             agent = subprocess.Popen(
                 [aura, str(host_script)], env=env, cwd=str(agent_cwd),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -647,6 +653,7 @@ def main() -> int:
             agent_lines: list[str] = []
             reader = threading.Thread(target=_drain, args=(agent, agent_lines), daemon=True)
             reader.start()
+            proposer: subprocess.Popen | None = None
             try:
                 deadline = time.monotonic() + 60
                 ready = False
@@ -654,11 +661,21 @@ def main() -> int:
                     if any("bus mode on" in line for line in agent_lines):
                         ready = True
                         break
+                    # A dead agent will never open the bus: fail now, and
+                    # let the report carry the reason it died.
+                    if agent.poll() is not None:
+                        break
                     time.sleep(0.1)
                 if not ready:
+                    reader.join(timeout=1)
                     report.set("self-adaptation", False,
                                "the redis agent did not open the workspace bus")
                     (report_dir / "agent.log").write_text("".join(agent_lines))
+                    for line in _tail(agent_lines):
+                        report.notes.append(f"agent.log: {line}")
+                    if agent.poll() is not None:
+                        report.notes.append(
+                            f"the redis agent exited with code {agent.returncode}")
                     report.write(report_dir / "report.json")
                     return 1
 
@@ -825,22 +842,26 @@ def main() -> int:
                 (report_dir / "agent.log").write_text("".join(agent_lines))
             finally:
                 # The proposer releases its trial: the worldline ends
-                # with the judge, not before it.
-                try:
-                    proposer.stdin.write("release\n")
-                    proposer.stdin.flush()
-                    proposer.wait(timeout=10)
-                except Exception:
-                    proposer.terminate()
-                try:
-                    agent.stdin.close()
-                except Exception:
-                    pass
-                agent.terminate()
-                try:
-                    agent.wait(timeout=10)
-                except Exception:
-                    agent.kill()
+                # with the judge, not before it. It may never have been
+                # started: the agent can fail first, and the report must
+                # keep that reason instead of dying in this cleanup.
+                if proposer is not None:
+                    try:
+                        proposer.stdin.write("release\n")
+                        proposer.stdin.flush()
+                        proposer.wait(timeout=10)
+                    except Exception:
+                        proposer.terminate()
+                if agent is not None:
+                    try:
+                        agent.stdin.close()
+                    except Exception:
+                        pass
+                    agent.terminate()
+                    try:
+                        agent.wait(timeout=10)
+                    except Exception:
+                        agent.kill()
     finally:
         server.terminate()
         try:

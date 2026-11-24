@@ -1,6 +1,20 @@
 name: ci
 on: [push, pull_request]
 jobs:
+  baseline:
+    name: pinned baseline
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/cybrid-systems/aura-ci@sha256:66392ce2a5f24668fb923d1c900c545435f6b453f3df585dc4668402c07042d5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Drift gate
+        run: python3 scripts/check-baseline.py
+      - name: Install the pinned Aura nightly
+        run: echo "$(bash scripts/install-aura.sh)" >> "$GITHUB_PATH"
+      - name: Prove the pinned binary
+        run: aura --version
+
   smoke:
     runs-on: ubuntu-latest
     # #5397: the bus contract tests need the current Aura stdlib
@@ -9,14 +23,11 @@ jobs:
     # the compiler on every run.
     steps:
       - uses: actions/checkout@v4
-      - name: Install Aura nightly
+      - name: Install the pinned Aura nightly
         run: |
-          curl -fsSL -o /tmp/aura-nightly.tgz \
-            https://github.com/cybrid-systems/aura/releases/download/nightly/aura-nightly-linux-x86_64.tar.gz
-          mkdir -p /opt/aura
-          tar -xzf /tmp/aura-nightly.tgz -C /opt/aura --strip-components=1
-          /opt/aura/bin/aura --version
-          echo "AURA_BIN=/opt/aura/bin/aura" >> "$GITHUB_ENV"
+          bin="$(bash scripts/install-aura.sh)"
+          echo "$bin" >> "$GITHUB_PATH"
+          echo "AURA_BIN=$bin/aura" >> "$GITHUB_ENV"
       - name: Install perf
         run: |
           sudo apt-get update

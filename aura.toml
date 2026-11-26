@@ -7,7 +7,7 @@ out = "out"
 # std/* ships with aura. Project requires resolve from this root.
 [dependencies]
 aura = "nightly"
-aura_commit = "e53037cdbf2782ae08e3a39c060b9e2fcb9278cd"
-aura_sha256_linux_x86_64 = "40a93e4b68871fe91fd20102c13e08c530be87ba346ae0088020141e5ad03c71"
-aura_sha256_linux_arm64 = "22283da9fb1507ebe762a08d82d3032c29f034d87b0a082e472f7a77c49dd70b"
+aura_commit = "cb7d55e7dea2b0ffad25e495592f56210ce5c96f"
+aura_sha256_linux_x86_64 = "37a38d22bcb6e65e3d2e13dd17b269cde0c1a3a8d1bba89cf1499cdefeb2f635"
+aura_sha256_linux_arm64 = "07926c34348a58f9b2d8a04cedc76118cbf514f62f8144cad1b6ddab74404706"
 aura_ci_digest = "sha256:66392ce2a5f24668fb923d1c900c545435f6b453f3df585dc4668402c07042d5"

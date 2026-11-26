@@ -3,23 +3,23 @@
     "assets": {
       "linux-arm64": {
         "name": "aura-nightly-linux-arm64.tar.gz",
-        "sha256": "22283da9fb1507ebe762a08d82d3032c29f034d87b0a082e472f7a77c49dd70b"
+        "sha256": "07926c34348a58f9b2d8a04cedc76118cbf514f62f8144cad1b6ddab74404706"
       },
       "linux-x86_64": {
         "name": "aura-nightly-linux-x86_64.tar.gz",
-        "sha256": "40a93e4b68871fe91fd20102c13e08c530be87ba346ae0088020141e5ad03c71"
+        "sha256": "37a38d22bcb6e65e3d2e13dd17b269cde0c1a3a8d1bba89cf1499cdefeb2f635"
       }
     },
-    "commit_sha": "e53037cdbf2782ae08e3a39c060b9e2fcb9278cd",
+    "commit_sha": "cb7d55e7dea2b0ffad25e495592f56210ce5c96f",
     "nightly_tag": "nightly",
-    "nightly_updated_at": "2026-11-24T09:17:01Z"
+    "nightly_updated_at": "2026-11-26T06:35:50Z"
   },
   "aura_ci": {
     "digest": "sha256:66392ce2a5f24668fb923d1c900c545435f6b453f3df585dc4668402c07042d5",
     "image": "ghcr.io/cybrid-systems/aura-ci",
     "tag_seen": "latest"
   },
-  "generated_at": "2026-11-24T13:12:17Z",
+  "generated_at": "2026-11-26T14:20:00Z",
   "members": [
     "cybrid-systems/aura-agents",
     "cybrid-systems/aura-perf",
@@ -27,7 +27,7 @@
     "cybrid-systems/aura-memory",
     "cybrid-systems/aura-memory-runtime"
   ],
-  "notes": "Aura main green nightly at e53037cdb; the asset digests are the GitHub release asset digests. Bump this file only through a reviewed PR; never touch tags or releases.",
+  "notes": "Aura main green nightly at cb7d55e7d; the asset digests are the GitHub release asset digests. Bump this file only through a reviewed PR; never touch tags or releases.",
   "schema": 1,
   "stages": [
     "cybrid-systems/aura-runner",

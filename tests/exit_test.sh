@@ -61,11 +61,14 @@ check check 0 ./run.sh check
 check cmd-help 0 sh bin/aura-perf help
 need_out cmd-help-usage "aura-perf [verb]" /tmp/aura-perf-exit-out
 check cmd-unknown 1 sh bin/aura-perf not-a-verb
+check cmd-profile-help 0 sh bin/aura-perf profile --help
+need_out cmd-profile-help "Native profiling" /tmp/aura-perf-exit-out
+check cmd-profile-help-no-aura 0 env -u AURA_BIN PATH=/bin:/usr/bin sh "$PWD/bin/aura-perf" profile --help
 check cmd-from-elsewhere 0 sh -c "cd / && '$PWD/bin/aura-perf' help"
 check cmd-sysinfo-from-elsewhere 0 sh -c "cd / && '$PWD/bin/aura-perf' sysinfo"
 # help must not need the aura binary
 check cmd-help-no-aura 0 env -u AURA_BIN PATH=/bin:/usr/bin "$PWD/bin/aura-perf" help
-check cmd-no-aura 1 env -u AURA_BIN PATH=/bin:/usr/bin "$PWD/bin/aura-perf" sysinfo
+check cmd-no-aura 1 env -u AURA_BIN AURA_PERF_NO_INSTALLED=1 PATH=/bin:/usr/bin "$PWD/bin/aura-perf" sysinfo
 
 # The retired primitive prefixes (Aura v0.2.1 closed the alias window):
 # ast: / workspace: / ws: / dirty: / mutation-log: / syntax: / fiber:overlay-
@@ -107,6 +110,10 @@ if [ -n "$bak" ]; then
   mv "$bak" out/evidence.json
 else
   rm -f out/evidence.json
+fi
+
+if ! sh tests/profile_test.sh; then
+  fail=1
 fi
 
 if [ "$fail" -ne 0 ]; then

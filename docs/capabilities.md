@@ -197,6 +197,18 @@ KEEP 时若 `AURA_SANDBOX=off`，读 compile 组的 `cascade_full_count` 和 `mo
 
 度量：报告的 `llm-proposer`、`llm-candidate`、`llm-rejected`、`llm-budget-used` 行。测试：`tests/llm_propose_test.aura`（提议者本身，chat 是传入的过程，不碰网络）、`tests/llm_round_test.aura`（候选怎么进一轮）、`tests/llm_proposer_test.py`（真实的一轮，对面是本机的假 provider）。
 
+### 14. 非 Aura 目标的原生 profile
+
+`aura-perf profile --pid PID --seconds N`（或 `-- COMMAND`）对任意进程跑
+`perf record`，输出当前目录的 `out/profile.txt`、`out/profile.json` 和
+`out/perf.data`。它不需要 Aura 二进制、workspace 或 LLM；Redis、Postgres、
+游戏服务器和批处理二进制都能用。PMU 不支持的计数器写成 `<not supported>`，
+不写成 0。
+
+边界：`profile` 只给证据。`autotune` 要能 `mutate:rebind` 目标 define，
+所以只对 Aura 目标做自动 trial / KEEP / ROLLBACK；Redis 的 C 代码不会在这里
+被改写。先用 native profile 找到瓶颈，再在目标自己的语言里改。
+
 ## 部分
 
 ### 观察、试探、证明、提交是同一语言

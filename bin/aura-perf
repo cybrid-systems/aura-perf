@@ -15,9 +15,10 @@
 # runtime as (require "lib/perf/loop" all:); the repository root is put
 # on AURA_PATH for the run.
 #
-# Needs Aura v0.2.0 on PATH, or AURA_BIN pointing at it. No virtualenv,
-# no config file. No API key either, until the model proposer is wired
-# with LLM_API_KEY, LLM_BASE_URL and LLM_MODEL (see Environment).
+# Needs an Aura nightly binary: the one installed by ./install.sh or
+# `aura-perf install`, or AURA_BIN pointing at it. No virtualenv, no config
+# file. No API key: the rule proposer is the default; LLM_API_KEY,
+# LLM_BASE_URL and LLM_MODEL only add the optional model proposer.
 set -eu
 
 # ── where is the repository? ─────────────────────────────────────────
@@ -47,11 +48,16 @@ aura-perf - an optimization runtime for agents
   sysinfo    export this machine's inventory to out/sysinfo.txt and .json
   check      CPU, memory, disk, network and interrupt deltas (1 s sample)
   test       run the value-level tests, then the round tests (python3)
+  profile    native perf profile of ANY process; needs no Aura and no LLM
+             aura-perf profile --pid PID [--seconds N] [--out DIR]
+             aura-perf profile --seconds N -- COMMAND [ARGS...]
   help       this text
-  install    link this command into ~/.local/bin (or $PREFIX/bin)
+  install    install the pinned Aura nightly if needed, then link this
+             command into ~/.local/bin (or $PREFIX/bin)
 
 Environment:
-  AURA_BIN        the aura executable (default: aura on PATH)
+  AURA_BIN        the aura executable (default: the installed nightly,
+                   then aura on PATH)
   AURA_PATH       where std/* lives (default: <aura prefix>/lib)
   AURA_PERF_CHECK_SEC   lengthen the check sample (default 1)
   PERF_BIN        a perf binary that can count task-clock (optional)
@@ -75,12 +81,45 @@ EOF
 # ── find aura ────────────────────────────────────────────────────────
 aura_bin() {
   if [ -n "${AURA_BIN:-}" ]; then printf '%s\n' "$AURA_BIN"; return 0; fi
+  if [ -z "${AURA_PERF_NO_INSTALLED:-}" ] && [ -x "$ROOT/.aura/bin/aura" ]; then
+    printf '%s\n' "$ROOT/.aura/bin/aura"; return 0
+  fi
+  if [ -z "${AURA_PERF_NO_INSTALLED:-}" ] && [ -f "$ROOT/.aura-bin" ]; then
+    recorded=$(sed -n '1p' "$ROOT/.aura-bin")
+    if [ -n "$recorded" ] && [ -x "$recorded" ]; then printf '%s\n' "$recorded"; return 0; fi
+  fi
   if command -v aura >/dev/null 2>&1; then command -v aura; return 0; fi
+  if [ -z "${AURA_PERF_NO_INSTALLED:-}" ] && [ -x "$HOME/.local/share/aura-perf/.aura/bin/aura" ]; then
+    printf '%s\n' "$HOME/.local/share/aura-perf/.aura/bin/aura"; return 0
+  fi
   if [ -x "$HOME/aura/bin/aura" ]; then printf '%s\n' "$HOME/aura/bin/aura"; return 0; fi
   return 1
 }
 
+install_nightly() {
+  [ -n "${AURA_BIN:-}" ] && return 0
+  if command -v aura >/dev/null 2>&1; then
+    case "$(aura --version 2>/dev/null || true)" in
+      *nightly*) return 0 ;;
+    esac
+  fi
+  [ -x "$ROOT/.aura/bin/aura" ] && return 0
+  printf 'installing pinned Aura nightly...\n' >&2
+  cache_bin=$(AURA_VERSION=nightly sh "$ROOT/scripts/install-aura.sh") || {
+    echo "aura-perf: nightly install failed" >&2
+    exit 1
+  }
+  cache_root=$(dirname "$cache_bin")
+  rm -rf "$ROOT/.aura"
+  ln -sfn "$cache_root" "$ROOT/.aura"
+  printf 'installed Aura: %s\n' "$ROOT/.aura/bin/aura" >&2
+}
+
 install_self() {
+  install_nightly
+  if [ -n "${AURA_BIN:-}" ] && [ -x "$AURA_BIN" ]; then
+    printf '%s\n' "$AURA_BIN" > "$ROOT/.aura-bin"
+  fi
   dest="${PREFIX:-$HOME/.local/bin}"
   mkdir -p "$dest"
   ln -sf "$ROOT/bin/aura-perf" "$dest/aura-perf"
@@ -116,10 +155,13 @@ case "$cmd" in
     install_self
     exit 0
     ;;
+  profile)
+    exec sh "$ROOT/scripts/native-profile.sh" "$@"
+    ;;
 esac
 
 AURA=$(aura_bin) || {
-  echo "aura-perf: aura is not on PATH. Install Aura v0.2.0 or set AURA_BIN." >&2
+  echo "aura-perf: Aura nightly not found. Run 'aura-perf install' or set AURA_BIN." >&2
   exit 1
 }
 export AURA_BIN="$AURA"
@@ -189,7 +231,7 @@ case "$cmd" in
     sh tests/exit_test.sh
     exit_rc=$?
     # aura-perf#28: the post-round host linger window. Self-skips when the
-    # resolved Aura has no std/bus (the v0.2.0 CI pin).
+    # resolved Aura has no std/bus (the pinned nightly CI).
     linger_rc=0
     attach_rc=0
     llm_rc=0
@@ -219,7 +261,7 @@ case "$cmd" in
     if [ "$rc" -ne 0 ]; then
       echo "aura-perf: aura test failed." >&2
       echo "aura build: ${AURA_PERF_BUILD:-unknown}" >&2
-      echo "supported: Aura v0.2.0 (nightly cf7353373)" >&2
+      echo "supported: Aura nightly (pinned by baseline/aura-baseline.json)" >&2
       if [ "$probe" -ne 0 ]; then
         echo "named-let reentrancy probe failed. Upstream: https://github.com/cybrid-systems/aura/issues/5116" >&2
         echo "An index-out-of-bounds error or a parser golden mismatch on this build is that regression, not an aura-perf parser bug." >&2

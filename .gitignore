@@ -2,3 +2,5 @@ out/
 *.stdout
 gmon.out
 __pycache__/
+.aura/
+.aura-bin

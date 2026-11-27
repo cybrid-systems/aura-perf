@@ -51,7 +51,7 @@ hotspot block-ahead?     self-ms=67   calls=900 share=0
 - **稳态而不是第一个样本。** held-out 应该丢掉第一次（预热）再取中位，并把丢掉的那次写在报告里。
 - **目标自己的测试命令当 checksum。** spec 可以给一条命令（`aura test`），运行时的门跑它、读它的退出码和 golden 差异。
 - **`ast:snapshot` / `ast:restore`** 已经在用（回滚 ✓）；**`evo:trial`** 已经在用（worldline ✓）；**`orch:parallel`** 已经在用（一轮候选并行 ✓）；**`engine:metrics`** 已经在用（KEEP 的编译计数 ✓）。
-- **fiber**：LLM proposer 那一路（`perf:llm-propose` 已经接上 std/llm，aura-perf#29；调用还是同步的）应该跑在 fiber 上，不占门的时间。
+- **fiber**：LLM proposer 那一路（`perf:llm-propose` 已经接上 std/llm，aura-perf#29）现在和 headroom probes 用 `orch:parallel` 并行，join 后才进第一轮；`orch` 不可用时顺序执行。
 - **`ast:unparse` / `current-source`** 的 round trip 现在是坏的（findings 9、10）：那是 Aura 的两条 P0，aura-perf 不改 Aura，但目标程序要知道（目标可以把会写成科学计数法的字面量换掉）。
 
 ## 策略：aura-perf 该怎么变

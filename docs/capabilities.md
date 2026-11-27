@@ -247,6 +247,7 @@ trial-engine linear-scan rebuild=0 cascade-full=0 body-only=2 relower-full=1 ...
 - **回答只变成候选 hash。** `id`、`target`、`genome`、`thought`、`proposer`。回答里的判定字段不复制，所以到不了门。
 - **和规则候选走同一条路。** 封了印的 protected 边界、负例记忆、trial 子进程、checksum、held-out、地板、总线上的约束。模型没有 KEEP 权。
 - **是加法。** 模型候选出自己的 allowance（spec 的 `llm` hash `budget`，缺省 2），不动 intend 的预算；一条模型候选的失败不算规则路径的 trial 基础设施故障，第二轮照常。
+- **在 fiber 上，和 headroom 并行。** `perf:parallel-propose-headroom` 用 `orch:parallel` 同时跑模型调用和 headroom probes；两者都只读 profile / gate reference，join 后才进第一轮。`orch:parallel` 不可用时同一对 thunk 顺序执行，round 不被调度器卡住。
 - **进 trial 之前的检查。** target 是这一轮可 rebind 的 define；`genome` 恰好是一个同名同参数的 `(define …)`，没有第二个顶层 form；不点名有副作用的原语（`shell`、`write-file`、`set!`、`eval`……），带命名空间的名字只能是证据里出现过的 define；和 catalog 里某条只差排版的是重复。这是卫生检查，不是边界：边界仍然是 checksum 和 held-out。
 - **密钥不落盘。** 传输层的错误文本和模型的句子进报告之前，密钥被换成 `[redacted]`。
 

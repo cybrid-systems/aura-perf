@@ -12,6 +12,7 @@
 (require "std/evo-core" all:)
 (require "std/evo" all:)
 (require "std/process" all:)
+(require "std/orch" all:)
 (require "lib/perf/util" all:)
 (require "lib/perf/score" all:)
 (require "lib/perf/gate" all:)
@@ -1893,6 +1894,33 @@
                       (+ base (hash-ref h "base")))
                 #f))))))
 
+; The model proposal and the headroom probes are independent: both read
+; the profile and the gate reference, neither writes the other's values.
+; Run them as two fibers and join before the first round. The model call
+; is the long one when a provider is wired; the probes are a handful of
+; short child jobs. If orch:parallel is unavailable, the same two thunks
+; run sequentially, so the round is never blocked on the scheduler.
+(define (perf:no-llm reason)
+  (hash "ok" #f "candidates" '() "budget" 0 "error" reason))
+
+(define (perf:parallel-propose-headroom spec buf plan profile child hottest refs out baseline)
+  (let ((box (hash "llm" (perf:no-llm "not-run"))))
+    (let ((propose (lambda (ignored)
+                     (hash-set! box "llm"
+                                (try (perf:llm-propose
+                                       (perf:llm-context spec buf plan profile child hottest refs))
+                                     (catch (e) (perf:no-llm "fiber-error"))))))
+          (head (lambda (ignored)
+                  (try (perf:headroom-probes spec buf profile out baseline)
+                       (catch (e) #f)))))
+      (let ((rs (try (orch:parallel (list propose head) 0) (catch (e) #f))))
+        (if (and (list? rs) (pair? rs))
+            (hash-ref box "llm" (perf:no-llm "not-run"))
+            (begin
+              (propose #f)
+              (head #f)
+              (hash-ref box "llm" (perf:no-llm "not-run"))))))))
+
 (define (perf:optimize spec)
   (let* ((memory-path (perf:memory-path spec))
          (buf (hash "lines" '() "brief" '()
@@ -1914,10 +1942,6 @@
                (seal (perf:intend-seal spec))
                (plan (perf:opening-plan spec buf profile seal))
                (refs (perf:measure-references spec buf out))
-               ; The model proposes from the profile and from the
-               ; baseline the gate compares against, before any trial.
-               (llm (perf:llm-propose
-                      (perf:llm-context spec buf plan profile child hottest refs)))
                (baseline (hash-ref refs "gate-ms" -1))
                (pct (hash-ref spec "min-speedup-pct" 20)))
           (hash-set! buf "before-ms" (hash-ref refs "raw-ms" -1))
@@ -1953,12 +1977,13 @@
                                        (perf:join (map (lambda (s) (string-append " " s))
                                                        (perf:order-of plan))
                                                   "")))
-          (perf:say-each buf (perf:llm-lines llm))
           (perf:say buf (string-append "process-state region="
                                        (hash-ref profile "region-measure" "in-process")
                                        " held-out=trial-child comparable=0"))
           (perf:say-machine buf)
-          (perf:headroom-probes spec buf profile out baseline)
+          (hash-set! buf "llm"
+                     (perf:parallel-propose-headroom spec buf plan profile child hottest refs out baseline))
+          (perf:say-each buf (perf:llm-lines (hash-ref buf "llm" (perf:no-llm "not-run"))))
           (let ((bin (hash-ref (hash-ref profile "tools" (hash)) "perf" "missing")))
             (if (and (string? bin) (not (string=? bin "missing")))
                 (let ((live (perf:measure-live bin (lambda () (perf:run-kernel spec 4000)))))
@@ -1966,7 +1991,7 @@
                                                (number->string (hash-ref live "task-clock" -1)))))
                 #f))
           (let* ((cands (perf:round-candidates spec plan buf))
-                 (llm-cands (perf:llm-round-candidates spec llm buf))
+                 (llm-cands (perf:llm-round-candidates spec (hash-ref buf "llm" (perf:no-llm "not-run")) buf))
                  (all (append cands llm-cands))
                  (results (begin
                             (perf:say buf (string-append "round 1 candidates " (perf:ids all)))

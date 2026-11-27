@@ -24,6 +24,19 @@
 (define pct (env-int "AURA_PERF_JUDGE_PCT" 20))
 (define apply? (let ((v (getenv "AURA_PERF_JUDGE_APPLY")))
                  (and (string? v) (string=? v "1"))))
+(define authorized? (let ((v (getenv "AURA_PERF_JUDGE_AUTHORIZED")))
+                      (and (string? v) (string=? v "1"))))
+
+; The self-host parent owns keep/rollback. An external judge may apply only
+; when the caller explicitly authorizes it for an attach-only round; the
+; default judge is an auditor, not a second KEEP.
+(if (and apply? (not authorized?))
+    (begin
+      (display "judge-apply refused: self-host parent owns KEEP; set AURA_PERF_JUDGE_AUTHORIZED=1 for an attach-only round")
+      (newline)
+      (set! apply? #f))
+    #t)
+(display "judge-mode ") (display (if apply? "apply-authorized" "advisory")) (newline)
 
 (if (<= ws 0)
     (begin (display "judge: AURA_PERF_BUS_WORKSPACE is unset") (newline) (exit 1))

@@ -101,6 +101,15 @@ def main():
                 print("FAIL linger: judge peer produced no verdict")
                 print(j.stdout, j.stderr[:300])
                 fail = 1
+            env2 = dict(env, AURA_PERF_JUDGE_APPLY="1")
+            j2 = subprocess.run([str(aura), "--quiet", str(ROOT / "scripts" / "bus-judge.aura")],
+                                capture_output=True, text=True, env=env2, timeout=30)
+            if "judge-apply refused" in j2.stdout and "judge-mode advisory" in j2.stdout:
+                print("ok linger: an unauthorized judge cannot keep over the parent")
+            else:
+                print("FAIL linger: judge apply was not refused")
+                print(j2.stdout, j2.stderr[:300])
+                fail = 1
             # EOF on stdin ends the window early; the round unhosts and exits.
             sleeper.kill()
             try:

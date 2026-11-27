@@ -50,7 +50,8 @@ aura-perf - an optimization runtime for agents
   test       run the value-level tests, then the round tests (python3)
   judge      read a live bus round's result metrics as a judge peer
              AURA_PERF_BUS_WORKSPACE=N AURA_PERF_JUDGE_PCT=20 aura-perf judge
-             AURA_PERF_JUDGE_APPLY=1 also calls bus:keep / bus:rollback
+             AURA_PERF_JUDGE_APPLY=1 + AURA_PERF_JUDGE_AUTHORIZED=1
+             also calls bus:keep / bus:rollback (attach-only)
   profile    native perf profile of ANY process; needs no Aura and no LLM
              aura-perf profile --pid PID [--seconds N] [--out DIR]
              aura-perf profile --seconds N -- COMMAND [ARGS...]

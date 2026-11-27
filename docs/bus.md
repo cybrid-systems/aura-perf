@@ -109,10 +109,12 @@ judge base=5213506592 wl=1 heldout-ms=9 ref-ms=198 checksum=1 pass=1
 ```
 
 It is advisory by default: the self-host parent still runs its own gate
-and KEEPs/ROLLs back. `AURA_PERF_JUDGE_APPLY=1` also calls
-`bus:keep` / `bus:rollback` on the worldline id (+8), for a round whose
-verdict was left pending (attach-only or externally judged).
-`AURA_PERF_JUDGE_PCT` sets the program floor (default 20). The judge uses
+and owns `keep|rollback`. Policy (2026-11-27): self-host KEEP stays with
+the parent; the multi-role model is **attach-only + external judge**
+(aura-harness). `AURA_PERF_JUDGE_APPLY=1` is refused unless
+`AURA_PERF_JUDGE_AUTHORIZED=1` is also set; that pair is for an
+externally judged, attach-only round. `AURA_PERF_JUDGE_PCT` sets the
+program floor (default 20). The judge uses
 the same `(heldout, ref)` comparison and the site-floor flag it reads;
 it does not need the report file.
 

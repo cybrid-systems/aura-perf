@@ -1,0 +1,7 @@
+; A site with no headroom is a memory record: next run skips its probe.
+(require "lib/perf/memory" all:)
+(define mem (perf:neg-remember '() "flat-hot" "k-ref" "headroom-no-room" "headroom-pct=3"))
+(display (list (perf:headroom-memory? mem "k-ref")
+               (perf:headroom-memory? mem "k-length")
+               (perf:neg-blocked? mem "flat-hot" "k-ref" "headroom-no-room")))
+(newline)

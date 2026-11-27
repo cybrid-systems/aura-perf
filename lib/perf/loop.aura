@@ -1822,7 +1822,7 @@
 
 ; The hottest user defines the profile names, minus the kernel and the
 ; protected boundary. Top PERF-HEADROOM-MAX (or the spec's headroom-max).
-(define (perf:headroom-sites spec profile)
+(define (perf:headroom-sites spec profile mem)
   (let* ((kernel (hash-ref spec "kernel" (hash-ref spec "target" "bench-kernel")))
          (protected (perf:protected spec))
          (maxn (let ((n (hash-ref spec "headroom-max" PERF-HEADROOM-MAX)))
@@ -1835,6 +1835,7 @@
                   (if (and (string? n) (not (string=? n ""))
                            (not (string=? n kernel))
                            (not (perf:member? protected n))
+                           (not (perf:headroom-memory? mem n))
                            (not (perf:member? acc n)))
                       (cons n acc)
                       acc)))))))
@@ -1868,7 +1869,16 @@
   (if (or (eq? (hash-ref spec "headroom" #t) #f)
           (not (number? baseline)) (<= baseline 0))
       (hash)
-      (let ((sites (perf:headroom-sites spec profile)))
+      (let* ((mem (hash-ref buf "memory" '()))
+             (sites (perf:headroom-sites spec profile mem)))
+        (let loop ((hs (perf:hotspots profile)))
+          (if (null? hs)
+              #t
+              (let ((n (hash-ref (car hs) "name" "")))
+                (if (and (string? n) (perf:headroom-memory? mem n))
+                    (perf:say buf (string-append "headroom-remembered " n))
+                    #f)
+                (loop (cdr hs)))))
         (if (null? sites)
             (begin (hash-set! spec "headroom" (hash)) (hash))
             (let* ((kernel (hash-ref spec "kernel" (hash-ref spec "target" "bench-kernel")))
@@ -1920,6 +1930,34 @@
                                                      "no-result"))))
                   (loop (cdr xs)))))
             (hash-set! spec "headroom" tab)
+            (let* ((intend (hash-ref spec "intend" (hash)))
+                   (forget (hash-ref spec "headroom-forget-pct"
+                                     (if (hash? intend)
+                                         (hash-ref intend "headroom-forget-pct" 5)
+                                         5))))
+              (if (and (number? forget) (> forget 0))
+                  (let loop ((xs sites))
+                    (if (null? xs)
+                        #t
+                        (let* ((site (car xs))
+                               (h (hash-ref tab site #f))
+                               (pct (if (hash? h) (hash-ref h "pct" -1) -1)))
+                          (if (and (number? pct) (>= pct 0) (< pct forget))
+                              (begin
+                                (perf:say buf (string-append
+                                                "headroom-forget " site
+                                                " headroom-pct=" (number->string pct)
+                                                " floor-pct=" (number->string forget)))
+                                (hash-set! buf "memory"
+                                           (perf:neg-remember
+                                             (hash-ref buf "memory" '())
+                                             (hash-ref spec "class" "")
+                                             site
+                                             "headroom-no-room"
+                                             (string-append "headroom-pct=" (number->string pct)))))
+                              #f)
+                          (loop (cdr xs)))))
+                  #f))
             tab))))))
 
 ; Sum of the probed sites' headroom, or #f when any site was not probed.

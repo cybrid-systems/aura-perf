@@ -241,6 +241,7 @@ case "$cmd" in
     candidate_set_rc=0
     headroom_rc=0
     screen_site_rc=0
+    headroom_memory_rc=0
     engine_metrics_rc=0
     joint_rc=0
     if command -v python3 >/dev/null 2>&1; then
@@ -274,6 +275,9 @@ case "$cmd" in
       # worldline before the round spends its trial budget.
       python3 tests/headroom_round_test.py
       headroom_rc=$?
+      # A site with no headroom is remembered; the next run skips its probe.
+      python3 tests/headroom_memory_round_test.py
+      headroom_memory_rc=$?
       # The cheap screen reads the candidate's site tree, not only the
       # whole kernel; a slow site is pruned without a held-out sample.
       python3 tests/screen_site_round_test.py
@@ -324,6 +328,9 @@ case "$cmd" in
     fi
     if [ "$headroom_rc" -ne 0 ]; then
       exit "$headroom_rc"
+    fi
+    if [ "$headroom_memory_rc" -ne 0 ]; then
+      exit "$headroom_memory_rc"
     fi
     if [ "$screen_site_rc" -ne 0 ]; then
       exit "$screen_site_rc"

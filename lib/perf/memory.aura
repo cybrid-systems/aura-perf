@@ -10,7 +10,8 @@
 
 (export perf:neg-remember perf:neg-blocked? perf:neg-query
         perf:neg-ideas perf:filter-negative
-        perf:memory-path perf:memory-load perf:memory-save)
+        perf:memory-path perf:memory-load perf:memory-save
+        perf:headroom-memory?)
 
 (require "lib/perf/util" all:)
 
@@ -55,6 +56,21 @@
                   "idea" idea
                   "reason" (if (string? reason) reason ""))
             (if (list? mem) mem '()))))
+
+; A site the headroom probe already found without room. It is a memory
+; record like any other: the next run does not spend a probe child on
+; it again, and the record says when and at what percentage it was
+; measured.
+(define (perf:headroom-memory? mem site)
+  (let loop ((xs (if (list? mem) mem '())))
+    (if (null? xs)
+        #f
+        (let ((r (car xs)))
+          (if (and (hash? r)
+                   (string=? (hash-ref r "idea" "") "headroom-no-room")
+                   (string=? (hash-ref r "hot-node" "") site))
+              #t
+              (loop (cdr xs)))))))
 
 (define (perf:neg-query mem class hot)
   (let loop ((xs (if (list? mem) mem '())) (acc '()))

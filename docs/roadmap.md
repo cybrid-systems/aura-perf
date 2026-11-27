@@ -89,7 +89,7 @@ catalog 条目现在可以带 `genomes`（一组 `(target, genome)`，或 target
 
 已做：autotune 在每轮预算前跑 headroom job，在自己的 worldline 里把位点的当前绑定 `set!` 成便宜 stub，跑一次 kernel 再恢复；和 fresh baseline child 比较。报告写 `site-headroom <site> base-ms=… free-ms=… headroom-pct=…`，候选行带 `headroom-pct`；stub 让 kernel 抛错时写 `site-headroom-unavailable`。kernel 和 protected 位点默认不探，`headroom-max` 限制数量，`headroom #f` 关闭。
 
-策略已经用上：候选按 `headroom-pct` 从高到低排（`headroom-order #f` 关闭），`headroom-min-pct` 让上限不够的候选不进这一轮（`headroom-skip`），不占预算。还差：把「这个位点没余量」写进跨次负例。
+策略已经用上：候选按 `headroom-pct` 从高到低排（`headroom-order #f` 关闭），`headroom-min-pct` 让上限不够的候选不进这一轮（`headroom-skip`），不占预算。没余量的位点也写进跨次负例：上限低于 `headroom-forget-pct` 时记 `headroom-no-room`，下一次报告 `headroom-remembered` 并跳过探针。
 
 ### 4. 便宜的 screen 量位点，不量整个目标 —— 做了
 

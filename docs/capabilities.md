@@ -30,6 +30,7 @@ spec 是目标项目和运行时之间的那份约定，运行时按它工作：
 | `headroom-stub` / `headroom-stubs` | 替换位点的表达式（全局或 target → 表达式） | `"0"` |
 | `headroom-order` | 候选按上限从高到低排（未知的留在后面） | `#t` |
 | `headroom-min-pct` | 上限低于这个百分比的候选不进这一轮 | 无（不过滤） |
+| `headroom-forget-pct` | 上限低于这个百分比的位点写进负例记忆，下次不再探 | 5 |
 | `genes` | 策略基因 | 无 |
 | `count-defines` | 要不要每条 worldline 的树（`#t` 或 define 名字的列表） | `#f` |
 | `null-genome` | null 候选的源码（目标 rebind 成自己）；目标的 define 不在 seed 里时用 | 从 seed 的文本里取 |
@@ -205,6 +206,7 @@ catalog 条目可以带 `genomes`：一组 `(target, genome)`，或 target → g
 - **内核和 protected 不探。** 默认排除 kernel（把 kernel 换成 stub 永远是 100%）和 intend 的 protected 位点。
 - **上限进策略。** 有探针的候选按 `headroom-pct` 从高到低排（未知的留在后面；`headroom-order #f` 关掉）；`headroom-min-pct N` 让上限低于 N% 的候选直接不进这一轮，报告写 `headroom-skip <id> headroom-pct=… floor-pct=…`，不占预算。
 - 探针数量由 `headroom-max` 限制（默认 6）；`headroom #f` 关闭；`headroom-stub` / `headroom-stubs` 换 stub 表达式。
+- **没余量的位点跨次记住。** 上限低于 `headroom-forget-pct`（默认 5）的位点写一条 `headroom-no-room` 负例；下一次跑先读 memory，报告 `headroom-remembered <site>`，不再为它起探针 child。
 
 ### 10e. 门把三段时间拆开
 

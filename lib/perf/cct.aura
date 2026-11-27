@@ -240,10 +240,35 @@
                       (+ acc (perf:node-clock n))
                       acc)))))))
 
-(define (perf:mine-with profile gene protected)
+; Executable hypotheses are the catalog's own entries when the profile
+; carries one. Each entry already names its target (and optionally a
+; site, an expect, and a counter); class only decides their order. A
+; profile without a catalog keeps the built-in sum-scan table, so older
+; callers and tests are unchanged.
+(define (perf:catalog-hypotheses catalog class site)
+  (if (not (list? catalog))
+      (perf:hypotheses class site)
+      (let loop ((xs catalog) (acc '()))
+        (if (null? xs)
+            (reverse acc)
+            (let ((c (car xs)))
+              (loop (cdr xs)
+                    (if (hash? c)
+                        (cons (hash "id" (hash-ref c "id" "")
+                                    "site" (hash-ref c "site"
+                                                     (hash-ref c "target" site))
+                                    "expect" (hash-ref c "expect" "unjudged")
+                                    "counter" (hash-ref c "counter" "task-clock"))
+                              acc)
+                        acc)))))))
+
+(define (perf:mine-with profile gene protected . rest)
   (let ((cct (if (and (hash? profile) (hash? (hash-ref profile "cct" #f)))
                  (hash-ref profile "cct")
                  #f))
+        (catalog (if (pair? rest)
+                     (car rest)
+                     (if (hash? profile) (hash-ref profile "catalog" #f) #f)))
         (ratio (perf:gene-num gene "ratio" 2))
         (th (perf:gene-num gene "actionable-ms" 1))
         (prot (if (list? protected) protected '())))
@@ -288,7 +313,7 @@
                 "actionable" (perf:cct-actionable cct th prot)
                 "hypotheses" (if (string=? class "native-symbol")
                                  (perf:native-hypotheses site ndso nev)
-                                 (perf:hypotheses class site)))))))
+                                 (perf:catalog-hypotheses catalog class site)))))))
 
 ; The protected defines come from the sealed intend. The miner does not
 ; protect anything on its own: a target that protects nothing is a

@@ -114,11 +114,9 @@ spec 给一条命令和它的 golden，运行时跑它、读退出码。aura-run
 
 验收：一个 spec 只给命令就能有 checksum；oracle 的形式（摘要）仍然是备选。
 
-### 7. 假设从 catalog 来
+### 7. 假设从 catalog 来 —— ✅ 做了
 
-`perf:hypotheses` 现在返回的是 sum-scan 那四个 id。catalog 的每一条本来就可以带自己的 `expect`（门会怎么判、要动哪个计数器），假设应该就是 catalog 的那些条目，class 只决定顺序。
-
-验收：外部目标的 class 不是 sum-scan 的假设 id；sum-scan 的报告不变。
+`perf:mine` 现在优先用 profile 上的 `catalog`：每条 catalog 条目带自己的 `target` / `site`、`expect`、`counter`，class 只决定顺序；gene 的 order waste 也读这张表。没有 catalog 的 profile 才回退到内置的 sum-scan 四个 id。sum-scan 的 catalog 补了 `expect` / `counter`，报告不变；外部目标不再看到 sum-scan 的假设 id。测试：`tests/hypotheses_test.aura`。
 
 ### 8. 负例按位点记 —— ✅ 做了
 

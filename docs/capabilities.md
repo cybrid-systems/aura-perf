@@ -75,7 +75,7 @@ Agent 不接收报告。一次采集得到一个 profile 值，里面有 `cct`�
 
 矿工不做 exclusive 排序然后交出一个函数名。`repeated-index-walk` 的判定是结构的：热叶子（热前缀的最后一个 define）比它**同一个父节点下的兄弟加起来**还贵 `ratio` 倍。名字不在这条规则里：sum-scan 的例子恰好是 `k-ref` 和 `k-length` 并排，别的目标是它自己的 define 和它自己的兄弟。`protected` 也来自 spec，不写死。
 
-分类对应一组**可 trial 的假设**，每条有 id、位点、预期（哪一个门会怎么判）、要动的计数器（下面这组是 sum-scan 的 catalog）：
+分类对应一组**可 trial 的假设**。运行时的假设表就是 spec 的 `catalog`：每条有 id、位点（`site` 或 `target`）、预期 `expect`、要动的计数器 `counter`；class 只决定顺序。没有 `catalog` 的 profile 才回退到内置的 sum-scan 表。下面这组是 sum-scan 的 catalog：
 
 | id | 位点 | 预期 |
 |---|---|---|
@@ -84,7 +84,7 @@ Agent 不接收报告。一次采集得到一个 profile 值，里面有 `cct`�
 | `redundant-pass` | `bench-kernel` | 正确但 task-clock 不降 |
 | `linear-scan` | `bench-kernel` | task-clock 下降 |
 
-LLM proposer 已经接上模型（13）：它的候选就是上面这张表里的一条 catalog 条目，由同一道门判，不是一段建议。
+LLM proposer 已经接上模型（13）：它的候选就是上面这张表里的一条 catalog 条目，由同一道门判，不是一段建议。外部目标只要在自己的 catalog 条目上写 `expect` / `counter`，矿工的假设、gene 的 order waste 和报告读的就是目标自己的表，不是 sum-scan 的四个 id。
 
 度量：一次运行里至少一条假设被拒绝、一条 checksum 失败、一条无加速、一条 KEEP，且 KEEP 后的 CCT 差分方向和 `expect` 一致。
 

@@ -1,0 +1,27 @@
+; The catalog is the hypothesis table: id, site, expect and counter come
+; from the entries, not from the built-in sum-scan names. A profile with
+; no catalog keeps the old table (gene_test covers that path).
+(require "lib/perf/cct" all:)
+
+(define cct
+  (perf:cct-build
+    (list (hash "name" "bench-kernel" "task-clock" 10 "calls" 1
+                "stack" (list "bench-kernel"))
+          (hash "name" "k-ref" "task-clock" 5 "calls" 10
+                "stack" (list "bench-kernel" "k-ref")))))
+
+(define catalog
+  (list (hash "id" "target-wide" "target" "bench-kernel"
+              "expect" "lower-task-clock" "counter" "task-clock")
+        (hash "id" "target-leaf" "target" "k-ref"
+              "expect" "checksum-fail" "counter" "checksum")))
+
+(define mined (perf:mine (hash "cct" cct "catalog" catalog)))
+
+(for-each (lambda (h)
+            (display (list (hash-ref h "id")
+                           (hash-ref h "site")
+                           (hash-ref h "expect")
+                           (hash-ref h "counter"))))
+          (hash-ref mined "hypotheses" '()))
+(newline)

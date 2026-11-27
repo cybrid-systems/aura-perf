@@ -24,7 +24,12 @@
   (hash "id" id
         "target" target
         "genome" (perf:read-text path)
-        "thought" thought))
+        "thought" thought
+        "expect" (cond ((string=? id "wrong-scale") "checksum-fail")
+                       ((string=? id "redundant-pass") "no-speedup")
+                       ((string=? id "linear-scan") "lower-task-clock")
+                       (else "unjudged"))
+        "counter" (if (string=? id "wrong-scale") "checksum" "task-clock")))
 
 ; Each region is timed in its own process. The in-process thunk is only
 ; the fallback if that command does not print a median.
@@ -99,7 +104,9 @@
         (list (hash "id" "specialize-k-ref"
                     "target" "k-ref"
                     "genome" "(define (k-ref xs i) (car xs))"
-                    "thought" "the hot leaf is list-ref; specializing it is the wrong site")
+                    "thought" "the hot leaf is list-ref; specializing it is the wrong site"
+                    "expect" "refuse-protected"
+                    "counter" "protected")
               (load-candidate "wrong-scale"
                               "examples/sum-scan/candidates/wrong-scale.aura"
                               "bench-kernel"

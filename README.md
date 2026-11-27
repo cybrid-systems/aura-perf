@@ -149,6 +149,8 @@ to reports or `out/`.
 | `aura-perf c2c -- CMD` | record and parse `perf c2c` (permission) |
 | `aura-perf mem --file F` | sampled symbols and overhead from `perf mem` |
 | `aura-perf mem -- CMD` | record and parse `perf mem` (permission) |
+| `aura-perf cachestat --file F` | page-cache hits/misses from bcc `cachestat` |
+| `aura-perf cachestat --seconds N` | sample bcc `cachestat` (permission) |
 | `aura-perf doctor [--install]` | evidence-source readiness, exact install and permission commands |
 | `aura-perf test` | runtime and round tests |
 | `aura-perf install` | install nightly if needed, link the command |
@@ -164,6 +166,7 @@ to reports or `out/`.
 | `AURA_PERF_USE_SEC` | 1s window for `use`; 0 takes an instant snapshot |
 | `AURA_PERF_TRACEFS` | tracefs root for `trace` (default `/sys/kernel/tracing`) |
 | `BPFTRACE_BIN` | bpftrace binary for `offcpu`; auto-detected |
+| `CACHESTAT_BIN` | bcc cachestat binary; auto-detected |
 | `AURA_PERF_DOCTOR_GROUPS` | groups `doctor --install` may install (default: non-optional) |
 | `AURA_PERF_DIR` | `~/.local/share/aura-perf` for the curl installer |
 | `PREFIX` | `~/.local/bin` |

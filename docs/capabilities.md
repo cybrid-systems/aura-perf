@@ -475,6 +475,27 @@ memsym [.] bar samples=500 overhead-pct=5.0
 `perf mem` 的符号质量取决于目标二进制的符号和 perf 的符号化配置；没有符号时
 perf 输出 `[unknown]`，运行时原样保留，不猜函数名。
 
+### 12k. bcc cachestat：页缓存命中也是值
+
+`aura-perf cachestat` 把 bcc `cachestat` 的表头加一行样本收成一个值：
+
+```
+cachestattool tool=bcc file=out/cachestat.txt
+cachestat hits=1234 misses=5 dirties=0 hitratio-pct=99.6 buffers-mb=100 cached-mb=900
+```
+
+- **两种入口。** `aura-perf cachestat --file cachestat.txt` 只解析已有输出；
+  `aura-perf cachestat --seconds N` 运行 bcc `cachestat 1 1`，带超时。
+- **按表头取值。** `HITS` / `MISSES` / `DIRTIES` / `HITRATIO` / `BUFFERS_MB` /
+  `CACHED_MB` 的列位置来自表头，不写死。
+- **权限是显式的。** 没有 bcc：`cachestat unavailable reason=no-bcc
+  command="aura-perf doctor --install" fallback=check`，退出 3。权限失败：
+  `cachestat blocked reason=permission command="sudo -v" fallback=check`，退出 4。
+- **不是每轮都开。** round 走 profile/CCT；cachestat 是页缓存行为的诊断入口。
+  `doctor` 里 bcc 仍是 `probe-only`，没有假装每轮都在采。
+
+`CACHESTAT_BIN` 可以指向替代二进制（测试里用假 cachestat）。
+
 ### 13. 模型提议者只提议
 
 `perf:llm-propose` 经 `std/llm` 的 `llm:chat` 问一次模型（aura-perf#29）。接线（三个环境变量）和调用预算写在 README 的「模型提议者」里。这里是边界：

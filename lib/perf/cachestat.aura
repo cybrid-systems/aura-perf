@@ -1,0 +1,72 @@
+; bcc cachestat output as values.
+;
+; Header row plus one sample row: HITS MISSES DIRTIES HITRATIO
+; BUFFERS_MB CACHED_MB. The parser keys off the header, not fixed columns.
+
+(export perf:cachestat-parse perf:cachestat-line)
+
+(require "std/string" all:)
+(require "lib/perf/util" all:)
+
+(define (perf:cs-trim s)
+  (if (not (string? s))
+      ""
+      (let ((n (string-length s)))
+        (let lo ((i 0))
+          (if (or (>= i n) (> (perf:char-at s i) 32))
+              (let hi ((j n))
+                (if (or (<= j i) (> (perf:char-at s (- j 1)) 32))
+                    (substring s i j)
+                    (hi (- j 1))))
+              (lo (+ i 1)))))))
+
+(define (perf:cs-number cell)
+  (let ((n (perf:parse-number (if (string? cell) cell ""))))
+    (if (number? n) n -1)))
+
+(define (perf:cs-index cells key)
+  (let loop ((xs cells) (i 0))
+    (if (null? xs) -1
+        (if (and (string? (car xs)) (string=? (car xs) key)) i
+            (loop (cdr xs) (+ i 1))))))
+
+(define (perf:cachestat-parse text)
+  (let loop ((ls (if (string? text) (string-split text "\n") '()))
+             (header #f) (avail 0) (hits -1) (misses -1) (dirties -1)
+             (ratio -1) (buffers -1) (cached -1))
+    (if (null? ls)
+        (hash "available" avail "hits" hits "misses" misses "dirties" dirties
+              "hitratio-pct" ratio "buffers-mb" buffers "cached-mb" cached)
+        (let* ((line (perf:cs-trim (car ls)))
+               (cells (perf:tokens line)))
+          (cond ((and (not header)
+                      (perf:member? cells "HITS")
+                      (perf:member? cells "MISSES")
+                      (perf:member? cells "HITRATIO"))
+                 (loop (cdr ls) cells avail hits misses dirties ratio buffers cached))
+                ((and header (pair? cells)
+                      (>= (length cells) 6))
+                 (let ((hi (perf:cs-index header "HITS"))
+                       (mi (perf:cs-index header "MISSES"))
+                       (di (perf:cs-index header "DIRTIES"))
+                       (ri (perf:cs-index header "HITRATIO"))
+                       (bi (perf:cs-index header "BUFFERS_MB"))
+                       (ci (perf:cs-index header "CACHED_MB")))
+                   (if (and (>= hi 0) (>= mi 0))
+                       (loop '() header 1
+                             (perf:cs-number (perf:nth cells hi))
+                             (perf:cs-number (perf:nth cells mi))
+                             (perf:cs-number (perf:nth cells di))
+                             (perf:cs-number (perf:nth cells ri))
+                             (perf:cs-number (perf:nth cells bi))
+                             (perf:cs-number (perf:nth cells ci)))
+                       (loop (cdr ls) header avail hits misses dirties ratio buffers cached))))
+                (else (loop (cdr ls) header avail hits misses dirties ratio buffers cached)))))))
+
+(define (perf:cachestat-line v)
+  (string-append "cachestat hits=" (number->string (hash-ref v "hits" -1))
+                 " misses=" (number->string (hash-ref v "misses" -1))
+                 " dirties=" (number->string (hash-ref v "dirties" -1))
+                 " hitratio-pct=" (number->string (hash-ref v "hitratio-pct" -1))
+                 " buffers-mb=" (number->string (hash-ref v "buffers-mb" -1))
+                 " cached-mb=" (number->string (hash-ref v "cached-mb" -1))))

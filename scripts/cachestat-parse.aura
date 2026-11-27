@@ -1,0 +1,12 @@
+(require "std/process" all:)
+(require "lib/perf/cachestat" all:)
+
+(define path (let ((v (getenv "AURA_PERF_CACHESTAT_FILE"))) (if (string? v) v "")))
+(define tool (let ((v (getenv "AURA_PERF_CACHESTAT_TOOL"))) (if (string? v) v "file")))
+(define v (perf:cachestat-parse (perf:read-text path)))
+
+(display (string-append "cachestattool tool=" tool " file=" path))
+(newline)
+(if (= (hash-ref v "available" 0) 1)
+    (begin (display (perf:cachestat-line v)) (newline) (display "") (exit 0))
+    (begin (display "cachestat unavailable reason=no-sample") (newline) (display "") (exit 1)))

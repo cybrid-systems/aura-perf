@@ -1,0 +1,17 @@
+(require "std/string" all:)
+(require "lib/perf/cachestat" all:)
+
+(define (check label ok)
+  (if ok #t (error (string-append "cachestat: " label))))
+
+(define text "    HITS   MISSES  DIRTIES HITRATIO   BUFFERS_MB  CACHED_MB\n    1234        5        0   99.60%          100        900\n")
+(define v (perf:cachestat-parse text))
+(check "available" (= (hash-ref v "available" 0) 1))
+(check "hits" (= (hash-ref v "hits" -1) 1234))
+(check "misses" (= (hash-ref v "misses" -1) 5))
+(check "ratio" (= (hash-ref v "hitratio-pct" -1) 99.6))
+(check "cached" (= (hash-ref v "cached-mb" -1) 900))
+(check "missing" (= (hash-ref (perf:cachestat-parse "") "available" 0) 0))
+(check "line" (string-contains? (perf:cachestat-line v) "misses=5"))
+(display "cachestat ok")
+(newline)

@@ -1,0 +1,5 @@
+(10 80 -1)
+headroom-skip low headroom-pct=10 floor-pct=50
+(high unknown)
+(high low unknown)
+(low)

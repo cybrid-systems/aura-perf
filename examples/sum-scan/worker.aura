@@ -103,6 +103,63 @@
             (list (hash "target" target "genome" null-genome))
             '()))))
 
+; ── headroom probe ───────────────────────────────────────────────
+; A headroom job is not a candidate: it replaces one site with a cheap
+; stub, runs the kernel once, and times it. The difference from the
+; baseline is the site's upper bound. The stub is installed on the live
+; binding with set! (a varargs lambda needs no arity), and the original
+; procedure is restored before the trial returns. A stub that makes the
+; kernel throw is reported as such, not as a 0 ms win.
+(define headroom-stub (hash-ref job "headroom-stub" "0"))
+(define headroom-saved (hash))
+
+(define (headroom-saved-get) headroom-saved)
+
+(define (apply-headroom)
+  (let ((v (try (eval (string->symbol target)) (catch (e) #f))))
+    (if (not (procedure? v))
+        #f
+        (begin
+          (hash-set! (headroom-saved-get) target v)
+          (try (eval (string-append "(set! " target " (lambda args "
+                                    headroom-stub "))"))
+               (catch (e) #f))
+          #t))))
+
+(define (restore-headroom)
+  (try (eval (string-append "(set! " target
+                            " (hash-ref (headroom-saved-get) \"" target "\"))"))
+       (catch (e) #f))
+  #t)
+
+(define (headroom-restored? xs exp)
+  (let ((v (try (run-kernel xs) (catch (e) 'headroom-error))))
+    (equal? v exp)))
+
+(define (headroom-evaluate)
+  (let* ((ho (heldout-of))
+         (xs (hash-ref ho "input" '()))
+         (oracle (hash-ref ho "oracle" perf:sum-ref))
+         (probe (try (run-kernel xs) (catch (e) 'headroom-error))))
+    (if (eq? probe 'headroom-error)
+        (begin
+          (restore-headroom)
+          (let ((r (screen-result -1 (hash "kind" "perf-cct" "nodes" '())
+                                  "headroom-error" -1 0 '())))
+            (hash-set! (hash-ref r "behavior") "restored"
+                       (if (headroom-restored? xs (oracle xs)) 1 0))
+            r))
+        (let ((tm (perf:time-checked repeats run-kernel xs oracle)))
+          (restore-headroom)
+          (let ((r (screen-result -1 (hash "kind" "perf-cct" "nodes" '())
+                                  "headroom"
+                                  (hash-ref tm "median" -1)
+                                  0
+                                  (hash-ref tm "samples" '()))))
+            (hash-set! (hash-ref r "behavior") "restored"
+                       (if (headroom-restored? xs (oracle xs)) 1 0))
+            r)))))
+
 (define (nonempty-mutations? ms)
   (let loop ((xs ms))
     (if (null? xs)
@@ -182,19 +239,20 @@
                 null-heldout-ms))))))
 
 (define (apply-candidate c)
-  (if (or (string=? role "baseline")
-          (not (nonempty-mutations? mutations)))
-      #t
-      (begin
-        ; The base of the site floor, in this process, in the same
-        ; shape as the candidate's own measurement: every target is
-        ; rebound to its own body first, then the candidate set is
-        ; applied on top. One eval after the set, not one per define.
-        (measure-base)
-        (let ((rb (rebind-all mutations "perf-trial")))
-          (if (eq? rb #t)
-              (begin (eval-current) #t)
-              rb)))))
+  (cond ((string=? role "headroom") (apply-headroom))
+        ((string=? role "baseline") #t)
+        ((not (nonempty-mutations? mutations)) #t)
+        (else
+       (begin
+         ; The base of the site floor, in this process, in the same
+         ; shape as the candidate's own measurement: every target is
+         ; rebound to its own body first, then the candidate set is
+         ; applied on top. One eval after the set, not one per define.
+         (measure-base)
+         (let ((rb (rebind-all mutations "perf-trial")))
+           (if (eq? rb #t)
+               (begin (eval-current) #t)
+               rb))))))
 
 (define (run-kernel xs)
   (let ((fn (try (eval (string->symbol kernel-name)) (catch (e) #f))))
@@ -308,6 +366,8 @@
                    "timeout-ms" (hash-ref job "timeout-ms" 60000)
                    "evaluate"
                    (lambda (c)
+                     (if (string=? role "headroom")
+                         (headroom-evaluate)
                      (let ((chk (check-of)))
                        (if (> (hash-ref chk "mismatches" 1) 0)
                            (screen-result -1
@@ -355,7 +415,7 @@
                                    (screen-result screen-ms cct "held-out"
                                                   (hash-ref tm "median")
                                                   (hash-ref tm "mismatches")
-                                                  (hash-ref tm "samples" '())))))))))))
+                                                  (hash-ref tm "samples" '()))))))))))))
 
 (define objs (hash-ref tr "objectives" (hash)))
 (define beh (hash-ref tr "behavior" (hash)))
@@ -375,6 +435,7 @@
         "heldout-ms" (hash-ref objs "heldout-ms" -1)
         "samples" (hash-ref beh "samples" '())
         "fidelity" (hash-ref beh "fidelity" "")
+        "headroom-restored" (hash-ref beh "restored" 0)
         "screen-ms" (hash-ref beh "screen-ms" -1)
         "cct" (hash-ref beh "cct" (hash "kind" "perf-cct" "nodes" '()))
         "cct-source" cct-source

@@ -85,13 +85,11 @@ compile-delta world-rebuilt=0 cascade-full=0 body-only=2 relower-full=36
 
 catalog 条目现在可以带 `genomes`（一组 `(target, genome)`，或 target → genome 的 hash）。worker 先按 `null-mutations` 量整组 null 的 base，再把整组 candidate 依次 `mutate:rebind`，最后只 `eval-current` 一次；任何一条失败，整条 worldline 回滚。类型门逐条 dry-run，protected 和引用检查按组，位点地板按组求和。报告 `ref-target=a+b`、`site a+b base-ms=… cand-ms=…`。测试：`tests/candidate_set_round_test.py`；sum-scan 自己的 KEEP / ROLLBACK 不变。
 
-### 3. 天花板探针：先量「这个位点最多能快多少」
+### 3. 天花板探针：先量「这个位点最多能快多少」—— 部分做了
 
-把一个 define 换成空实现，跑一次 trial，得到的差值就是这个位点能拿到的**上限**。策略据此决定预算花在哪：上限小的位点不值得试，负例里也该记「这个位点没有余量」（现在负例只记「这个想法在这个热点上失败过」）。
+已做：autotune 在每轮预算前跑 headroom job，在自己的 worldline 里把位点的当前绑定 `set!` 成便宜 stub，跑一次 kernel 再恢复；和 fresh baseline child 比较。报告写 `site-headroom <site> base-ms=… free-ms=… headroom-pct=…`，候选行带 `headroom-pct`；stub 让 kernel 抛错时写 `site-headroom-unavailable`。kernel 和 protected 位点默认不探，`headroom-max` 限制数量，`headroom #f` 关闭。
 
-这是 aura-perf 现在最缺的一样东西：它能说「这个想法失败了」，不能说「这个位点没救了」。
-
-验收：报告里每个候选带一个上限数字；策略能用上限排序；上限低于某个阈值的位点不进候选。
+策略已经用上：候选按 `headroom-pct` 从高到低排（`headroom-order #f` 关闭），`headroom-min-pct` 让上限不够的候选不进这一轮（`headroom-skip`），不占预算。还差：把「这个位点没余量」写进跨次负例。
 
 ### 4. 便宜的 screen 量位点，不量整个目标 —— 还差一半
 

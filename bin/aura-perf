@@ -239,6 +239,7 @@ case "$cmd" in
     auto_probe_rc=0
     type_gate_rc=0
     candidate_set_rc=0
+    headroom_rc=0
     joint_rc=0
     if command -v python3 >/dev/null 2>&1; then
       python3 tests/bus_linger_test.py
@@ -267,6 +268,10 @@ case "$cmd" in
       # worldline and the site floor sums its sites.
       python3 tests/candidate_set_round_test.py
       candidate_set_rc=$?
+      # Each hot site's upper bound, measured by a stub in its own
+      # worldline before the round spends its trial budget.
+      python3 tests/headroom_round_test.py
+      headroom_rc=$?
       # aura-perf#30: an agent that cannot boot leaves a report with
       # its log, not a cleanup traceback.
       python3 tests/joint_agent_absent_test.py
@@ -307,6 +312,9 @@ case "$cmd" in
     fi
     if [ "$candidate_set_rc" -ne 0 ]; then
       exit "$candidate_set_rc"
+    fi
+    if [ "$headroom_rc" -ne 0 ]; then
+      exit "$headroom_rc"
     fi
     if [ "$joint_rc" -ne 0 ]; then
       exit "$joint_rc"

@@ -1,0 +1,31 @@
+; Headroom orders candidates and an optional floor drops the ones whose
+; known upper bound is too small. Unknown stays behind and is never
+; filtered; the two candidates here are single-mutation shapes.
+(require "lib/perf/loop" all:)
+
+(define tab
+  (hash "k-ref" (hash "base" 100 "free" 90 "pct" 10)
+        "k-length" (hash "base" 100 "free" 20 "pct" 80)))
+(define spec (hash "headroom" tab "headroom-min-pct" 50))
+
+(define (cand id target)
+  (hash "id" id "target" target
+        "mutations" (list (hash "target" target "genome" ""))))
+
+(define low (cand "low" "k-ref"))
+(define high (cand "high" "k-length"))
+(define unknown (cand "unknown" "bench-kernel"))
+(define buf (hash "lines" '() "refused" '()))
+
+(define (ids xs) (map (lambda (c) (hash-ref c "id" "")) xs))
+
+(display (list (perf:headroom-cand-pct spec low)
+               (perf:headroom-cand-pct spec high)
+               (perf:headroom-cand-pct spec unknown)))
+(newline)
+(display (ids (perf:headroom-filter spec buf (list low high unknown))))
+(newline)
+(display (ids (perf:headroom-order spec (list low high unknown))))
+(newline)
+(display (hash-ref buf "refused" '()))
+(newline)

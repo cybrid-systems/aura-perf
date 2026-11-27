@@ -6,7 +6,8 @@
 (export perf:optimize perf:autotune perf:job-record perf:site-context
         perf:null-body perf:null-id perf:cand-baseline perf:split-reference
         perf:run-targets perf:llm-context perf:llm-round-candidates
-        perf:rule-results perf:any-infra?)
+        perf:rule-results perf:any-infra?
+        perf:headroom-cand-pct perf:headroom-order perf:headroom-filter)
 
 (require "std/evo-core" all:)
 (require "std/evo" all:)
@@ -264,6 +265,7 @@
           "kernel" (hash-ref spec "kernel" (hash-ref spec "target" "bench-kernel"))
           "role" (hash-ref cand "role" "candidate")
           "genome" (hash-ref cand "genome" "")
+          "headroom-stub" (hash-ref cand "headroom-stub" "0")
           "heldout-n" (hash-ref spec "heldout-n")
           "heldout" (perf:bake-one spec (hash-ref spec "heldout-n" 0))
           "screen" (perf:bake-one spec (hash-ref spec "screen-n" 0))
@@ -321,7 +323,11 @@
     " mismatches=" (number->string (hash-ref result "mismatches" -1))
     " live-unchanged=" (number->string (hash-ref result "live-unchanged" 0))
     " trial-applied=" (number->string (hash-ref result "trial-applied" 0))
-    " dur-ms=" (number->string (hash-ref result "dur-ms" 0)))))
+    " dur-ms=" (number->string (hash-ref result "dur-ms" 0))
+    (let ((hp (hash-ref result "headroom-pct" #f)))
+      (if (number? hp)
+          (string-append " headroom-pct=" (number->string hp))
+          "")))))
 
 (define (perf:sum-dur results)
   (let loop ((xs results) (acc 0))
@@ -640,6 +646,14 @@
                     (hash-set! result "ref-ms" cand-base)
                     (hash-set! result "ref-target"
                                (perf:join (perf:cand-targets spec (car xs)) "+"))
+                    (let ((hr (perf:headroom-of spec (perf:cand-sites (car xs)))))
+                      (if (hash? hr)
+                          (begin
+                            (hash-set! result "headroom-ms" (hash-ref hr "ms" 0))
+                            (hash-set! result "headroom-pct"
+                                       (perf:delta-pct (hash-ref hr "base" 0)
+                                                       (hash-ref hr "ms" 0))))
+                          #f))
                     (hash-set! result "site-context" site)
                     (hash-set! result "site-floor" site-floor)
                     (hash-set! result "bus-verdict" bus-res)
@@ -902,6 +916,58 @@
         (let ((left (- cap used)))
           (if (< left 0) 0 left)))))
 
+; Headroom as a strategy input: known upper bounds order the round
+; (highest first; unknown stays behind), and an optional floor drops a
+; candidate whose sites all have less headroom than the spec asks for.
+; "headroom-order" #f keeps the strategy order; "headroom-min-pct" is
+; absent by default, so older specs behave exactly as before.
+(define (perf:headroom-cand-pct spec cand)
+  (let ((hr (perf:headroom-of spec (perf:cand-sites cand))))
+    (if (hash? hr)
+        (perf:delta-pct (hash-ref hr "base" 0) (hash-ref hr "ms" 0))
+        -1)))
+
+(define (perf:headroom-order spec cands)
+  (if (eq? (hash-ref spec "headroom-order" #t) #f)
+      cands
+      (let ((known (let loop ((xs cands))
+                     (if (null? xs)
+                         #f
+                         (if (>= (perf:headroom-cand-pct spec (car xs)) 0)
+                             #t
+                             (loop (cdr xs)))))))
+        (if known
+            (sort cands (lambda (a b)
+                          (> (perf:headroom-cand-pct spec a)
+                             (perf:headroom-cand-pct spec b))))
+            cands))))
+
+(define (perf:headroom-filter spec buf cands)
+  (let* ((intend (hash-ref spec "intend" (hash)))
+         (floor (hash-ref spec "headroom-min-pct"
+                          (if (hash? intend)
+                              (hash-ref intend "headroom-min-pct" #f)
+                              #f))))
+    (if (not (and (number? floor) (> floor 0)))
+        cands
+        (let loop ((xs cands) (acc '()))
+          (if (null? xs)
+              (reverse acc)
+              (let* ((c (car xs))
+                     (p (perf:headroom-cand-pct spec c))
+                     (id (hash-ref c "id" "?")))
+                (if (and (number? p) (>= p 0) (< p floor))
+                    (begin
+                      (perf:say buf (string-append
+                                      "headroom-skip " id
+                                      " headroom-pct=" (number->string p)
+                                      " floor-pct=" (number->string floor)))
+                      ; Keep the next round's order from re-planning it.
+                      (hash-set! buf "refused"
+                                 (cons id (hash-ref buf "refused" '())))
+                      (loop (cdr xs) acc))
+                    (loop (cdr xs) (cons c acc)))))))))
+
 (define (perf:round-candidates spec plan buf)
   (let* ((wide (hash "order" (perf:order-of plan) "per-round" 100))
          (raw (perf:rule-propose (perf:catalog spec) (hash "plan" wide)))
@@ -910,13 +976,15 @@
                                          (hash-ref buf "memory" '())
                                          (hash-ref spec "class" "")
                                          (hash-ref spec "hot-node" "")))
+         (ordered (perf:headroom-order spec (hash-ref filtered "ok" '())))
+         (gated (perf:headroom-filter spec buf ordered))
          (k0 (let ((n (hash-ref plan "per-round" 1)))
                (if (and (number? n) (> n 0)) n 1)))
          (k (let ((left (perf:budget-left spec buf)))
               (if (< left k0) left k0))))
     (perf:refuse-each spec buf (hash-ref split "refused" '()))
     (perf:say-skips buf spec (hash-ref filtered "skipped" '()))
-    (perf:take (hash-ref filtered "ok" '()) k)))
+    (perf:take gated k)))
 
 ; A candidate the sealed intend protects is refused before any trial.
 ; The refusal is a decision: the report counts it, and the audit and
@@ -1676,6 +1744,141 @@
                   (hash-set! buf "budget" (+ (hash-ref buf "budget" 0) (length cands)))
                   (perf:trial-round spec cands out buf baseline))))))))
 
+; ── headroom probes ──────────────────────────────────────────────
+; How much can a site win at most? Replace it with a cheap stub, run the
+; kernel once, and compare. This is evidence, not a candidate: it never
+; enters a gate, never KEEPs, and never changes the live workspace. The
+; probe runs in its own trial worldline, like every other worker job.
+(define PERF-HEADROOM-MAX 6)
+
+(define (perf:headroom-stub spec site)
+  (let* ((stubs (hash-ref spec "headroom-stubs" (hash)))
+         (one (if (hash? stubs) (hash-ref stubs site #f) #f))
+         (dflt (hash-ref spec "headroom-stub" "0")))
+    (cond ((and (string? one) (> (string-length one) 0)) one)
+          ((and (string? dflt) (> (string-length dflt) 0)) dflt)
+          (else "0"))))
+
+; The hottest user defines the profile names, minus the kernel and the
+; protected boundary. Top PERF-HEADROOM-MAX (or the spec's headroom-max).
+(define (perf:headroom-sites spec profile)
+  (let* ((kernel (hash-ref spec "kernel" (hash-ref spec "target" "bench-kernel")))
+         (protected (perf:protected spec))
+         (maxn (let ((n (hash-ref spec "headroom-max" PERF-HEADROOM-MAX)))
+                 (if (and (number? n) (> n 0)) n PERF-HEADROOM-MAX))))
+    (let loop ((xs (perf:hotspots profile)) (acc '()))
+      (if (or (null? xs) (>= (length acc) maxn))
+          (reverse acc)
+          (let ((n (hash-ref (car xs) "name" "")))
+            (loop (cdr xs)
+                  (if (and (string? n) (not (string=? n ""))
+                           (not (string=? n kernel))
+                           (not (perf:member? protected n))
+                           (not (perf:member? acc n)))
+                      (cons n acc)
+                      acc)))))))
+
+(define (perf:headroom-job spec site out)
+  (perf:job-record spec
+                   (hash "id" (string-append "headroom-" (perf:id-safe site))
+                         "role" "headroom"
+                         "target" site
+                         "genome" ""
+                         "headroom-stub" (perf:headroom-stub spec site))
+                   out))
+
+(define (perf:headroom-pct base free)
+  (if (and (number? base) (> base 0)
+           (number? free) (>= free 0))
+      (quotient (* (- base free) 100) base)
+      -1))
+
+; A saved millisecond delta as a percentage of its base.
+(define (perf:delta-pct base delta)
+  (if (and (number? base) (> base 0) (number? delta) (>= delta 0))
+      (quotient (* delta 100) base)
+      -1))
+
+; One probe batch: a fresh baseline child and one child per site. The
+; batch is diagnostic, so it does not touch the intend's budget counter.
+; A site whose stub makes the kernel throw is reported unavailable, not
+; as a 0 ms win.
+(define (perf:headroom-probes spec buf profile out baseline)
+  (if (or (eq? (hash-ref spec "headroom" #t) #f)
+          (not (number? baseline)) (<= baseline 0))
+      (hash)
+      (let ((sites (perf:headroom-sites spec profile)))
+        (if (null? sites)
+            (begin (hash-set! spec "headroom" (hash)) (hash))
+            (let* ((kernel (hash-ref spec "kernel" (hash-ref spec "target" "bench-kernel")))
+             (base-rec (perf:job-record spec
+                                        (hash "id" "headroom-baseline"
+                                              "role" "baseline"
+                                              "target" kernel
+                                              "genome" "")
+                                        out))
+             (jobs (cons base-rec
+                         (let loop ((xs sites) (acc '()))
+                           (if (null? xs)
+                               (reverse acc)
+                               (loop (cdr xs)
+                                     (cons (perf:headroom-job spec (car xs) out) acc)))))))
+        (perf:write-jobs jobs)
+        (let* ((batch (perf:launch-jobs jobs (hash-ref spec "worker")))
+               (results (hash-ref batch "results" '()))
+               (base-res (perf:find-result results "headroom-baseline"))
+               (base-ms (if (perf:usable-ms base-res)
+                            (hash-ref base-res "heldout-ms")
+                            baseline))
+               (tab (hash)))
+          (let loop ((xs sites))
+            (if (null? xs)
+                #t
+                (let* ((site (car xs))
+                       (id (string-append "headroom-" (perf:id-safe site)))
+                       (r (perf:find-result results id))
+                       (free (if (and (perf:usable-ms r)
+                                      (= (hash-ref r "headroom-restored" 0) 1)
+                                      (number? (hash-ref r "heldout-ms" -1)))
+                                 (hash-ref r "heldout-ms")
+                                 -1)))
+                  (if (>= free 0)
+                      (let ((pct (perf:headroom-pct base-ms free)))
+                        (hash-set! tab site
+                                   (hash "base" base-ms "free" free "pct" pct))
+                        (perf:say buf (string-append
+                                        "site-headroom " site
+                                        " base-ms=" (number->string base-ms)
+                                        " free-ms=" (number->string free)
+                                        " headroom-pct=" (number->string pct))))
+                      (perf:say buf (string-append
+                                      "site-headroom-unavailable " site
+                                      " reason=" (if (hash? r)
+                                                     (hash-ref r "fidelity"
+                                                               (hash-ref r "error" "no-result"))
+                                                     "no-result"))))
+                  (loop (cdr xs)))))
+            (hash-set! spec "headroom" tab)
+            tab))))))
+
+; Sum of the probed sites' headroom, or #f when any site was not probed.
+; The base sum is the same probes' references, so a candidate's headroom
+; percentage is measured against the shape the probes used, not against
+; the candidate's own rebind reference.
+(define (perf:headroom-of spec sites)
+  (let ((tab (hash-ref spec "headroom" (hash))))
+    (let loop ((xs (if (list? sites) sites '())) (ms 0) (base 0))
+      (if (null? xs)
+          (hash "ms" ms "base" base)
+          (let ((h (hash-ref tab (car xs) #f)))
+            (if (and (hash? h)
+                     (number? (hash-ref h "base" -1))
+                     (number? (hash-ref h "free" -1)))
+                (loop (cdr xs)
+                      (+ ms (- (hash-ref h "base") (hash-ref h "free")))
+                      (+ base (hash-ref h "base")))
+                #f))))))
+
 (define (perf:optimize spec)
   (let* ((memory-path (perf:memory-path spec))
          (buf (hash "lines" '() "brief" '()
@@ -1740,6 +1943,7 @@
                                        (hash-ref profile "region-measure" "in-process")
                                        " held-out=trial-child comparable=0"))
           (perf:say-machine buf)
+          (perf:headroom-probes spec buf profile out baseline)
           (let ((bin (hash-ref (hash-ref profile "tools" (hash)) "perf" "missing")))
             (if (and (string? bin) (not (string=? bin "missing")))
                 (let ((live (perf:measure-live bin (lambda () (perf:run-kernel spec 4000)))))

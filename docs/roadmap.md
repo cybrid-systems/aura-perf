@@ -104,9 +104,9 @@ screen 的同一轮里量 screen 输入的 worldline 树，决策读候选位点
 个不同的值 ✗。null 候选（门自己的参照 ✓）应该每一轮都重测 ✓，那一轮的候选就对着同一
 时刻的参照比 ✓。
 
-### 5. 门把三段时间拆开
+### 5. 门把三段时间拆开 —— ✅ 做了
 
-基线（未 rebind）、null 候选（rebind 到自身）、候选（rebind 到新写法）三段时间都在报告里，并写明：mutation 的效果 = 候选 − null，rebind 的税 = null − 基线。用户在 aura-runner 上看到的正是这个区分：`pxs-listref` 那个候选「慢 35%」其实全是 rebind 的税。
+基线（未 rebind）、null 候选（rebind 到自身）、候选（rebind 到新写法）三段时间都在报告里，并写明：mutation 的效果 = 候选 − null，rebind 的税 = null − 基线。`split <id> raw-ms=… null-ms=… cand-ms=… mutation-effect-ms=… rebind-tax-ms=…`；候选行和 audit evidence 也带这两个差值。用户在 aura-runner 上看到的正是这个区分：`pxs-listref` 那个候选「慢 35%」其实全是 rebind 的税。
 
 ### 6. checksum 走目标自己的门
 

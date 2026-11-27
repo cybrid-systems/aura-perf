@@ -206,6 +206,20 @@ catalog 条目可以带 `genomes`：一组 `(target, genome)`，或 target → g
 - **上限进策略。** 有探针的候选按 `headroom-pct` 从高到低排（未知的留在后面；`headroom-order #f` 关掉）；`headroom-min-pct N` 让上限低于 N% 的候选直接不进这一轮，报告写 `headroom-skip <id> headroom-pct=… floor-pct=…`，不占预算。
 - 探针数量由 `headroom-max` 限制（默认 6）；`headroom #f` 关闭；`headroom-stub` / `headroom-stubs` 换 stub 表达式。
 
+### 10e. 门把三段时间拆开
+
+每个候选的 held-out 现在写清三段：un-rebound baseline（raw）、null candidate（target rebind 成自己的函数体）、candidate。报告一条：
+
+```
+split linear-scan raw-ms=245 null-ms=857 cand-ms=9 mutation-effect-ms=-848 rebind-tax-ms=612
+```
+
+- `mutation-effect-ms = cand − null`：候选自己的效果（负数才是快）。
+- `rebind-tax-ms = null − raw`：一次 rebind 本身让这段代码变慢多少；它和候选改了什么无关。
+- 候选行也带 `mutation-effect-ms` / `rebind-tax-ms`，audit evidence 里有同一对数。
+
+这样 `null-ms` 远大于 `raw-ms` 的 run（JIT 预热、rebind 税）不会把「候选写得好」和「参照物被 rebind 拖慢」混成一个数；门仍然用同一轮的 null 作参考，报告同时把两段差写出来。
+
 ### 11. 便宜筛选，再花 held-out
 
 Checksum 失败的候选不做 held-out。正确的候选先在 `screen-n` 上计一次，**同时在同一 child 里量这次 screen 输入的 worldline 树**（目标自己的 `perf-worldline-measure`，没有就用 auto-probe）。screen 决策读候选的位点（组候选是各位点之和）对 null base 的同一组位点：只有位点明显更差（慢过两倍，并且慢过 base 加 slack）才 `screen-pruned`。base 树没有位点时退回整 kernel 的 `screen-ms`。活下来的才跑 held-out。候选行带 `screen-site-ms=… screen-base-site-ms=…`，报告写明 `screen-site=<site>`；位点快了但整 kernel 没动，screen 也能看见。

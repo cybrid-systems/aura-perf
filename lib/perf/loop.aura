@@ -339,6 +339,12 @@
     (let ((eng (hash-ref result "engine" #f)))
       (if (and (hash? eng) (= (hash-ref eng "available" 0) 1))
           (string-append " rebuild=" (number->string (hash-ref eng "world-rebuilt" 0)))
+          ""))
+    (let ((me (hash-ref result "mutation-effect-ms" #f))
+          (rt (hash-ref result "rebind-tax-ms" #f)))
+      (if (and (number? me) (number? rt))
+          (string-append " mutation-effect-ms=" (number->string me)
+                         " rebind-tax-ms=" (number->string rt))
           "")))))
 
 (define (perf:sum-dur results)
@@ -643,6 +649,17 @@
                     (hash-set! result "moved-to" (perf:join (hash-ref q "moved-to" '()) ","))
                     (hash-set! result "target" (hash-ref (car xs) "target" ""))
                     (hash-set! result "ref-ms" cand-base)
+                    (let* ((held (hash-ref result "heldout-ms" -1))
+                           (effect (if (and (number? held) (>= held 0)
+                                            (number? cand-base) (> cand-base 0))
+                                       (- held cand-base)
+                                       -1))
+                           (tax (if (and (number? raw) (> raw 0)
+                                         (number? cand-base) (> cand-base 0))
+                                    (- cand-base raw)
+                                    -1)))
+                      (hash-set! result "mutation-effect-ms" effect)
+                      (hash-set! result "rebind-tax-ms" tax))
                     (hash-set! result "ref-target"
                                (perf:join (perf:cand-targets spec (car xs)) "+"))
                     (let ((hr (perf:headroom-of spec (perf:cand-sites (car xs)))))
@@ -663,6 +680,13 @@
                         #f)
                     (hash-set! buf "results" (append (hash-ref buf "results" '()) (list result)))
                     (perf:say buf (perf:format-candidate result cand-base pct raw site))
+                    (perf:say buf (string-append
+                                    "split " id
+                                    " raw-ms=" (number->string (if raw raw -1))
+                                    " null-ms=" (number->string cand-base)
+                                    " cand-ms=" (number->string (hash-ref result "heldout-ms" -1))
+                                    " mutation-effect-ms=" (number->string (hash-ref result "mutation-effect-ms" -1))
+                                    " rebind-tax-ms=" (number->string (hash-ref result "rebind-tax-ms" -1))))
                     (let ((eng (hash-ref result "engine" (hash))))
                       (if (and (hash? eng) (= (hash-ref eng "available" 0) 1))
                           (perf:say buf (string-append
@@ -708,7 +732,9 @@
                             "moved-to" (hash-ref result "moved-to" "")
                             "fidelity" (hash-ref result "fidelity" "")
                             "cct-delta" (perf:delta-brief (hash-ref q "delta" '()))
-                            "engine" (hash-ref result "engine" (hash))))
+                            "engine" (hash-ref result "engine" (hash))
+                            "mutation-effect-ms" (hash-ref result "mutation-effect-ms" -1)
+                            "rebind-tax-ms" (hash-ref result "rebind-tax-ms" -1)))
                     (if pass
                         #t
                         (begin

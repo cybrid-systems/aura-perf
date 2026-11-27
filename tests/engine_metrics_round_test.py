@@ -22,6 +22,7 @@ def main():
     lines = report.splitlines()
     engines = [ln for ln in lines if ln.startswith("trial-engine ")]
     candidates = [ln for ln in lines if ln.startswith("candidate ")]
+    splits = [ln for ln in lines if ln.startswith("split ")]
 
     check.that("engine: the trial line exists", len(engines) >= 1, str(candidates))
     if engines:
@@ -33,6 +34,13 @@ def main():
                                            "arena-compacts=")), line)
         check.that("engine: the candidate line carries the rebuild bit",
                    any("rebuild=" in ln for ln in candidates), str(candidates))
+        check.that("engine: the time split is a separate line",
+                   any(ln.startswith("split linear-scan ")
+                       and "raw-ms=" in ln and "null-ms=" in ln and "cand-ms=" in ln
+                       and "mutation-effect-ms=" in ln and "rebind-tax-ms=" in ln
+                       for ln in splits), str(splits))
+        check.that("engine: the candidate line carries the mutation effect",
+                   any("mutation-effect-ms=" in ln for ln in candidates), str(candidates))
     check.that("engine: the round still met its intend",
                run.returncode == 0 and lines[:1] and lines[0].startswith("verdict intend-met=1"),
                f"rc={run.returncode} {lines[:1]}")

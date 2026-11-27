@@ -1,0 +1,139 @@
+; perf sched latency as values. This is the wakeup-latency view: per task
+; runtime, switch count, average and maximum scheduling delay.
+;
+; The parser reads the text perf already produced. It does not run perf and
+; does not need root; recording is the caller's permission decision.
+
+(export perf:schedtrace-parse perf:schedtrace-lines perf:schedtrace-top)
+
+(require "std/string" all:)
+(require "lib/perf/util" all:)
+
+(define (perf:st-trim s)
+  (if (not (string? s))
+      ""
+      (let ((n (string-length s)))
+        (let lo ((i 0))
+          (if (or (>= i n) (> (perf:char-at s i) 32))
+              (let hi ((j n))
+                (if (or (<= j i) (> (perf:char-at s (- j 1)) 32))
+                    (substring s i j)
+                    (hi (- j 1))))
+              (lo (+ i 1)))))))
+
+(define (perf:st-cells line)
+  (map perf:st-trim (string-split line "|")))
+
+(define (perf:st-number cell)
+  (let loop ((xs (perf:tokens (if (string? cell) cell ""))))
+    (if (null? xs)
+        #f
+        (let ((n (perf:parse-number (car xs))))
+          (if (number? n) n (loop (cdr xs)))))))
+
+(define (perf:st-index cells needle)
+  (let loop ((xs cells) (i 0))
+    (if (null? xs)
+        -1
+        (if (and (string? (car xs))
+                 (string-contains? (car xs) needle))
+            i
+            (loop (cdr xs) (+ i 1))))))
+
+(define (perf:st-header text)
+  (let loop ((ls (if (string? text) (string-split text "\n") '())))
+    (if (null? ls)
+        #f
+        (let ((cells (perf:st-cells (car ls))))
+          (if (and (> (length cells) 2)
+                   (> (perf:st-index cells "Runtime") 0)
+                   (> (perf:st-index cells "Switches") 0))
+              cells
+              (loop (cdr ls)))))))
+
+(define (perf:st-rindex s ch)
+  (let loop ((i (- (string-length s) 1)))
+    (cond ((< i 0) -1)
+          ((= (perf:char-at s i) ch) i)
+          (else (loop (- i 1))))))
+
+(define (perf:st-task cell)
+  (let* ((t (perf:st-trim cell))
+         (open (perf:st-rindex t 40))
+         (close (perf:st-rindex t 41)))
+    (if (and (> open 0) (> close open))
+        (let* ((name (perf:st-trim (substring t 0 open)))
+               (pid (perf:parse-number (perf:st-trim (substring t (+ open 1) close)))))
+          (hash "task" name
+                "pid" (if (number? pid) pid -1)))
+        (hash "task" t "pid" -1))))
+
+(define (perf:st-row cells idx)
+  (let* ((task (perf:st-task (perf:nth cells 0)))
+         (runtime (let ((v (perf:nth cells (hash-ref idx "runtime" 1))))
+                    (perf:st-number v)))
+         (switches (let ((v (perf:nth cells (hash-ref idx "switches" 2))))
+                     (perf:st-number v)))
+         (avg (let ((v (perf:nth cells (hash-ref idx "avg" 3))))
+                (perf:st-number v)))
+         (maxd (let ((v (perf:nth cells (hash-ref idx "max" 4))))
+                 (perf:st-number v))))
+    (hash "task" (hash-ref task "task" "?")
+          "pid" (hash-ref task "pid" -1)
+          "runtime-ms" (if (number? runtime) runtime -1)
+          "switches" (if (number? switches) switches -1)
+          "avg-delay-ms" (if (number? avg) avg -1)
+          "max-delay-ms" (if (number? maxd) maxd -1))))
+
+; Header-driven columns, with the historical 5-column layout as fallback.
+; The task cell is always the first cell; all later cells may contain units.
+(define (perf:st-col header name fallback)
+  (let ((i (perf:st-index header name)))
+    (if (< i 0) fallback i)))
+
+(define (perf:st-idx header)
+  (if (and header (> (length header) 3))
+      (hash "runtime" (perf:st-col header "Runtime" 1)
+            "switches" (perf:st-col header "Switches" 2)
+            "avg" (perf:st-col header "Average delay"
+                               (perf:st-col header "avg delay" 3))
+            "max" (perf:st-col header "Maximum delay" 4))
+      (hash "runtime" 1 "switches" 2 "avg" 3 "max" 4)))
+
+(define (perf:schedtrace-parse text)
+  (let* ((header (perf:st-header text))
+         (idx (perf:st-idx header)))
+    (let loop ((ls (if (string? text) (string-split text "
+") '()))
+               (rows '()))
+      (if (null? ls)
+          (reverse rows)
+          (let* ((line (perf:st-trim (car ls)))
+                 (cells (perf:st-cells line))
+                 (first (if (pair? cells) (perf:st-trim (car cells)) "")))
+            (if (and (string-contains? line "|")
+                     (> (length cells) 3)
+                     (not (string=? first ""))
+                     (not (string-contains? first "Task"))
+                     (not (string-contains? first "Total"))
+                     (not (string-contains? first "---")))
+                (loop (cdr ls) (cons (perf:st-row cells idx) rows))
+                (loop (cdr ls) rows)))))))
+
+(define (perf:schedtrace-line row)
+  (string-append "schedtask " (hash-ref row "task" "?")
+                 " pid=" (number->string (hash-ref row "pid" -1))
+                 " runtime-ms=" (number->string (hash-ref row "runtime-ms" -1))
+                 " switches=" (number->string (hash-ref row "switches" -1))
+                 " avg-delay-ms=" (number->string (hash-ref row "avg-delay-ms" -1))
+                 " max-delay-ms=" (number->string (hash-ref row "max-delay-ms" -1))))
+
+(define (perf:schedtrace-lines rows)
+  (map perf:schedtrace-line (if (list? rows) rows '())))
+
+(define (perf:schedtrace-top rows n)
+  (perf:take (sort (if (list? rows) rows '())
+                   (lambda (a b)
+                     (> (hash-ref a "max-delay-ms" -1)
+                        (hash-ref b "max-delay-ms" -1))))
+             n))

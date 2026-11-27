@@ -1,0 +1,18 @@
+(require "std/process" all:)
+(require "lib/perf/schedtrace" all:)
+
+(define path (let ((v (getenv "AURA_PERF_SCHED_FILE"))) (if (string? v) v "")))
+(define tool (let ((v (getenv "AURA_PERF_SCHED_TOOL"))) (if (string? v) v "file")))
+(define rows (perf:schedtrace-parse (perf:read-text path)))
+(define top (perf:schedtrace-top rows 20))
+
+(display (string-append "schedtrace tool=" tool
+                        " file=" path
+                        " tasks=" (number->string (length rows))))
+(newline)
+(let loop ((xs (perf:schedtrace-lines top)))
+  (if (null? xs)
+      #t
+      (begin (display (car xs)) (newline) (loop (cdr xs)))))
+(display "")
+(exit (if (null? rows) 1 0))

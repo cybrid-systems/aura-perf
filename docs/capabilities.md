@@ -356,6 +356,29 @@ use io psi-avg10=-1 note="disk sectors and net bytes are in perf:check-sample"
 这层是机器层，不是某个候选的账。候选自己的调度等待在 `sched` 行，尾延迟在
 `latency` 行；两者和 USE 分开，避免把机器噪声记到候选头上。
 
+### 12f. perf sched：唤醒延迟也是值
+
+schedstat 说的是“这个任务等了多久”；`perf sched` 还能给出每个任务的 runtime、
+切换次数、平均/最大唤醒延迟。`aura-perf sched` 把 `perf sched latency` 的文本
+变成一行一个任务：
+
+```
+schedtask aura pid=123 runtime-ms=12.5 switches=4 avg-delay-ms=0.25 max-delay-ms=1.5
+```
+
+两种入口：
+
+- `aura-perf sched --file out/sched-latency.txt`：只解析已有文本，不需要 perf、
+  不需要权限。
+- `aura-perf sched -- COMMAND [ARGS...]`：用 `perf sched record` 记录这条命令，
+  再解析 `perf sched latency`。这一步要 perf 和 perf_event 权限；没有 perf 时打印
+  `sched unavailable reason=no-perf`（退出 3），权限失败时打印
+  `sched blocked reason=permission ... fallback=schedstat`（退出 4），不伪造轨迹。
+
+`doctor` 的 `source sched` 仍写 `wired=no`：round 的自动路径用的是 schedstat，
+`perf sched` 是给 agent 的诊断入口，不是每轮都开 trace。tracefs / bpftrace 的
+`sched_switch` / off-CPU 采样还在后面，未接。
+
 ### 13. 模型提议者只提议
 
 `perf:llm-propose` 经 `std/llm` 的 `llm:chat` 问一次模型（aura-perf#29）。接线（三个环境变量）和调用预算写在 README 的「模型提议者」里。这里是边界：

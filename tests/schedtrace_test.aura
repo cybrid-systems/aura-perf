@@ -1,0 +1,28 @@
+; perf sched latency text -> one value per task.
+(require "std/string" all:)
+(require "lib/perf/schedtrace" all:)
+
+(define (check label ok)
+  (if ok #t (error (string-append "schedtrace: " label))))
+
+(define text " Task                  |   Runtime ms  |  Switches |   Average delay ms |   Maximum delay ms |
+----------------------------------------------------------------------------------------
+  aura (123)           |      12.500   |        4 |               0.250 |              1.500 |
+  worker (456)         |       3.000   |        2 |               0.100 |              0.400 |
+")
+(define rows (perf:schedtrace-parse text))
+(check "two rows" (= (length rows) 2))
+(define a (car rows))
+(check "task name" (string=? (hash-ref a "task" "") "aura"))
+(check "pid" (= (hash-ref a "pid" -1) 123))
+(check "runtime" (= (hash-ref a "runtime-ms" -1) 12.5))
+(check "switches" (= (hash-ref a "switches" -1) 4))
+(check "avg delay" (= (hash-ref a "avg-delay-ms" -1) 0.25))
+(check "max delay" (= (hash-ref a "max-delay-ms" -1) 1.5))
+(define top (perf:schedtrace-top rows 1))
+(check "top by max delay" (and (= (length top) 1)
+                               (string=? (hash-ref (car top) "task" "") "aura")))
+(check "line" (string-contains? (car (perf:schedtrace-lines rows)) "max-delay-ms="))
+(check "empty" (null? (perf:schedtrace-parse "")))
+(display "schedtrace ok")
+(newline)

@@ -145,7 +145,8 @@ spec 给一条命令和它的 golden，运行时跑它、读退出码。aura-run
 - ~~USE 的 CPU/内存/调度层~~ ✅：`aura-perf use` 输出 utilization/saturation/errors，
   内存饱和看 vmstat 活动而不是 swap 占用。
 - 语义火焰：节点可以是策略阶段或规则。
-- `perf c2c` / `perf mem` / `perf sched` 现在只探测子命令在不在；`aura-perf doctor` 明确写 `wired=no`。PMU 可用时才采样，并仍不把缺测写成 0。
+- `perf sched` 的 latency 解析和 `aura-perf sched` 已接；live record 仍要权限，schedstat 是默认 round 证据。
+- `perf c2c` / `perf mem` 只探测子命令；tracefs / bpftrace 的 sched_switch / off-CPU 采样还没接。
 - bpftrace / bcc 只在已经安装时登记，不附带脚本；`doctor` 报告 `probe-only`，安装命令显式列出。
 - 机器层建议的跨次负例（现在的负例记的是同一次 autotune 里的程序热点）。
 - KernelBench 式算子和 [aura-kernel-sink](https://github.com/cybrid-systems/aura-kernel-sink) 的 C 下沉，作为一种假设接进 autotune。没有 GPU 就不报 SOL。

@@ -139,6 +139,8 @@ to reports or `out/`.
 | `aura-perf sysinfo` | machine inventory |
 | `aura-perf check` | 1s CPU/disk/network/interrupt deltas |
 | `aura-perf use` | USE: CPU/memory utilization + saturation, scheduler queues, PSI |
+| `aura-perf sched --file F` | wakeup latency from a `perf sched latency` trace |
+| `aura-perf sched -- CMD` | record and parse a command with `perf sched` (permission) |
 | `aura-perf doctor [--install]` | evidence-source readiness, exact install and permission commands |
 | `aura-perf test` | runtime and round tests |
 | `aura-perf install` | install nightly if needed, link the command |

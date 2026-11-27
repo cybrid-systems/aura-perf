@@ -470,6 +470,7 @@
          (trialable (car type-split))
          (type-rejected (car (cdr type-split)))
          (bus (hash-ref buf "bus" #f))
+         (task (perf:bus-task-open bus (string-append "trial-round " (perf:ids trialable))))
          (records (let loop ((xs trialable) (acc '()))
                     (if (null? xs)
                         (reverse acc)
@@ -718,7 +719,9 @@
                                                         (hash-ref spec "hot-node" "")
                                                         id
                                                         (perf:short-reason reason))))))))
-              (loop (cdr xs)))))))
+              (let ((res (loop (cdr xs))))
+                (perf:bus-task-close bus task (length res) (perf:any-infra? res))
+                res))))))
 
 (define (perf:best-passing spec results baseline pct . rest)
   (let ((raw (if (pair? rest) (car rest) #f)))

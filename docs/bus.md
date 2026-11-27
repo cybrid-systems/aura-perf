@@ -44,6 +44,23 @@ that is one tool's own mechanics. The bus is the **inter-tool** main
 path: CCT, hypotheses, verdicts and the audit no longer need temp files
 to be seen by the other tools.
 
+## Round tasks
+
+In self-host mode each trial round is a task on the board. Perf posts one
+task whose ref is the rolling hash of `trial-round <candidate ids>`,
+claims it with a 10-minute lease, and completes or fails it when the
+round returns:
+
+```
+bus-task open id=1 ref=872450771
+bus-task close id=1 state=done n=1
+```
+
+A failed round is `state=failed` with the number of results it managed.
+Post or claim failures are report lines; they never stop the round.
+Attach-only mode posts no task: the external judge owns the board, and
+perf remains a proposer.
+
 ## Channel mapping
 
 The image carries immediates, not text; the mapping is:

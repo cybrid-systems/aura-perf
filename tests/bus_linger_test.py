@@ -106,6 +106,13 @@ def main():
                     print(f"FAIL linger: unclean window end rc={rc} socket={sock.exists()}")
                     print(text[-400:])
                     fail = 1
+                report = (ROOT / "out" / "report.txt")
+                report_text = report.read_text() if report.is_file() else ""
+                if "bus-task open id=" in report_text and "bus-task close id=" in report_text:
+                    print("ok linger: the round was a claimed bus task")
+                else:
+                    print("FAIL linger: the round carried no bus task")
+                    fail = 1
             except subprocess.TimeoutExpired:
                 print("FAIL linger: round did not exit after stdin EOF")
                 fail = 1

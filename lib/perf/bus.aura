@@ -48,7 +48,8 @@
         perf:bus-trial perf:bus-verdict perf:bus-finish perf:bus-mid
         perf:bus-workspace perf:bus-linger-seconds perf:bus-linger
         perf:bus-host-enabled? perf:bus-propose perf:bus-propose-multi
-        perf:bus-subscribe-signals perf:bus-define-nodes)
+        perf:bus-subscribe-signals perf:bus-define-nodes
+        perf:bus-task-open perf:bus-task-close)
 
 (define (perf:bus-workspace spec)
   (let ((cfg (hash-ref spec "bus" (hash))))
@@ -129,6 +130,52 @@
                     a
                     (inner (cdr ys)
                            (if (member (car ys) a) a (append a (list (car ys)))))))))))
+
+; A round is a task on the board when perf owns the host. Posting it and
+; claiming it with a lease gives another peer a place to see who is
+; working, and makes the round's completion an audited state instead of
+; only a local return. Attach-only stays a proposer: the judge owns the
+; board there. Failures are report lines, never a reason to stop the
+; round.
+(define PERF-TASK-LEASE-MS 600000)
+
+(define (perf:bus-task-open bus label)
+  (if (not (and (hash? bus) (eq? (hash-ref bus "host" #t) #t)))
+      -1
+      (let* ((sid (hash-ref bus "session"))
+             (p (bus:post-task sid 0 (perf:bus-mid label))))
+        (if (not (bus:ok? p))
+            (begin
+              (perf:bus-say (hash-ref bus "buf" (hash))
+                            (string-append "bus-task post-failed " (bus:message p)))
+              -1)
+            (let* ((id (car (cdr p)))
+                   (c (bus:claim sid PERF-TASK-LEASE-MS id)))
+              (if (bus:ok? c)
+                  (begin
+                    (perf:bus-say (hash-ref bus "buf" (hash))
+                                  (string-append "bus-task open id=" (number->string id)
+                                                 " ref=" (number->string (perf:bus-mid label))))
+                    id)
+                  (begin
+                    (perf:bus-say (hash-ref bus "buf" (hash))
+                                  (string-append "bus-task claim-failed id=" (number->string id)
+                                                 " " (bus:message c)))
+                    -1)))))))
+
+(define (perf:bus-task-close bus id n failed)
+  (if (or (not (hash? bus)) (not (number? id)) (< id 0))
+      #f
+      (let* ((sid (hash-ref bus "session"))
+             (r (if failed
+                    (bus:fail sid id n)
+                    (bus:complete sid id n))))
+        (perf:bus-say (hash-ref bus "buf" (hash))
+                      (string-append "bus-task close id=" (number->string id)
+                                     " state=" (if failed "failed" "done")
+                                     " n=" (number->string n)
+                                     (if (bus:ok? r) "" (string-append " (" (bus:message r) ")"))))
+        (bus:ok? r))))
 
 ; Publish the profile's CCT, one record per name in stack order.
 ; Returns the number of accepted records.

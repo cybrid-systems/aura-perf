@@ -230,6 +230,10 @@ def main():
             print("ok attach: report lines name mode=attach-only and the pending proposal")
         else:
             print("FAIL attach: report lines missing mode=attach-only / bus-proposed")
+        if "bus-task " not in out:
+            print("ok attach: attach-only posted no task (the judge owns the board)")
+        else:
+            print("FAIL attach: attach-only posted a task")
             fail = 1
 
         w = subprocess.run([str(aura), "--quiet", str(witness)],

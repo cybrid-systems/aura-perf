@@ -16,6 +16,7 @@
         perf:select-child perf:find-bin perf:tool-status perf:read-proc
         perf:engine-snap perf:collect perf:hottest perf:hot-child
         perf:measure-live perf:compile-snap perf:compile-delta
+        perf:engine-brief perf:engine-delta
         perf:region-sample perf:statm-resident perf:stat-text)
 
 (require "std/string" all:)
@@ -748,6 +749,70 @@
 (define (perf:num h k)
   (let ((v (hash-ref h k 0)))
     (if (number? v) v 0)))
+
+; A per-trial engine snapshot. The worker runs with AURA_SANDBOX=off
+; (mutate:rebind needs it), so engine:metrics is safe there; a direct
+; caller with the sandbox on gets available=0 instead of a SIGABRT.
+; These are the counters that explain an optimization's overhead, not a
+; profile of the interpreter: how much of the change caused a cascade,
+; a full relower, a JIT deopt, or an arena compaction.
+(define (perf:engine-brief)
+  (let ((s (getenv "AURA_SANDBOX")))
+    (if (not (and (string? s) (string=? s "off")))
+        (hash "available" 0)
+        (let ((c (try (engine-metrics:group "compile") (catch (e) #f)))
+              (m (try (engine-metrics:group "mutate") (catch (e) #f)))
+              (j (try (engine-metrics:group "jit") (catch (e) #f)))
+              (a (try (engine-metrics:group "arena") (catch (e) #f))))
+          (if (not (and (hash? c) (hash? m) (hash? j) (hash? a)))
+              (hash "available" 0)
+              (hash "available" 1
+                    "compile-cascade-full" (perf:num c "cascade_full_count")
+                    "compile-body-only" (perf:num c "cascade_body_only_count")
+                    "compile-relower-full" (perf:num c "relower_full_called_count")
+                    "compile-partial-funcs" (perf:num c "relower_partial_funcs_saved_total")
+                    "compile-dirty-recompiles" (perf:num c "module_dirty_recompiles")
+                    "mutate-batches" (perf:num m "mutate_batches_started_total")
+                    "mutate-dirty-ir" (perf:num m "dirty_propagation_to_ir_count")
+                    "jit-compilations" (perf:num j "jit_compilations")
+                    "jit-deopt" (perf:num j "jit_deopt_on_mutate_total")
+                    "jit-fallback" (perf:num j "jit_fallback_to_interpreter_total")
+                    "arena-compacts" (perf:num a "arena_auto_compact_trigger_total")))))))
+
+(define (perf:engine-delta before after)
+  (if (or (not (hash? before)) (not (hash? after))
+          (not (= (hash-ref before "available" 0) 1))
+          (not (= (hash-ref after "available" 0) 1)))
+      (hash "available" 0
+            "world-rebuilt" -1 "cascade-full" 0 "body-only" 0
+            "relower-full" 0 "dirty-recompiles" 0 "mutate-batches" 0
+            "jit-compilations" 0 "jit-deopt" 0 "arena-compacts" 0)
+      (let ((cascade (- (perf:num after "compile-cascade-full")
+                        (perf:num before "compile-cascade-full")))
+            (dirty (- (perf:num after "compile-dirty-recompiles")
+                      (perf:num before "compile-dirty-recompiles"))))
+        (hash "available" 1
+              "world-rebuilt" (if (or (> cascade 0) (> dirty 0)) 1 0)
+              "cascade-full" cascade
+              "body-only" (- (perf:num after "compile-body-only")
+                             (perf:num before "compile-body-only"))
+              "relower-full" (- (perf:num after "compile-relower-full")
+                                (perf:num before "compile-relower-full"))
+              "partial-funcs" (- (perf:num after "compile-partial-funcs")
+                                 (perf:num before "compile-partial-funcs"))
+              "dirty-recompiles" dirty
+              "mutate-batches" (- (perf:num after "mutate-batches")
+                                  (perf:num before "mutate-batches"))
+              "mutate-dirty-ir" (- (perf:num after "mutate-dirty-ir")
+                                   (perf:num before "mutate-dirty-ir"))
+              "jit-compilations" (- (perf:num after "jit-compilations")
+                                    (perf:num before "jit-compilations"))
+              "jit-deopt" (- (perf:num after "jit-deopt")
+                             (perf:num before "jit-deopt"))
+              "jit-fallback" (- (perf:num after "jit-fallback")
+                                (perf:num before "jit-fallback"))
+              "arena-compacts" (- (perf:num after "arena-compacts")
+                                  (perf:num before "arena-compacts"))))))
 
 ; Resident pages from /proc/self/statm (field 2). 0 when unreadable.
 (define (perf:statm-resident)

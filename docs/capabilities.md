@@ -215,6 +215,18 @@ Checksum 失败的候选不做 held-out。正确的候选先在 `screen-n` 上�
 
 KEEP 时若 `AURA_SANDBOX=off`，读 compile 组的 `cascade_full_count` 和 `module_dirty_recompiles`。示例里 `world-rebuilt=0`。这是证据，不是另一道会把正确加速打回去的门。
 
+### 12b. 每个 trial 的 engine 账
+
+worker 在 trial 前后各读一次 `engine:metrics` 的 compile / mutate / jit / arena 组，差值写进结果和 evidence：`cascade-full`、`body-only`、`relower-full`、`dirty-recompiles`、`mutate-batches`、`mutate-dirty-ir`、`jit-compilations`、`jit-deopt`、`jit-fallback`、`arena-compacts`，以及 `world-rebuilt`（cascade 或 dirty recompile 大于 0）。
+
+报告每个候选一行：
+
+```
+trial-engine linear-scan rebuild=0 cascade-full=0 body-only=2 relower-full=1 ...
+```
+
+候选行同时带 `rebuild=`。这回答的是「候选看起来快，但它是不是靠一次 full rebuild 换来的」：mutation 自身的收益和重编译/GC 的代价分开写，KEEP 时的 compile-delta 只是这条账的另一个读者。sandbox 不是 `off` 时快照返回 `available=0`，不把读不到写成 0。
+
 ### 13. 模型提议者只提议
 
 `perf:llm-propose` 经 `std/llm` 的 `llm:chat` 问一次模型（aura-perf#29）。接线（三个环境变量）和调用预算写在 README 的「模型提议者」里。这里是边界：

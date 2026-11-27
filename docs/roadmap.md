@@ -4,7 +4,7 @@
 
 ## 现在
 
-`aura-perf autotune` 跑完一轮。每个 worldline 有一棵 CCT，可以查询哪次 mutation 去掉了同一条热前缀且没有把代价挪走。目标没写 `perf-worldline-measure` 时，运行时用 `lib/perf/probe.aura` 从 seed 的顶层 define 自动生成同一组探针；报告用 `cct-source=auto-probe` 标明，目标自己的测量仍然优先。负例按 `class` + `hot-node` 记住。分类阈值和 catalog 顺序是策略基因，走 KEEP / ROLLBACK。intend 封在门里。没有 perf 二进制时 CCT 用 region timer 的毫秒，并写明硬件计数器没有读。`aura-perf sysinfo` 和 `aura-perf check` 把这台机器的 CPU、内存、NUMA、中断和工具有无收成可查询的值。
+`aura-perf autotune` 跑完一轮。每个 worldline 有一棵 CCT，可以查询哪次 mutation 去掉了同一条热前缀且没有把代价挪走；每个 trial 还带 compile/mutate/jit/arena 的 engine 差分（`trial-engine`，候选行 `rebuild=`），重编译和测量分开写。目标没写 `perf-worldline-measure` 时，运行时用 `lib/perf/probe.aura` 从 seed 的顶层 define 自动生成同一组探针；报告用 `cct-source=auto-probe` 标明，目标自己的测量仍然优先。负例按 `class` + `hot-node` 记住。分类阈值和 catalog 顺序是策略基因，走 KEEP / ROLLBACK。intend 封在门里。没有 perf 二进制时 CCT 用 region timer 的毫秒，并写明硬件计数器没有读。`aura-perf sysinfo` 和 `aura-perf check` 把这台机器的 CPU、内存、NUMA、中断和工具有无收成可查询的值。
 
 `autotune` 和 `recheck` 也可以带一个外部项目的 spec，目标和 region 都由目标项目自己给（见 README 的「外部目标」）。
 

@@ -241,6 +241,7 @@ case "$cmd" in
     candidate_set_rc=0
     headroom_rc=0
     screen_site_rc=0
+    engine_metrics_rc=0
     joint_rc=0
     if command -v python3 >/dev/null 2>&1; then
       python3 tests/bus_linger_test.py
@@ -277,6 +278,9 @@ case "$cmd" in
       # whole kernel; a slow site is pruned without a held-out sample.
       python3 tests/screen_site_round_test.py
       screen_site_rc=$?
+      # Every trial carries its compile/mutate/jit/arena delta as evidence.
+      python3 tests/engine_metrics_round_test.py
+      engine_metrics_rc=$?
       # aura-perf#30: an agent that cannot boot leaves a report with
       # its log, not a cleanup traceback.
       python3 tests/joint_agent_absent_test.py
@@ -323,6 +327,9 @@ case "$cmd" in
     fi
     if [ "$screen_site_rc" -ne 0 ]; then
       exit "$screen_site_rc"
+    fi
+    if [ "$engine_metrics_rc" -ne 0 ]; then
+      exit "$engine_metrics_rc"
     fi
     if [ "$joint_rc" -ne 0 ]; then
       exit "$joint_rc"

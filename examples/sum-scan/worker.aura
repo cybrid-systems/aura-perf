@@ -371,6 +371,13 @@
         (perf:check-kernel run-kernel (case-inputs baked) (baked-oracle baked))
         (perf:check-kernel run-kernel (perf:check-inputs)))))
 
+; The trial's engine cost: compile cascades, mutate batches, JIT
+; deopts, arena compactions. The delta is the whole child, including the
+; null base and the candidate apply; it explains why a fast-looking
+; mutation still cost a rebuild. available=0 when the primitive is not
+; safe in this process.
+(define engine-before (perf:engine-brief))
+
 (define tr
   (evo:trial cand
              (hash "apply" apply-candidate
@@ -435,6 +442,9 @@
                                        (hash-set! b "screen-site" (perf:join screen-sites "+"))
                                        r))))))))))))
 
+(define engine-after (perf:engine-brief))
+(define engine-delta (perf:engine-delta engine-before engine-after))
+
 (define objs (hash-ref tr "objectives" (hash)))
 (define beh (hash-ref tr "behavior" (hash)))
 (define constraints (hash-ref tr "constraints" (hash)))
@@ -462,6 +472,7 @@
         "cct-source" cct-source
         "base-cct" (hash-ref beh "base-cct" (hash "kind" "perf-cct" "nodes" '()))
         "null-heldout-ms" (hash-ref beh "null-heldout-ms" -1)
+        "engine" engine-delta
         "dur-ms" (hash-ref tr "dur-ms" 0)
         "error" (let ((e (hash-ref tr "error" #f)))
                   (if (string? e) e ""))))

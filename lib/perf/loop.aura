@@ -334,6 +334,10 @@
           (string-append " screen-site-ms=" (number->string ss)
                          " screen-base-site-ms="
                          (number->string (hash-ref result "screen-base-site-ms" -1)))
+          ""))
+    (let ((eng (hash-ref result "engine" #f)))
+      (if (and (hash? eng) (= (hash-ref eng "available" 0) 1))
+          (string-append " rebuild=" (number->string (hash-ref eng "world-rebuilt" 0)))
           "")))))
 
 (define (perf:sum-dur results)
@@ -657,6 +661,21 @@
                         #f)
                     (hash-set! buf "results" (append (hash-ref buf "results" '()) (list result)))
                     (perf:say buf (perf:format-candidate result cand-base pct raw site))
+                    (let ((eng (hash-ref result "engine" (hash))))
+                      (if (and (hash? eng) (= (hash-ref eng "available" 0) 1))
+                          (perf:say buf (string-append
+                                          "trial-engine " id
+                                          " rebuild=" (number->string (hash-ref eng "world-rebuilt" 0))
+                                          " cascade-full=" (number->string (hash-ref eng "cascade-full" 0))
+                                          " body-only=" (number->string (hash-ref eng "body-only" 0))
+                                          " relower-full=" (number->string (hash-ref eng "relower-full" 0))
+                                          " dirty-recompiles=" (number->string (hash-ref eng "dirty-recompiles" 0))
+                                          " mutate-batches=" (number->string (hash-ref eng "mutate-batches" 0))
+                                          " jit-compilations=" (number->string (hash-ref eng "jit-compilations" 0))
+                                          " jit-deopt=" (number->string (hash-ref eng "jit-deopt" 0))
+                                          " jit-fallback=" (number->string (hash-ref eng "jit-fallback" 0))
+                                          " arena-compacts=" (number->string (hash-ref eng "arena-compacts" 0))))
+                          #f))
                     (if (and (hash? site)
                              (string? (hash-ref site "site" ""))
                              (> (string-length (hash-ref site "site" "")) 0))
@@ -686,7 +705,8 @@
                             "cost-moved" (hash-ref result "cost-moved" 0)
                             "moved-to" (hash-ref result "moved-to" "")
                             "fidelity" (hash-ref result "fidelity" "")
-                            "cct-delta" (perf:delta-brief (hash-ref q "delta" '()))))
+                            "cct-delta" (perf:delta-brief (hash-ref q "delta" '()))
+                            "engine" (hash-ref result "engine" (hash))))
                     (if pass
                         #t
                         (begin

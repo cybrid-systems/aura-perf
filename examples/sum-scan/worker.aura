@@ -4,6 +4,7 @@
 ; child workspace refuses mutate:rebind.
 
 (require "std/evo-core" all:)
+(require "std/bus" all:)
 (require "std/string" all:)
 (require "lib/perf/util" all:)
 (require "lib/perf/score" all:)
@@ -12,7 +13,16 @@
 (require "lib/perf/gate" all:)
 (require "lib/perf/probe" all:)
 
+(define bus-session -1)
+(define bus-task-id -1)
+
+(define (bus-fail! code)
+  (if (>= bus-task-id 0)
+      (try (bus:fail bus-session bus-task-id code) (catch (e) #f))
+      #f))
+
 (define (worker-fail why)
+  (bus-fail! 0)
   (display why)
   (newline)
   (error why))
@@ -28,6 +38,31 @@
 (if (not (hash? job))
     (worker-fail "job json is not a hash")
     #t)
+
+; When the parent dispatched this job as a bus task, claim exactly that
+; task before doing the work. The lease is long enough for a heavy
+; candidate; the worker completes it after writing the result.
+(define bus-task-env (getenv "AURA_PERF_BUS_TASK_ID"))
+(define bus-ws-env (getenv "AURA_PERF_BUS_WORKSPACE"))
+(if (and (string? bus-task-env) (string? bus-ws-env)
+         (> (string-length bus-task-env) 0) (> (string-length bus-ws-env) 0))
+    (let ((tid (string->number bus-task-env))
+          (ws (string->number bus-ws-env)))
+      (if (and (number? tid) (number? ws))
+          (let ((a (bus:attach "" ws 4 7 255)))
+            (if (bus:ok? a)
+                (let ((sid (car (cdr a))))
+                  (if (bus:ok? (bus:claim sid 600000 tid))
+                      (begin
+                        (set! bus-session sid)
+                        (set! bus-task-id tid)
+                        (display "bus-claim ")
+                        (display tid)
+                        (newline))
+                      (worker-fail "bus claim failed")))
+                (worker-fail "bus attach failed")))
+          #f))
+    #f)
 
 (define seed (perf:read-text (hash-ref job "seed" "")))
 (if (string=? seed "")
@@ -478,6 +513,17 @@
                   (if (string? e) e ""))))
 
 (perf:write-text (hash-ref job "result" "") (json-encode result))
+(if (>= bus-task-id 0)
+    (if (string=? status "ok")
+        (begin (bus:complete bus-session bus-task-id 0)
+               (display "bus-complete ")
+               (display bus-task-id)
+               (newline))
+        (begin (bus:fail bus-session bus-task-id 0)
+               (display "bus-fail ")
+               (display bus-task-id)
+               (newline)))
+    #f)
 (display ident)
 (display " ")
 (display status)

@@ -49,7 +49,7 @@
         perf:bus-workspace perf:bus-linger-seconds perf:bus-linger
         perf:bus-host-enabled? perf:bus-propose perf:bus-propose-multi
         perf:bus-subscribe-signals perf:bus-define-nodes
-        perf:bus-task-open perf:bus-task-close)
+        perf:bus-task-open perf:bus-task-close perf:bus-tag-jobs)
 
 (define (perf:bus-workspace spec)
   (let ((cfg (hash-ref spec "bus" (hash))))
@@ -110,6 +110,11 @@
                                                      " caps=" (number->string (list-ref s 3))))
                         (hash "session" sid "workspace" ws "key" 1
                               "host" host? "caps" (list-ref s 3) "buf" buf
+                              "task-workers"
+                              (let ((env (getenv "AURA_PERF_BUS_TASK_WORKERS")))
+                                (or (and (string? env) (string=? env "1"))
+                                    (eq? (hash-ref (hash-ref spec "bus" (hash))
+                                                   "task-workers" #f) #t)))
                               ; The workspace generation the host reported.
                               ; A fresh host has KEPT nothing: baseline 0;
                               ; each live KEEP advances it by one. The host
@@ -176,6 +181,38 @@
                                      " n=" (number->string n)
                                      (if (bus:ok? r) "" (string-append " (" (bus:message r) ")"))))
         (bus:ok? r))))
+
+; One task per job, so the worker child claims its own execution before
+; it runs. The job JSON carries the task id and workspace; the child
+; attaches with the worker caps and claims exactly that id. Failures are
+; report lines; the job still runs directly if a task could not be
+; posted.
+(define (perf:bus-tag-jobs jobs bus)
+  (if (not (and (hash? bus)
+                (eq? (hash-ref bus "host" #t) #t)
+                (eq? (hash-ref bus "task-workers" #f) #t)))
+      jobs
+      (let ((sid (hash-ref bus "session"))
+            (ws (hash-ref bus "workspace"))
+            (buf (hash-ref bus "buf" (hash))))
+        (let loop ((xs jobs))
+          (if (null? xs)
+              jobs
+              (let* ((j (car xs))
+                     (id (hash-ref j "id" "candidate"))
+                     (ref (perf:bus-mid id))
+                     (p (bus:post-task sid 0 ref)))
+                (if (bus:ok? p)
+                    (begin
+                      (hash-set! j "bus-task-id" (car (cdr p)))
+                      (hash-set! j "bus-workspace" ws)
+                      (perf:bus-say buf (string-append
+                                          "bus-task job id=" id
+                                          " task=" (number->string (car (cdr p))))))
+                    (perf:bus-say buf (string-append
+                                        "bus-task job-post-failed id=" id
+                                        " " (bus:message p))))
+                (loop (cdr xs))))))))
 
 ; Publish the profile's CCT, one record per name in stack order.
 ; Returns the number of accepted records.

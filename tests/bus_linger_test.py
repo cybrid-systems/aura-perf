@@ -58,6 +58,7 @@ def main():
     rt = tempfile.mkdtemp(prefix="aura-perf-linger-")
     sock = Path(rt) / "aura" / "bus" / f"{WS}.sock"
     env = dict(os.environ, XDG_RUNTIME_DIR=rt, AURA_PERF_BUS_WORKSPACE=str(WS),
+               AURA_PERF_BUS_TASK_WORKERS="1",
                AURA_SANDBOX="off", AURA_BIN=str(aura))
     witness = Path(rt) / "witness.aura"
     witness.write_text(WITNESS)
@@ -112,6 +113,11 @@ def main():
                     print("ok linger: the round was a claimed bus task")
                 else:
                     print("FAIL linger: the round carried no bus task")
+                    fail = 1
+                if "bus-task job id=" in report_text:
+                    print("ok linger: each job was a task the worker claimed")
+                else:
+                    print("FAIL linger: no per-job worker task")
                     fail = 1
             except subprocess.TimeoutExpired:
                 print("FAIL linger: round did not exit after stdin EOF")

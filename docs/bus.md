@@ -61,6 +61,26 @@ Post or claim failures are report lines; they never stop the round.
 Attach-only mode posts no task: the external judge owns the board, and
 perf remains a proposer.
 
+### Per-job worker tasks (opt-in)
+
+Set `AURA_PERF_BUS_TASK_WORKERS=1` or the spec's `"bus"` hash
+`"task-workers" #t` in self-host mode. The parent then posts one task per
+candidate job before launching its worker; the job JSON carries
+`bus-task-id` and `bus-workspace`, and the worker child attaches with
+caps 7 and claims exactly that id (role 4, lease 10 min). It writes the
+result, then `bus:complete` or `bus:fail`:
+
+```
+bus-task job id=linear-scan task=2      # parent report
+bus-claim 2                             # worker stdout
+bus-complete 2                          # worker stdout
+```
+
+Attach-only never posts these tasks. A job-task post failure is a report
+line; the job still runs directly. The round itself remains a task as
+above. This is the first split of execution behind `bus:claim`; the
+judge is still the perf parent.
+
 ## Channel mapping
 
 The image carries immediates, not text; the mapping is:

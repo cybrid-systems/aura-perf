@@ -508,7 +508,7 @@
                           (loop (cdr xs) (cons rec acc)))))))
     (perf:write-jobs records)
     (let* ((fp-before (evo:source-fingerprint))
-           (batch (perf:launch-jobs records (hash-ref spec "worker")))
+           (batch (perf:launch-jobs records (hash-ref spec "worker") bus))
            (fp-after (evo:source-fingerprint))
            (results (hash-ref batch "results" '()))
            (pct (hash-ref spec "min-speedup-pct" 20)))

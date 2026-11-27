@@ -1,0 +1,21 @@
+(require "std/process" all:)
+(require "lib/perf/schedswitch" all:)
+
+(define path (let ((v (getenv "AURA_PERF_TRACE_FILE"))) (if (string? v) v "")))
+(define tool (let ((v (getenv "AURA_PERF_TRACE_TOOL"))) (if (string? v) v "file")))
+(define p (perf:schedswitch-parse (perf:read-text path)))
+(define rows (hash-ref p "rows" '()))
+(define top (perf:schedswitch-top rows 20))
+(define win (hash-ref p "window-us" -1))
+
+(display (string-append "tracetrace tool=" tool
+                        " file=" path
+                        " events=" (number->string (hash-ref p "events" 0))
+                        " window-ms=" (number->string (if (>= win 0) (quotient win 1000) -1))))
+(newline)
+(let loop ((xs (perf:schedswitch-lines top)))
+  (if (null? xs)
+      #t
+      (begin (display (car xs)) (newline) (loop (cdr xs)))))
+(display "")
+(exit (if (= (hash-ref p "events" 0) 0) 1 0))

@@ -1,0 +1,244 @@
+; sched_switch trace events as values.
+;
+; This reads tracefs / trace-cmd text, not a screenshot of a flame graph.
+; For each task it reports on-CPU time, off-CPU time, switch count and the
+; longest off-CPU gap. A still-running task is open=1, not silently closed.
+;
+; The parser is pure; enabling tracefs is a separate, permissioned action.
+
+(export perf:schedswitch-parse perf:schedswitch-lines perf:schedswitch-line perf:schedswitch-top)
+
+(require "std/string" all:)
+(require "lib/perf/util" all:)
+
+(define (perf:ss-trim s)
+  (if (not (string? s))
+      ""
+      (let ((n (string-length s)))
+        (let lo ((i 0))
+          (if (or (>= i n) (> (perf:char-at s i) 32))
+              (let hi ((j n))
+                (if (or (<= j i) (> (perf:char-at s (- j 1)) 32))
+                    (substring s i j)
+                    (hi (- j 1))))
+              (lo (+ i 1)))))))
+
+(define (perf:ss-prefix? s p)
+  (and (string? s) (string? p)
+       (>= (string-length s) (string-length p))
+       (string=? (substring s 0 (string-length p)) p)))
+
+(define (perf:ss-index s needle)
+  (let ((n (string-length s)) (m (string-length needle)))
+    (let loop ((i 0))
+      (if (> (+ i m) n)
+          -1
+          (if (string=? (substring s i (+ i m)) needle)
+              i
+              (loop (+ i 1)))))))
+
+(define (perf:ss-pad s width)
+  (let loop ((acc s) (i (string-length s)))
+    (if (>= i width) acc (loop (string-append acc "0") (+ i 1)))))
+
+(define (perf:ss-frac-us text)
+  (let* ((s (if (string? text) text "0"))
+         (n (string-length s)))
+    (if (>= n 6)
+        (let ((v (perf:parse-number (substring s 0 6)))) (if (number? v) v 0))
+        (let ((v (perf:parse-number (perf:ss-pad s 6)))) (if (number? v) v 0)))))
+
+(define (perf:ss-time-us token)
+  (let* ((t (perf:ss-trim token))
+         (t (if (and (> (string-length t) 0)
+                     (= (perf:char-at t (- (string-length t) 1)) 58))
+                (substring t 0 (- (string-length t) 1))
+                t))
+         (parts (string-split t "."))
+         (sec (if (pair? parts) (perf:parse-number (car parts)) #f))
+         (frac (if (pair? (cdr parts)) (perf:ss-frac-us (car (cdr parts))) 0)))
+    (if (number? sec) (+ (* sec 1000000) frac) -1)))
+
+; The timestamp is the last colon-terminated token before sched_switch:.
+(define (perf:ss-line-time line)
+  (let* ((idx (perf:ss-index line "sched_switch:"))
+         (left (if (> idx 0) (substring line 0 idx) line))
+         (xs (perf:tokens left)))
+    (let loop ((ys (reverse xs)))
+      (if (null? ys)
+          -1
+          (let ((t (car ys)))
+            (if (and (> (string-length t) 0)
+                     (= (perf:char-at t (- (string-length t) 1)) 58))
+                (perf:ss-time-us t)
+                (loop (cdr ys))))))))
+
+(define (perf:ss-field line key)
+  (let ((prefix (string-append key "=")))
+    (let loop ((xs (perf:tokens line)))
+      (if (null? xs)
+          #f
+          (let ((t (car xs)))
+            (if (perf:ss-prefix? t prefix)
+                (substring t (string-length prefix) (string-length t))
+                (loop (cdr xs))))))))
+
+(define (perf:ss-int line key)
+  (let ((v (perf:ss-field line key)))
+    (if (string? v)
+        (let ((n (perf:parse-number v))) (if (number? n) n -1))
+        -1)))
+
+(define (perf:ss-event? line)
+  (and (string? line)
+       (>= (perf:ss-index line "sched_switch:") 0)
+       (string? (perf:ss-field line "prev_pid"))
+       (string? (perf:ss-field line "next_pid"))))
+
+(define (perf:ss-acc tasks key comm)
+  (let* ((table (hash-ref tasks "map" (hash)))
+         (old (hash-ref table key (hash "comm" "" "on-us" 0 "off-us" 0
+                                        "switches" 0 "max-off-us" 0
+                                        "open-on" 0 "open-off" 0))))
+    (if (and (string? comm) (not (string=? comm "")))
+        (hash-set! old "comm" comm)
+        #t)
+    (hash-set! table key old)
+    (hash-set! tasks "map" table)
+    old))
+
+(define (perf:ss-add! acc key n)
+  (hash-set! acc key (+ (hash-ref acc key 0) n)))
+
+(define (perf:ss-row key acc)
+  (hash "task" (hash-ref acc "comm" key)
+        "pid" (let ((n (perf:parse-number key))) (if (number? n) n -1))
+        "on-ms" (quotient (hash-ref acc "on-us" 0) 1000)
+        "off-ms" (quotient (hash-ref acc "off-us" 0) 1000)
+        "switches" (hash-ref acc "switches" 0)
+        "max-off-ms" (quotient (hash-ref acc "max-off-us" 0) 1000)
+        "open" (if (> (+ (hash-ref acc "open-on" 0)
+                         (hash-ref acc "open-off" 0)) 0) 1 0)))
+
+(define (perf:ss-parse-events text)
+  (let loop ((ls (if (string? text) (string-split text "\n") '()))
+             (on (hash)) (off (hash)) (tasks (hash)) (n 0) (first -1) (last -1))
+    (if (null? ls)
+        (hash "on" on "off" off "tasks" tasks "events" n
+              "first-us" first "last-us" last)
+        (let ((line (car ls)))
+          (if (not (perf:ss-event? line))
+              (loop (cdr ls) on off tasks n first last)
+              (let* ((ts (perf:ss-line-time line))
+                     (pp (perf:ss-int line "prev_pid"))
+                     (np (perf:ss-int line "next_pid"))
+                     (pc (perf:ss-field line "prev_comm"))
+                     (nc (perf:ss-field line "next_comm"))
+                     (pk (number->string pp))
+                     (nk (number->string np))
+                     (pa (perf:ss-acc tasks pk pc))
+                     (na (perf:ss-acc tasks nk nc))
+                     (po (hash-ref on pk -1))
+                     (no (hash-ref off nk -1)))
+                (if (>= po 0)
+                    (begin
+                      (perf:ss-add! pa "on-us" (- ts po))
+                      (if (> (hash-ref pa "open-on" 0) 0)
+                          (hash-set! pa "open-on" 0)
+                          #t))
+                    #t)
+                ; A task seen switching out for the first time has no on
+                ; interval yet, but it is still off-CPU from now on.
+                (perf:ss-add! pa "switches" 1)
+                (hash-set! on pk -1)
+                (hash-set! off pk ts)
+                (if (>= no 0)
+                    (let ((gap (- ts no)))
+                      (perf:ss-add! na "off-us" gap)
+                      (perf:ss-add! na "switches" 1)
+                      (if (> gap (hash-ref na "max-off-us" 0))
+                          (hash-set! na "max-off-us" gap)
+                          #t)
+                      (hash-set! off nk -1)
+                      (hash-set! on nk ts)
+                      (if (> (hash-ref na "open-off" 0) 0)
+                          (hash-set! na "open-off" 0)
+                          #t))
+                    (begin
+                      ; First sighting: it starts running now.
+                      (hash-set! on nk ts)
+                      (perf:ss-add! na "switches" 1)))
+                (loop (cdr ls) on off tasks (+ n 1)
+                      (if (< first 0) ts first) ts)))))))
+
+(define (perf:ss-finish! parsed)
+  (let* ((last (hash-ref parsed "last-us" -1))
+         (on (hash-ref parsed "on" (hash)))
+         (off (hash-ref parsed "off" (hash)))
+         (tasks (hash-ref parsed "tasks" (hash)))
+         (table (hash-ref tasks "map" (hash))))
+    (let loop ((ks (hash-keys on)))
+      (if (null? ks)
+          #t
+          (let* ((k (car ks)) (start (hash-ref on k -1)))
+            (if (and (>= start 0) (>= last start))
+                (let ((a (hash-ref table k #f)))
+                  (if a
+                      (begin
+                        (perf:ss-add! a "on-us" (- last start))
+                        (hash-set! a "open-on" 1))
+                      #t))
+                #t)
+            (loop (cdr ks)))))
+    (let loop ((ks (hash-keys off)))
+      (if (null? ks)
+          #t
+          (let* ((k (car ks)) (start (hash-ref off k -1)))
+            (if (and (>= start 0) (>= last start))
+                (let ((a (hash-ref table k #f)))
+                  (if a
+                      (begin
+                        (perf:ss-add! a "off-us" (- last start))
+                        (if (> (- last start) (hash-ref a "max-off-us" 0))
+                            (hash-set! a "max-off-us" (- last start))
+                            #t)
+                        (hash-set! a "open-off" 1))
+                      #t))
+                #t)
+            (loop (cdr ks)))))
+    table))
+
+(define (perf:schedswitch-parse text)
+  (let* ((parsed (perf:ss-parse-events text))
+         (table (perf:ss-finish! parsed))
+         (ks (hash-keys table)))
+    (let loop ((xs ks) (rows '()))
+      (if (null? xs)
+          (hash "events" (hash-ref parsed "events" 0)
+                "window-us" (if (and (>= (hash-ref parsed "first-us" -1) 0)
+                                     (>= (hash-ref parsed "last-us" -1) 0))
+                                (- (hash-ref parsed "last-us" 0)
+                                   (hash-ref parsed "first-us" 0))
+                                -1)
+                "rows" (reverse rows))
+          (loop (cdr xs)
+                (cons (perf:ss-row (car xs) (hash-ref table (car xs) (hash)))
+                      rows))))))
+
+(define (perf:schedswitch-line row)
+  (string-append "schedswitch task=" (hash-ref row "task" "?")
+                 " pid=" (number->string (hash-ref row "pid" -1))
+                 " on-ms=" (number->string (hash-ref row "on-ms" -1))
+                 " off-ms=" (number->string (hash-ref row "off-ms" -1))
+                 " switches=" (number->string (hash-ref row "switches" -1))
+                 " max-off-ms=" (number->string (hash-ref row "max-off-ms" -1))
+                 " open=" (number->string (hash-ref row "open" 0))))
+
+(define (perf:schedswitch-lines rows)
+  (map perf:schedswitch-line (if (list? rows) rows '())))
+
+(define (perf:schedswitch-top rows n)
+  (perf:take (sort (if (list? rows) rows '())
+                   (lambda (a b)
+                     (> (hash-ref a "off-ms" -1) (hash-ref b "off-ms" -1))))
+             n))

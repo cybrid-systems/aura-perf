@@ -379,6 +379,33 @@ schedtask aura pid=123 runtime-ms=12.5 switches=4 avg-delay-ms=0.25 max-delay-ms
 `perf sched` 是给 agent 的诊断入口，不是每轮都开 trace。tracefs / bpftrace 的
 `sched_switch` / off-CPU 采样还在后面，未接。
 
+### 12g. sched_switch：on-CPU / off-CPU 是值
+
+`perf sched` 给的是每个任务的唤醒延迟；tracefs 的 `sched_switch` 给的是
+“谁在什么时候让出 CPU、谁被换上来”。`aura-perf trace` 把事件配对成每个任务的
+on-CPU、off-CPU、切换次数和最长 off-CPU：
+
+```
+tracetrace tool=tracefs file=out/trace.txt events=3 window-ms=12
+schedswitch task=worker pid=2 on-ms=5 off-ms=7 switches=2 max-off-ms=7 open=1
+schedswitch task=aura pid=1 on-ms=7 off-ms=5 switches=3 max-off-ms=5 open=1
+```
+
+- **open=1 是明确的。** 任务在窗口结束时还在跑或还在等，`open=1`，不会被悄悄
+  当成“已经结束”。窗口边界不是真实边界。
+- **两种入口。** `aura-perf trace --file trace.txt` 只解析已有文本；
+  `aura-perf trace --seconds N` 会清空 trace、打开 `sched_switch`、采样 N 秒、
+  恢复原来的 `tracing_on` / `enable` 状态，再解析。后者需要已挂载的 tracefs 和写权限。
+- **权限是显式的。** 没有 tracefs：`trace unavailable reason=tracefs-not-mounted
+  command="sudo mount -t tracefs tracefs /sys/kernel/tracing"`，退出 3。有 tracefs
+  但不可写：`trace blocked reason=permission command="sudo -v" fallback=perf-sched`，
+  退出 4。不会在无权限时返回空轨迹假装成功。
+- **不改变每轮 autotune。** round 仍用 schedstat；tracefs 是 agent 的诊断入口。
+  bpftrace 的 off-CPU 聚合还没接，`doctor` 里仍是 `wired=no`。
+
+`AURA_PERF_TRACEFS` 可以指向一个替代 tracefs 根（测试或容器里用）；
+`AURA_PERF_TRACE_KEEP=1` 只用于保留已有 trace 文本做解析测试。
+
 ### 13. 模型提议者只提议
 
 `perf:llm-propose` 经 `std/llm` 的 `llm:chat` 问一次模型（aura-perf#29）。接线（三个环境变量）和调用预算写在 README 的「模型提议者」里。这里是边界：

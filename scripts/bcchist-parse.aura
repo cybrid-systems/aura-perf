@@ -1,0 +1,13 @@
+(require "std/process" all:)
+(require "lib/perf/bcchist" all:)
+
+(define path (let ((v (getenv "AURA_PERF_HIST_FILE"))) (if (string? v) v "")))
+(define tool (let ((v (getenv "AURA_PERF_HIST_TOOL"))) (if (string? v) v "file")))
+(define v (perf:bcchist-parse (perf:read-text path)))
+
+(display (string-append "histtool tool=" tool " file=" path))
+(newline)
+(let loop ((xs (perf:bcchist-lines v)))
+  (if (null? xs) #t (begin (display (car xs)) (newline) (loop (cdr xs)))))
+(display "")
+(exit (if (= (hash-ref v "available" 0) 1) 0 1))

@@ -1,0 +1,93 @@
+; bcc histogram output as values (runqlat, biolatency, ...).
+;
+; The bcc tools print a header with usecs or msecs, then bucket lines:
+;   0 -> 1 : 0 |...|
+; The parser keys off the header and "->"; it does not assume fixed widths.
+
+(export perf:bcchist-parse perf:bcchist-lines)
+
+(require "std/string" all:)
+(require "lib/perf/util" all:)
+
+(define (perf:hist-trim s)
+  (if (not (string? s))
+      ""
+      (let ((n (string-length s)))
+        (let lo ((i 0))
+          (if (or (>= i n) (> (perf:char-at s i) 32))
+              (let hi ((j n))
+                (if (or (<= j i) (> (perf:char-at s (- j 1)) 32))
+                    (substring s i j)
+                    (hi (- j 1))))
+              (lo (+ i 1)))))))
+
+(define (perf:hist-header? line)
+  (let ((xs (perf:tokens line)))
+    (and (perf:member? xs "count")
+         (or (perf:member? xs "usecs") (perf:member? xs "msecs")))))
+
+(define (perf:hist-unit line)
+  (let ((xs (perf:tokens line)))
+    (cond ((perf:member? xs "usecs") "usecs")
+          ((perf:member? xs "msecs") "msecs")
+          (else "usecs"))))
+
+(define (perf:hist-bucket line)
+  (let* ((xs (perf:tokens line))
+         (arrow (let loop ((ys xs) (i 0))
+                  (if (null? ys) -1
+                      (if (string=? (car ys) "->") i (loop (cdr ys) (+ i 1))))))
+         (lo (if (and (> arrow 0) (number? (perf:parse-number (perf:nth xs 0))))
+                 (perf:parse-number (perf:nth xs 0)) #f))
+         (hi (if (> arrow 0)
+                 (let ((v (perf:nth xs (+ arrow 1))))
+                   (if (string? v) (perf:parse-number v) #f))
+                 #f))
+         (count (if (> arrow 0)
+                    (let ((v (perf:nth xs (+ arrow 3))))
+                      (if (string? v) (perf:parse-number v) #f))
+                    #f)))
+    (if (and (number? lo) (number? hi) (number? count))
+        (hash "lo" lo "hi" hi "count" count)
+        #f)))
+
+(define (perf:bcchist-parse text)
+  (let loop ((ls (if (string? text) (string-split text "\n") '()))
+             (unit "usecs") (buckets '()) (seen 0))
+    (if (null? ls)
+        (let* ((bs (reverse buckets))
+               (total (let loop ((xs bs) (n 0))
+                        (if (null? xs) n (loop (cdr xs) (+ n (hash-ref (car xs) "count" 0))))))
+               (max-hi (let loop ((xs bs) (m -1))
+                         (if (null? xs) m
+                             (loop (cdr xs)
+                                   (if (> (hash-ref (car xs) "count" 0) 0)
+                                       (max m (hash-ref (car xs) "hi" 0)) m))))))
+          (hash "available" (if (> seen 0) 1 0)
+                "unit" unit "buckets" bs "total" total "max" max-hi))
+        (let* ((line (perf:hist-trim (car ls)))
+               (b (perf:hist-bucket line)))
+          (cond ((perf:hist-header? line)
+                 (loop (cdr ls) (perf:hist-unit line) buckets seen))
+                (b (loop (cdr ls) unit (cons b buckets) (+ seen 1)))
+                (else (loop (cdr ls) unit buckets seen)))))))
+
+(define (perf:bcchist-lines v)
+  (let ((unit (hash-ref v "unit" "usecs"))
+        (bs (hash-ref v "buckets" '())))
+    (cons (string-append "histctx unit=" unit
+                         " buckets=" (number->string (length bs))
+                         " total=" (number->string (hash-ref v "total" 0))
+                         " max=" (number->string (hash-ref v "max" -1)))
+          (map (lambda (b)
+                 (string-append "hist unit=" unit
+                                " bucket=" (number->string (hash-ref b "lo" -1))
+                                "-" (number->string (hash-ref b "hi" -1))
+                                " count=" (number->string (hash-ref b "count" -1))))
+               (perf:take (let loop ((xs bs) (acc '()))
+                            (if (null? xs) (reverse acc)
+                                (loop (cdr xs)
+                                      (if (> (hash-ref (car xs) "count" 0) 0)
+                                          (cons (car xs) acc)
+                                          acc))))
+                          30)))))

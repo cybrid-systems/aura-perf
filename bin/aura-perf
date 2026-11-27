@@ -67,6 +67,12 @@ aura-perf - an optimization runtime for agents
   cachestat  bcc page-cache hits/misses and hit ratio
              aura-perf cachestat --file cachestat.txt
              aura-perf cachestat --seconds N  (bcc + permission)
+  runqlat    bcc run-queue latency histogram
+             aura-perf runqlat --file runqlat.txt
+             aura-perf runqlat --seconds N  (bcc + permission)
+  biolatency bcc block I/O latency histogram
+             aura-perf biolatency --file biolatency.txt
+             aura-perf biolatency --seconds N  (bcc + permission)
   test       run the value-level tests, then the round tests (python3)
   judge      read a live bus round's result metrics as a judge peer
              AURA_PERF_BUS_WORKSPACE=N AURA_PERF_JUDGE_PCT=20 aura-perf judge
@@ -273,6 +279,12 @@ case "$cmd" in
   cachestat)
     exec sh "$ROOT/scripts/native-cachestat.sh" "$@"
     ;;
+  runqlat)
+    exec sh "$ROOT/scripts/native-bcchist.sh" --tool runqlat "$@"
+    ;;
+  biolatency)
+    exec sh "$ROOT/scripts/native-bcchist.sh" --tool biolatency "$@"
+    ;;
   doctor)
     cd "$ROOT"
     case "${1:-}" in
@@ -314,6 +326,7 @@ case "$cmd" in
     c2c_cli_rc=0
     mem_cli_rc=0
     cachestat_cli_rc=0
+    bcchist_cli_rc=0
     joint_rc=0
     if command -v python3 >/dev/null 2>&1; then
       python3 tests/bus_linger_test.py
@@ -382,6 +395,9 @@ case "$cmd" in
       # bcc cachestat and its permission gate.
       python3 tests/cachestat_cli_test.py
       cachestat_cli_rc=$?
+      # bcc runqlat/biolatency histograms and their gate.
+      python3 tests/bcchist_cli_test.py
+      bcchist_cli_rc=$?
       # aura-perf#30: an agent that cannot boot leaves a report with
       # its log, not a cleanup traceback.
       python3 tests/joint_agent_absent_test.py
@@ -458,6 +474,9 @@ case "$cmd" in
     fi
     if [ "$cachestat_cli_rc" -ne 0 ]; then
       exit "$cachestat_cli_rc"
+    fi
+    if [ "$bcchist_cli_rc" -ne 0 ]; then
+      exit "$bcchist_cli_rc"
     fi
     if [ "$joint_rc" -ne 0 ]; then
       exit "$joint_rc"

@@ -1,0 +1,17 @@
+(require "std/string" all:)
+(require "lib/perf/bcchist" all:)
+
+(define (check label ok)
+  (if ok #t (error (string-append "bcchist: " label))))
+
+(define text "     usecs               : count     distribution\n         0 -> 1          : 0        |                                        |\n         2 -> 3          : 5        |*****                                   |\n         4 -> 7          : 3        |***                                     |\n")
+(define v (perf:bcchist-parse text))
+(check "available" (= (hash-ref v "available" 0) 1))
+(check "unit" (string=? (hash-ref v "unit" "") "usecs"))
+(check "buckets" (= (length (hash-ref v "buckets" '())) 3))
+(check "total" (= (hash-ref v "total" 0) 8))
+(check "max" (= (hash-ref v "max" -1) 7))
+(check "lines" (and (= (length (perf:bcchist-lines v)) 3)
+                    (string-contains? (car (perf:bcchist-lines v)) "total=8")))
+(display "bcchist ok")
+(newline)

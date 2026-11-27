@@ -496,6 +496,29 @@ cachestat hits=1234 misses=5 dirties=0 hitratio-pct=99.6 buffers-mb=100 cached-m
 
 `CACHESTAT_BIN` 可以指向替代二进制（测试里用假 cachestat）。
 
+### 12l. bcc 直方图：runqlat / biolatency
+
+`aura-perf runqlat` 和 `aura-perf biolatency` 把 bcc 的直方图收成桶值：
+
+```
+histctx unit=usecs buckets=3 total=8 max=7
+hist unit=usecs bucket=2-3 count=5
+hist unit=usecs bucket=4-7 count=3
+```
+
+- **用途不同。** `runqlat` 是调度器 run-queue 等待延迟；`biolatency` 是块设备
+  I/O 延迟。两者都只输出桶和计数，不把 ASCII 分布条塞进 prompt。
+- **两种入口。** `--file F` 解析已有输出；`--seconds N` 运行对应 bcc 工具
+  （`runqlat 1 1` / `biolatency 1 1`），带超时。
+- **单位来自表头。** `usecs` / `msecs` 原样写进 `histctx` 和每个 `hist` 行；
+  `max` 是最后一个非空桶的上界，空桶不参与。
+- **权限是显式的。** 没有 bcc：`tool unavailable reason=no-bcc
+  command="aura-perf doctor --install" fallback=check`，退出 3。权限失败：
+  `tool blocked reason=permission command="sudo -v" fallback=check`，退出 4。
+- **不是每轮都开。** round 走 profile/CCT；这些是 agent 的定向诊断入口。
+
+`RUNQLAT_BIN` / `BIOLATENCY_BIN` 可以指向替代二进制（测试里用假工具）。
+
 ### 13. 模型提议者只提议
 
 `perf:llm-propose` 经 `std/llm` 的 `llm:chat` 问一次模型（aura-perf#29）。接线（三个环境变量）和调用预算写在 README 的「模型提议者」里。这里是边界：

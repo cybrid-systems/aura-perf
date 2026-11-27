@@ -451,6 +451,30 @@ c2c total-records=1234 loads=1000 stores=234 llc-hits=900 local-ram-hits=200 rem
 
 `perf mem` 仍只探测子命令；它需要另一套 `mem-loads` 采样和符号化，不在这层。
 
+### 12j. perf mem：采样符号和占比
+
+`aura-perf mem` 把 `perf mem report --stdio --sort symbol` 收成摘要加符号行：
+
+```
+memctx event=cpu/mem-loads,ldlat=30/P samples=12000 rows=2
+memsym foo samples=1234 overhead-pct=12.34
+memsym [.] bar samples=500 overhead-pct=5.0
+```
+
+- **两种入口。** `aura-perf mem --file mem.txt` 只解析已有报告；
+  `aura-perf mem -- COMMAND [ARGS...]` 用 `perf mem record` 采集命令，
+  再跑 `perf mem report --stdio --sort symbol`。
+- **数字来自 perf。** 采样数、占比和符号是 perf 已经算好的；这里不编造延迟。
+  没有 `# Samples` 行就是 `mem unavailable reason=no-sample`，退出 1。
+- **权限是显式的。** 没有 perf：`mem unavailable reason=no-perf
+  command="aura-perf doctor --install" fallback=profile`，退出 3。权限或 PMU
+  不支持：`mem blocked reason=permission command="sudo sysctl -w
+  kernel.perf_event_paranoid=2" fallback=profile`，退出 4。
+- **不是每轮都开。** round 走 profile/CCT；mem 是 agent 针对 load/store 采样的诊断入口。
+
+`perf mem` 的符号质量取决于目标二进制的符号和 perf 的符号化配置；没有符号时
+perf 输出 `[unknown]`，运行时原样保留，不猜函数名。
+
 ### 13. 模型提议者只提议
 
 `perf:llm-propose` 经 `std/llm` 的 `llm:chat` 问一次模型（aura-perf#29）。接线（三个环境变量）和调用预算写在 README 的「模型提议者」里。这里是边界：

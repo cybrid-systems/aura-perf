@@ -1,0 +1,13 @@
+(require "std/process" all:)
+(require "lib/perf/memsample" all:)
+
+(define path (let ((v (getenv "AURA_PERF_MEM_FILE"))) (if (string? v) v "")))
+(define tool (let ((v (getenv "AURA_PERF_MEM_TOOL"))) (if (string? v) v "file")))
+(define v (perf:mem-parse (perf:read-text path)))
+
+(display (string-append "memtool tool=" tool " file=" path))
+(newline)
+(let loop ((xs (perf:mem-lines v)))
+  (if (null? xs) #t (begin (display (car xs)) (newline) (loop (cdr xs)))))
+(display "")
+(exit (if (< (hash-ref v "samples" -1) 0) 1 0))

@@ -1,0 +1,100 @@
+; perf mem report --stdio --sort symbol as values.
+;
+; Summary line plus the top symbols by sampled overhead. The parser does
+; not invent a latency; it reports the sample counts and percentages perf
+; already computed.
+
+(export perf:mem-parse perf:mem-lines)
+
+(require "std/string" all:)
+(require "lib/perf/util" all:)
+
+(define (perf:mem-trim s)
+  (if (not (string? s))
+      ""
+      (let ((n (string-length s)))
+        (let lo ((i 0))
+          (if (or (>= i n) (> (perf:char-at s i) 32))
+              (let hi ((j n))
+                (if (or (<= j i) (> (perf:char-at s (- j 1)) 32))
+                    (substring s i j)
+                    (hi (- j 1))))
+              (lo (+ i 1)))))))
+
+(define (perf:mem-suffix s)
+  (let ((n (string-length s)))
+    (if (= n 0) 1
+        (let ((c (perf:char-at s (- n 1))))
+          (cond ((or (= c 75) (= c 107)) 1000)
+                ((or (= c 77) (= c 109)) 1000000)
+                ((or (= c 71) (= c 103)) 1000000000)
+                (else 1))))))
+
+(define (perf:mem-count s)
+  (let* ((t (perf:mem-trim s))
+         (n (string-length t))
+         (mult (perf:mem-suffix t))
+         (body (if (> mult 1) (substring t 0 (- n 1)) t))
+         (v (perf:parse-number body)))
+    (if (number? v) (* v mult) -1)))
+
+(define (perf:mem-event line)
+  (let loop ((xs (perf:tokens line)))
+    (if (null? xs)
+        ""
+        (let ((t (car xs)))
+          (if (and (> (string-length t) 1)
+                   (= (perf:char-at t 0) 39)
+                   (= (perf:char-at t (- (string-length t) 1)) 39))
+              (substring t 1 (- (string-length t) 1))
+              (loop (cdr xs)))))))
+
+(define (perf:mem-row line)
+  (let* ((xs (perf:tokens line))
+         (pct (if (pair? xs) (perf:parse-number (car xs)) #f))
+         (samples (if (pair? (cdr xs)) (perf:parse-number (car (cdr xs))) #f))
+         (symbol (perf:join (if (pair? (cdr (cdr xs))) (cdr (cdr xs)) '()) " ")))
+    (if (and (number? pct) (number? samples) (not (string=? symbol "")))
+        (hash "symbol" symbol "samples" samples "overhead-pct" pct)
+        #f)))
+
+(define (perf:mem-header? line)
+  (let ((xs (perf:tokens line)))
+    (and (perf:member? xs "Overhead") (perf:member? xs "Symbol"))))
+
+(define (perf:mem-parse text)
+  (let loop ((ls (if (string? text) (string-split text "\n") '()))
+             (samples -1) (event "") (rows '()) (in-table 0))
+    (if (null? ls)
+        (hash "samples" samples "event" event "rows" (reverse rows))
+        (let* ((line (perf:mem-trim (car ls)))
+               (s (if (and (>= (string-length line) 9)
+                           (string=? (substring line 0 9) "# Samples"))
+                      (let ((xs (perf:tokens line)))
+                        (let loop2 ((ys xs))
+                          (if (null? ys) -1
+                              (if (string=? (car ys) "Samples:")
+                                  (if (pair? (cdr ys))
+                                      (perf:mem-count (car (cdr ys))) -1)
+                                  (loop2 (cdr ys))))))
+                      #f)))
+          (cond ((number? s)
+                 (loop (cdr ls) s (perf:mem-event line) rows in-table))
+                ((perf:mem-header? line)
+                 (loop (cdr ls) samples event rows 1))
+                ((and (> in-table 0) (not (string=? line "")))
+                 (let ((row (perf:mem-row line)))
+                   (loop (cdr ls) samples event
+                         (if row (cons row rows) rows) 1)))
+                (else (loop (cdr ls) samples event rows in-table)))))))
+
+(define (perf:mem-lines v)
+  (let ((rows (hash-ref v "rows" '())))
+    (cons (string-append "memctx event=" (hash-ref v "event" "")
+                         " samples=" (number->string (hash-ref v "samples" -1))
+                         " rows=" (number->string (length rows)))
+          (map (lambda (r)
+                 (string-append "memsym " (hash-ref r "symbol" "?")
+                                " samples=" (number->string (hash-ref r "samples" -1))
+                                " overhead-pct=" (number->string (hash-ref r "overhead-pct" -1))))
+               (perf:take rows 20)))))

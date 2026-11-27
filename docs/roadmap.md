@@ -148,8 +148,8 @@ spec 给一条命令和它的 golden，运行时跑它、读退出码。aura-run
 - `perf sched` 的 latency 解析和 `aura-perf sched` 已接；live record 仍要权限，schedstat 是默认 round 证据。
 - ~~tracefs `sched_switch` 的 on/off-CPU 解析和采样~~ ✅：`aura-perf trace`，权限失败显式退出。
 - ~~bpftrace 的 off-CPU 聚合~~ ✅：`aura-perf offcpu` 一行值，权限失败显式退出。
-- perf mem 仍只探测；mem-loads 采样和符号化还没接。
-- bpftrace / bcc 只在已经安装时登记，不附带脚本；`doctor` 报告 `probe-only`，安装命令显式列出。
+- ~~perf mem 的采样摘要~~ ✅：`aura-perf mem`，权限失败显式退出。
+- bcc 只在已经安装时登记，不附带脚本；bpftrace 的 off-CPU 摘要已接。
 - 机器层建议的跨次负例（现在的负例记的是同一次 autotune 里的程序热点）。
 - KernelBench 式算子和 [aura-kernel-sink](https://github.com/cybrid-systems/aura-kernel-sink) 的 C 下沉，作为一种假设接进 autotune。没有 GPU 就不报 SOL。
 - Warpline 一类 trace 作为另一种 CCT 来源。

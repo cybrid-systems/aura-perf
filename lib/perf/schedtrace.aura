@@ -97,7 +97,8 @@
             "switches" (perf:st-col header "Switches" 2)
             "avg" (perf:st-col header "Average delay"
                                (perf:st-col header "avg delay" 3))
-            "max" (perf:st-col header "Maximum delay" 4))
+            "max" (perf:st-col header "Maximum delay"
+                               (perf:st-col header "Sch delay" 4)))
       (hash "runtime" 1 "switches" 2 "avg" 3 "max" 4)))
 
 (define (perf:schedtrace-parse text)

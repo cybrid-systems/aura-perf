@@ -312,6 +312,8 @@ install group=pmu missing=perf optional=no command="sudo apt-get install -y linu
 
   这些数不需要 root、不需要 perf、不需要 tracepoint。读不到时写
   `available=0`，候选行不出现 `sched-wait-ms`，而不是写 0。
+  `cpu-ms` 是线程级、毫秒取整，并含一次 schedstat 解析的约 1–2 ms；看
+  `wait-ms` 和 `wait-pct`，不要把它当 perf 的 task-clock。
 - **尾延迟分布。** 每次 `perf:time-checked` 同时返回 `p50/p90/p99/min/max/spread`
   （nearest-rank）。门仍然只比中位数；分布是证据，回答“快是不是靠一次幸运样本”。
   报告多一行：

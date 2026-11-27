@@ -144,7 +144,6 @@ spec 给一条命令和它的 golden，运行时跑它、读退出码。aura-run
   的差值已进候选行和报告，不需要 root。
 - ~~USE 的 CPU/内存/调度层~~ ✅：`aura-perf use` 输出 utilization/saturation/errors，
   内存饱和看 vmstat 活动而不是 swap 占用。
-- perf sched / ftrace / bpftrace 需要权限，先走 doctor 的 ask 行；它们的 adapter 还没接。
 - 语义火焰：节点可以是策略阶段或规则。
 - `perf c2c` / `perf mem` / `perf sched` 现在只探测子命令在不在；`aura-perf doctor` 明确写 `wired=no`。PMU 可用时才采样，并仍不把缺测写成 0。
 - bpftrace / bcc 只在已经安装时登记，不附带脚本；`doctor` 报告 `probe-only`，安装命令显式列出。

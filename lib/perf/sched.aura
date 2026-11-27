@@ -52,9 +52,32 @@
                 "slices" (if (number? slices) slices -1)))
         (hash "cpu-ns" -1 "wait-ns" -1 "slices" -1))))
 
+(define (perf:sched-prefix? s p)
+  (and (string? s) (string? p)
+       (>= (string-length s) (string-length p))
+       (string=? (substring s 0 (string-length p)) p)))
+
+(define (perf:sched-status-value line prefix)
+  (let ((n (perf:parse-number
+             (perf:sched-trim (substring line (string-length prefix)
+                                         (string-length line))))))
+    (if (number? n) n -1)))
+
+; One pass and two prefix checks. The old generic field helper split every
+; status line; on a 60-line status file that parsing cost more than the
+; kernel call it was supposed to explain.
 (define (perf:sched-parse-status text)
-  (hash "vol" (perf:sched-field text "voluntary_ctxt_switches")
-        "invol" (perf:sched-field text "nonvoluntary_ctxt_switches")))
+  (let loop ((ls (if (string? text) (string-split text "
+") '()))
+             (vol -1) (invol -1))
+    (if (null? ls)
+        (hash "vol" vol "invol" invol)
+        (let ((line (perf:sched-trim (car ls))))
+          (cond ((perf:sched-prefix? line "voluntary_ctxt_switches:")
+                 (loop (cdr ls) (perf:sched-status-value line "voluntary_ctxt_switches:") invol))
+                ((perf:sched-prefix? line "nonvoluntary_ctxt_switches:")
+                 (loop (cdr ls) vol (perf:sched-status-value line "nonvoluntary_ctxt_switches:")))
+                (else (loop (cdr ls) vol invol)))))))
 
 (define (perf:sched-now)
   (let* ((ss (perf:sched-parse-schedstat

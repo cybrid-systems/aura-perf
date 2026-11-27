@@ -86,6 +86,49 @@
 (define base-cct (hash "kind" "perf-cct" "nodes" '()))
 (define null-genome (hash-ref job "null-genome" ""))
 
+; A candidate may rewrite several defines. The job carries the full list;
+; the single-target fields are the one-entry case, kept for older jobs and
+; for the report.
+(define mutations
+  (let ((ms (hash-ref job "mutations" '())))
+    (if (pair? ms)
+        ms
+        (list (hash "target" target "genome" genome)))))
+
+(define null-mutations
+  (let ((ms (hash-ref job "null-mutations" '())))
+    (if (pair? ms)
+        ms
+        (if (and (string? null-genome) (> (string-length null-genome) 0))
+            (list (hash "target" target "genome" null-genome))
+            '()))))
+
+(define (nonempty-mutations? ms)
+  (let loop ((xs ms))
+    (if (null? xs)
+        #f
+        (let ((g (hash-ref (car xs) "genome" "")))
+          (if (and (string? g) (> (string-length g) 0))
+              #t
+              (loop (cdr xs)))))))
+
+; Apply every mutation in one workspace edit. The caller evaluates once
+; after the last rebind, so the worldline sees the set atomically.
+(define (rebind-all ms tag)
+  (let loop ((xs ms))
+    (if (null? xs)
+        #t
+        (let* ((m (car xs))
+               (t (hash-ref m "target" ""))
+               (g (hash-ref m "genome" "")))
+          (if (or (not (string? t)) (string=? t "")
+                  (not (string? g)) (string=? g ""))
+              (loop (cdr xs))
+              (let ((rb (mutate:rebind t g tag)))
+                (if (eq? rb #t)
+                    (loop (cdr xs))
+                    rb))))))) 
+
 (define (measure-tree screen-xs screen-ms)
   (if (or (not (= (hash-ref job "count-defines" 0) 1))
           (null? screen-xs))
@@ -122,9 +165,9 @@
   ; measurement (a separate process, measured on its own); the runtime
   ; reports both: "null-candidate heldout-ms" (the job) and the
   ; candidate's "ref-ms" (this one).
-  (if (or (not (string? null-genome)) (= (string-length null-genome) 0))
+  (if (null? null-mutations)
       #f
-      (let ((rb (mutate:rebind target null-genome "perf-null-base")))
+      (let ((rb (rebind-all null-mutations "perf-null-base")))
         (if (not (eq? rb #t))
             #f
             (begin
@@ -139,19 +182,19 @@
                 null-heldout-ms))))))
 
 (define (apply-candidate c)
-  (let ((g (hash-ref c "genome" "")))
-    (if (or (string=? role "baseline")
-            (not (string? g))
-            (string=? g ""))
-        #t
-        (begin
-          ; The base of the site floor, in this process, in the same
-          ; shape as the candidate's own measurement.
-          (measure-base)
-          (let ((rb (mutate:rebind target g "perf-trial")))
-            (if (eq? rb #t)
-                (begin (eval-current) #t)
-                rb))))))
+  (if (or (string=? role "baseline")
+          (not (nonempty-mutations? mutations)))
+      #t
+      (begin
+        ; The base of the site floor, in this process, in the same
+        ; shape as the candidate's own measurement: every target is
+        ; rebound to its own body first, then the candidate set is
+        ; applied on top. One eval after the set, not one per define.
+        (measure-base)
+        (let ((rb (rebind-all mutations "perf-trial")))
+          (if (eq? rb #t)
+              (begin (eval-current) #t)
+              rb)))))
 
 (define (run-kernel xs)
   (let ((fn (try (eval (string->symbol kernel-name)) (catch (e) #f))))

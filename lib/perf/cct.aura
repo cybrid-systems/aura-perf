@@ -299,13 +299,33 @@
          (perf:native-hypotheses site "" "cpu-clock"))
         (else '())))
 
+(define (perf:cand-target-list c)
+  (let ((ms (hash-ref c "mutations" '())))
+    (if (pair? ms)
+        (let loop ((xs ms) (acc '()))
+          (if (null? xs)
+              (reverse acc)
+              (let ((t (hash-ref (car xs) "target" "")))
+                (loop (cdr xs)
+                      (if (and (string? t) (not (string=? t "")))
+                          (cons t acc)
+                          acc)))))
+        (list (hash-ref c "target" (hash-ref c "site" ""))))))
+
+(define (perf:any-protected? c protected)
+  (let loop ((ts (perf:cand-target-list c)))
+    (if (null? ts)
+        #f
+        (if (perf:member? protected (car ts))
+            #t
+            (loop (cdr ts))))))
+
 (define (perf:split-protected cands protected)
   (let loop ((xs (if (list? cands) cands '())) (ok '()) (refused '()))
     (if (null? xs)
         (hash "ok" (reverse ok) "refused" (reverse refused))
-        (let* ((c (car xs))
-               (site (hash-ref c "target" (hash-ref c "site" ""))))
-          (if (perf:member? protected site)
+        (let ((c (car xs)))
+          (if (perf:any-protected? c protected)
               (loop (cdr xs) ok (cons c refused))
               (loop (cdr xs) (cons c ok) refused))))))
 

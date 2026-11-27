@@ -145,8 +145,60 @@
                               "expected" (oracle one))
                         acc)))))))
 
+; One candidate may rewrite several defines. The catalog's "genomes" is
+; the list form: (list (hash "target" "collide" "genome" "...") ...), or a
+; hash of target -> genome. The single form is the one-entry case of the
+; same shape; every downstream reader can use "mutations" and ignore
+; whether the catalog wrote one define or three.
+(define (perf:cand-mutations spec cand)
+  (let ((ms (hash-ref cand "mutations" '())))
+    (if (pair? ms)
+        ms
+        (let ((gs (hash-ref cand "genomes" #f)))
+          (cond ((and (list? gs) (pair? gs))
+                 (let loop ((xs gs) (acc '()))
+                   (if (null? xs)
+                       (reverse acc)
+                       (let ((g (car xs)))
+                         (loop (cdr xs)
+                               (cons (if (hash? g)
+                                         (hash "target" (hash-ref g "target" "")
+                                               "genome" (hash-ref g "genome" ""))
+                                         (hash "target" (car g)
+                                               "genome" (if (pair? (cdr g)) (car (cdr g)) "")))
+                                     acc))))))
+                ((hash? gs)
+                 (let loop ((ts (hash-keys gs)) (acc '()))
+                   (if (null? ts)
+                       (reverse acc)
+                       (loop (cdr ts)
+                             (cons (hash "target" (car ts)
+                                         "genome" (hash-ref gs (car ts) ""))
+                                   acc)))))
+                (else
+                 (list (hash "target" (perf:cand-target spec cand)
+                             "genome" (hash-ref cand "genome" "")))))))))
+
+; Materialize the primary target/genome from the first mutation, so the
+; older single-target readers (protected, site label, LLM context) keep
+; working. The original entry is updated in place; it is spec data.
+(define (perf:normalize-cand spec cand)
+  (if (not (hash? cand))
+      cand
+      (let* ((ms (perf:cand-mutations spec cand))
+             (first (if (pair? ms) (car ms) (hash "target" (hash-ref spec "target" "bench-kernel")
+                                                  "genome" ""))))
+        (hash-set! cand "mutations" ms)
+        (hash-set! cand "target" (hash-ref first "target" ""))
+        (hash-set! cand "genome" (hash-ref first "genome" ""))
+        cand)))
+
 (define (perf:catalog spec)
-  (hash-ref spec "catalog" '()))
+  (let loop ((xs (hash-ref spec "catalog" '())) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (let ((c (perf:normalize-cand spec (car xs))))
+          (loop (cdr xs) (if (hash? c) (cons c acc) acc))))))
 
 (define (perf:entry catalog id)
   (let loop ((xs catalog))
@@ -162,6 +214,18 @@
         t
         (hash-ref spec "target" "bench-kernel"))))
 
+; Every define a candidate rewrites, in catalog order. A set candidate
+; has one entry per (target, genome); a single candidate has one.
+(define (perf:cand-targets spec cand)
+  (let loop ((xs (perf:cand-mutations spec cand)) (acc '()))
+    (if (null? xs)
+        (reverse acc)
+        (let ((t (hash-ref (car xs) "target" "")))
+          (loop (cdr xs)
+                (if (and (string? t) (not (string=? t "")))
+                    (cons t acc)
+                    acc))))))
+
 ; The job carries the candidate's own target, so one catalog can rebind
 ; more than one define. checks/heldout/screen are values the parent
 ; oracle already produced; the child cannot rewrite that oracle.
@@ -172,17 +236,31 @@
           (else (loop (cdr xs))))))
 
 (define (perf:job-record spec cand out)
-  (let ((id (hash-ref cand "id" "candidate"))
-        (target (perf:cand-target spec cand)))
+  (let* ((id (hash-ref cand "id" "candidate"))
+         (target (perf:cand-target spec cand))
+         (mutations (perf:cand-mutations spec cand))
+         (null-mutations
+           (let loop ((xs mutations) (acc '()))
+             (if (null? xs)
+                 (reverse acc)
+                 (let* ((m (car xs))
+                        (t (hash-ref m "target" ""))
+                        (body (if (and (string? t) (not (string=? t "")))
+                                  (perf:null-body spec t)
+                                  "")))
+                   (loop (cdr xs)
+                         (if (> (string-length body) 0)
+                             (cons (hash "target" t "genome" body) acc)
+                             acc)))))))
     (hash "id" id
           "seed" (hash-ref spec "seed-path")
           "target" target
-          ; The body of the target's own null: the worker rebinds to it
-          ; first and measures the tree, so the site floor's two sides
-          ; are measured in the SAME process, in the same shape (a
-          ; rebind makes the rebound define faster to call, so a base
-          ; measured without the rebind would flatter every candidate).
+          ; The bodies the worker rebinds to before it measures the base:
+          ; one per mutation target. A set pays every rebind on both
+          ; sides, so the gate compares the same shape.
           "null-genome" (perf:null-body spec target)
+          "null-mutations" null-mutations
+          "mutations" mutations
           "kernel" (hash-ref spec "kernel" (hash-ref spec "target" "bench-kernel"))
           "role" (hash-ref cand "role" "candidate")
           "genome" (hash-ref cand "genome" "")
@@ -261,14 +339,51 @@
         s
         (hash-ref cand "target" ""))))
 
+; The sites a candidate is judged on: one entry per mutation target, or an
+; explicit "sites" list, or the older single "site". A set's site time is
+; the sum of its sites, against the same sum in the base tree.
+(define (perf:cand-sites cand)
+  (let ((ss (hash-ref cand "sites" #f)))
+    (cond ((and (list? ss) (pair? ss)) ss)
+          ((let ((s (hash-ref cand "site" "")))
+             (and (string? s) (> (string-length s) 0)))
+           (list (hash-ref cand "site")))
+          ((pair? (hash-ref cand "mutations" '()))
+           (let loop ((xs (hash-ref cand "mutations" '())) (acc '()))
+             (if (null? xs)
+                 (reverse acc)
+                 (let ((t (hash-ref (car xs) "target" "")))
+                   (loop (cdr xs)
+                         (if (and (string? t) (> (string-length t) 0))
+                             (cons t acc)
+                             acc))))))
+          (else (list (hash-ref cand "target" ""))))))
+
+; Sum of the sites' task-clock in one tree. In the base tree a missing
+; site is a site that was not measured, and the floor cannot be claimed
+; (-1). In the candidate tree a missing site is a site the candidate
+; stopped calling: that is 0, not a missing measurement — a set that
+; removes one of its own sites must not fail its site floor.
+(define (perf:site-sum cct sites strict)
+  (let loop ((xs (if (list? sites) sites '())) (sum 0))
+    (if (null? xs)
+        sum
+        (let ((v (perf:site-ms cct (car xs))))
+          (cond ((or (not (number? v)) (< v 0))
+                 (if strict -1 (loop (cdr xs) sum)))
+                (else (loop (cdr xs) (+ sum v))))))))
+
 ; The site's two times: the baseline's and the candidate's, both from
 ; the worldline trees, and the floor the intend asks for. The result
 ; carries the site's name (the trial round set it).
 (define (perf:site-context spec result . rest)
   (let* ((site (hash-ref result "site" ""))
+         (sites (let ((ss (hash-ref result "sites" '())))
+                  (if (and (list? ss) (pair? ss)) ss (list site))))
+         (label (if (pair? sites) (perf:join sites "+") site))
          (pct (hash-ref (perf:intend-seal spec) "site-min-faster-pct" #f))
-         ; The base of the site floor is the same define measured in the
-         ; same shape: the null of the define the candidate rebinds. The
+         ; The base of the site floor is the same defines measured in the
+         ; same shape: the nulls of the defines the candidate rebinds. The
          ; un-rebound baseline's tree is the fallback when that null has
          ; no tree.
          (base-cct (let ((c (if (pair? rest) (car rest) #f)))
@@ -277,9 +392,9 @@
                          (hash-ref spec "baseline-cct" (hash))))))
     (if (or (not (number? pct)) (not (string? site)) (string=? site ""))
         (hash)
-        (hash "site" site
-              "base" (perf:site-ms base-cct site)
-              "cand" (perf:site-ms (hash-ref result "cct" (hash)) site)
+        (hash "site" label
+              "base" (perf:site-sum base-cct sites #t)
+              "cand" (perf:site-sum (hash-ref result "cct" (hash)) sites #f)
               "pct" pct))))
 
 ; The references of one round, measured now: the un-rebound baseline and
@@ -305,20 +420,31 @@
 ; is a ROLLBACK here, not a worker launch; the budget counts trials that
 ; actually ran. A build without mutate:check returns 'unavailable and every
 ; candidate goes to trial, which is the old behavior.
+; A set is clean only when every mutation is clean. Each mutation gets
+; its own dry run; the trial's mutate:rebind remains the final typecheck
+; for cross-mutation effects, which one-candidate-at-a-time cannot see.
+(define (perf:type-gate-cand spec cand)
+  (let loop ((ms (perf:cand-mutations spec cand)))
+    (if (null? ms)
+        #t
+        (let* ((m (car ms))
+               (t (hash-ref m "target" ""))
+               (g (hash-ref m "genome" ""))
+               (check (perf:type-gate t g)))
+          (cond ((eq? check #t) (loop (cdr ms)))
+                ((eq? check 'unavailable) (loop (cdr ms)))
+                (else (hash "cand" cand "check" check "target" t)))))))
+
 (define (perf:type-split spec cands)
   (let loop ((xs (if (list? cands) cands '())) (ok '()) (bad '()))
     (if (null? xs)
         (list (reverse ok) (reverse bad))
-        (let* ((cand (car xs))
-               (check (perf:type-gate (perf:cand-target spec cand)
-                                      (hash-ref cand "genome" ""))))
-          (cond ((eq? check #t)
-                 (loop (cdr xs) (cons cand ok) bad))
-                ((eq? check 'unavailable)
-                 (loop (cdr xs) (cons cand ok) bad))
-                (else
-                 (loop (cdr xs) ok
-                       (cons (hash "cand" cand "check" check) bad))))))))
+        (let ((cand (car xs)))
+          (let ((check (perf:type-gate-cand spec cand)))
+            (cond ((eq? check #t)
+                   (loop (cdr xs) (cons cand ok) bad))
+                  (else
+                   (loop (cdr xs) ok (cons check bad)))))))))
 
 (define (perf:trial-round spec cands out buf baseline)
   (let* ((refs (perf:round-references spec out))
@@ -399,7 +525,7 @@
                    (cand (hash-ref row "cand" (hash)))
                    (check (hash-ref row "check" #f))
                    (id (hash-ref cand "id" "?"))
-                   (target (perf:cand-target spec cand))
+                   (target (hash-ref row "target" (perf:cand-target spec cand)))
                    (detail (perf:type-gate-detail check)))
               (perf:say buf (string-append "candidate " id
                                            " ROLLBACK reason=type-gate"))
@@ -446,6 +572,7 @@
                     (perf:audit-decision (perf:cand-target spec (car xs))
                                          "ROLLBACK" "missing-result" (hash "id" id)))
                   (hash-set! result "site" (perf:candidate-site (car xs)))
+                  (hash-set! result "sites" (perf:cand-sites (car xs)))
                   (perf:tag-result! result (car xs))
                   (let* ((raw (perf:raw-of spec))
                          (cand-target (perf:cand-target spec (car xs)))
@@ -511,7 +638,8 @@
                     (hash-set! result "moved-to" (perf:join (hash-ref q "moved-to" '()) ","))
                     (hash-set! result "target" (hash-ref (car xs) "target" ""))
                     (hash-set! result "ref-ms" cand-base)
-                    (hash-set! result "ref-target" cand-target)
+                    (hash-set! result "ref-target"
+                               (perf:join (perf:cand-targets spec (car xs)) "+"))
                     (hash-set! result "site-context" site)
                     (hash-set! result "site-floor" site-floor)
                     (hash-set! result "bus-verdict" bus-res)
@@ -929,7 +1057,9 @@
 (define (perf:llm-round-candidates spec llm buf)
   (let* ((cands (if (and (hash? llm) (eq? (hash-ref llm "ok" #f) #t))
                     (let ((cs (hash-ref llm "candidates" '())))
-                      (if (list? cs) cs '()))
+                      (if (list? cs)
+                          (map (lambda (c) (perf:normalize-cand spec c)) cs)
+                          '()))
                     '()))
          (split (perf:split-protected cands (perf:protected spec)))
          (filtered (perf:filter-negative (hash-ref split "ok" '())
@@ -1283,17 +1413,20 @@
               ; body there: the seed's text is where its defines live.
               (perf:extract-define (perf:read-text (hash-ref spec "seed-path" "")) target))))))
 
-; Every target this run may rebind: the spec's target first, then the
-; target of every candidate in the catalog.
+; Every target this run may rebind: the spec's target first, then every
+; mutation target of every candidate in the catalog (a set contributes
+; all of its defines, not just the first).
 (define (perf:run-targets spec)
   (let loop ((xs (perf:catalog spec)) (acc (list (hash-ref spec "target" "bench-kernel"))))
     (if (null? xs)
         (reverse acc)
-        (let ((t (perf:cand-target spec (car xs))))
-          (loop (cdr xs)
-                (if (perf:member? acc t)
-                    acc
-                    (append acc (list t))))))))
+        (let loop2 ((ts (perf:cand-targets spec (car xs))) (acc acc))
+          (if (null? ts)
+              (loop (cdr xs) acc)
+              (loop2 (cdr ts)
+                     (if (perf:member? acc (car ts))
+                         acc
+                         (append acc (list (car ts))))))))))
 
 ; The id of a target's null job: "null" for the spec's target, so the
 ; report keeps the name it always had, and "null-<target>" for the rest.
@@ -1365,16 +1498,23 @@
 ; define's null.
 (define (perf:split-reference spec nulls cands)
   (let ((spec-target (hash-ref spec "target" "bench-kernel")))
-    (let loop ((xs cands) (ok '()) (no '()))
-      (if (null? xs)
-          (list (reverse ok) (reverse no))
-          (let* ((c (car xs))
-                 (t (perf:cand-target spec c))
-                 (has (or (string=? t spec-target)
-                          (perf:usable-ms (hash-ref nulls t #f)))))
-            (if has
-                (loop (cdr xs) (cons c ok) no)
-                (loop (cdr xs) ok (cons c no))))))))
+    (let ((has-reference?
+           (lambda (c)
+             (let loop ((ts (perf:cand-targets spec c)))
+               (if (null? ts)
+                   #t
+                   (let ((t (car ts)))
+                     (if (or (string=? t spec-target)
+                             (perf:usable-ms (hash-ref nulls t #f)))
+                         (loop (cdr ts))
+                         #f)))))))
+      (let loop ((xs cands) (ok '()) (no '()))
+        (if (null? xs)
+            (list (reverse ok) (reverse no))
+            (let ((c (car xs)))
+              (if (has-reference? c)
+                  (loop (cdr xs) (cons c ok) no)
+                  (loop (cdr xs) ok (cons c no)))))))))
 
 (define (perf:measure-references spec buf out)
   (let* ((target (hash-ref spec "target" "bench-kernel"))

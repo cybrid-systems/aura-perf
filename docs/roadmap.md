@@ -81,11 +81,9 @@ kernel KEEP id=collide-slack heldout-ms=1339
 compile-delta world-rebuilt=0 cascade-full=0 body-only=2 relower-full=36
 ```
 
-### 2. 一个候选可以是一组改动
+### 2. 一个候选可以是一组改动 —— ✅ 做了
 
-catalog 里现在一条候选改一个 define。业务上的「让游戏更快」常常是几处一起改（`collide` 的窗口 + 每帧重建列表的两处 = 物理那条路的一半）。候选的 genome 应该是一组 `(target, genome)`，worker 一起 apply，回滚也一起回。
-
-验收：a 条候选能同时改几个 define；sum-scan 的例子 KEEP / ROLLBACK 构成不变。
+catalog 条目现在可以带 `genomes`（一组 `(target, genome)`，或 target → genome 的 hash）。worker 先按 `null-mutations` 量整组 null 的 base，再把整组 candidate 依次 `mutate:rebind`，最后只 `eval-current` 一次；任何一条失败，整条 worldline 回滚。类型门逐条 dry-run，protected 和引用检查按组，位点地板按组求和。报告 `ref-target=a+b`、`site a+b base-ms=… cand-ms=…`。测试：`tests/candidate_set_round_test.py`；sum-scan 自己的 KEEP / ROLLBACK 不变。
 
 ### 3. 天花板探针：先量「这个位点最多能快多少」
 

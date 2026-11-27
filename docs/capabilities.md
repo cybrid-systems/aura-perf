@@ -22,7 +22,7 @@ spec 是目标项目和运行时之间的那份约定，运行时按它工作：
 | `oracle` | `(inputs -> expected)` | `perf:sum-ref` |
 | `check-inputs` | checksum 用的那几组输入（列表或过程） | sum-scan 的几组 |
 | `regions-fn` | 要计时的 define 和它们的 stack | 无 |
-| `catalog` | 候选：id、target、genome、thought | 无 |
+| `catalog` | 候选：id、target、genome、thought；或 `genomes` 一组 `(target, genome)`（也接受 target → genome 的 hash），一条候选一次改多个 define | 无 |
 | `intend` | 最低加速、checksum、预算、protected | 无 |
 | `genes` | 策略基因 | 无 |
 | `count-defines` | 要不要每条 worldline 的树（`#t` 或 define 名字的列表） | `#f` |
@@ -177,6 +177,17 @@ held-out 中位是 0 ms 也算数：候选比计时器的分辨率还快时，�
 子进程把 job 当 JSON 读 ✗，而 JSON 不保留「读回来变成整数」的浮点（5.0 变成 5 ✗）。
 父进程在自己的输入上算期望值 ✗、子进程在 JSON 那个输入上算结果 ✗ —— 两边其实是两个
 程序 ✗。现在输入先走一遍同样的 round trip ✓，期望值再算 ✓，两边是同一个值 ✓。
+
+### 10c. 一个候选是一组改动
+
+catalog 条目可以带 `genomes`：一组 `(target, genome)`，或 target → genome 的 hash。运行时把每条候选归一成 `mutations`，之后再没有「单 target」和「多 target」两条路：
+
+- **一个 worldline 应用整组。** worker 先按 `null-mutations` 把每个 target rebind 成它自己的函数体、量一次 base；再把整组 candidate 依次 `mutate:rebind`，最后只 `eval-current` 一次。任何一条 rebind 失败，整条 worldline 回滚，不会留下半组改动。
+- **参照物是同一组。** 候选的 `null-heldout-ms` 是「所有 target 都 rebind 成自己」的那次测量，和候选付同一笔 rebind 税；`ref-target=bench-kernel+k-ref` 写在候选行上。
+- **类型门逐条 dry-run。** `(mutate :check)` 对每条 mutation 各跑一次；跨 mutation 的签名变化仍由 trial 里的 `mutate:rebind` 做最后 typecheck。
+- **protected 检查组。** 组里任何一个 target 在 protected 列表里，整条候选 `expert-refuse`，不会只改一半。
+- **位点地板按组求和。** `site` 默认是组里每个 target；报告写 `site bench-kernel+k-ref base-ms=… cand-ms=…`。base 树缺一个位点是没有量到（floor 不成立），候选树缺一个位点是候选不再调用它（算 0），所以「把热叶子整个删掉」这种组不会因为位点消失而失败。
+- **引用检查按组。** 组里任何一个 target 没有可 rebind 的 null 体，整条候选 `reference-missing`，不会拿别的 target 的 null 凑参照。
 
 ### 11. 便宜筛选，再花 held-out
 

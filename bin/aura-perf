@@ -238,6 +238,7 @@ case "$cmd" in
     checksum_rc=0
     auto_probe_rc=0
     type_gate_rc=0
+    candidate_set_rc=0
     joint_rc=0
     if command -v python3 >/dev/null 2>&1; then
       python3 tests/bus_linger_test.py
@@ -262,6 +263,10 @@ case "$cmd" in
       # worker, no job file, no held-out sample.
       python3 tests/type_gate_round_test.py
       type_gate_rc=$?
+      # One candidate may rewrite several defines; the set is one
+      # worldline and the site floor sums its sites.
+      python3 tests/candidate_set_round_test.py
+      candidate_set_rc=$?
       # aura-perf#30: an agent that cannot boot leaves a report with
       # its log, not a cleanup traceback.
       python3 tests/joint_agent_absent_test.py
@@ -299,6 +304,9 @@ case "$cmd" in
     fi
     if [ "$type_gate_rc" -ne 0 ]; then
       exit "$type_gate_rc"
+    fi
+    if [ "$candidate_set_rc" -ne 0 ]; then
+      exit "$candidate_set_rc"
     fi
     if [ "$joint_rc" -ne 0 ]; then
       exit "$joint_rc"

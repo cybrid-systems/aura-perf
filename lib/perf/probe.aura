@@ -1,0 +1,154 @@
+; Auto-generated worldline probes.
+;
+; The target can hand-write perf-worldline-measure, and when it does that
+; measurement is the better one: the target knows its own arity and which
+; defines belong in its tree. This module is the fallback. It generates the
+; same wrappers from the seed's top-level defines, installs them by rewriting
+; the live bindings (eval of set! forms in the trial workspace), runs the
+; kernel once, restores every binding, and returns the rows.
+;
+; It is Aura-native in the way that matters for an agent: no perf binary, no
+; PMU, no source change, no second process. The workspace is the instrument.
+; A candidate has already been rebound when the worldline is measured, so the
+; wrappers go around the candidate's current value.
+;
+; The clock is monotonic-ms. Call counts are exact; self-ms is the wrapper's
+; elapsed time minus the time its wrapped children consumed, at millisecond
+; resolution. A workload shorter than a few milliseconds reports zeros, which
+; is the truth at that resolution, not a fabricated number. Wrapping adds a
+; frame and an apply per call, so the absolute milliseconds are inflated by
+; the probe; the tree shape, call counts and relative shares are what the
+; strategy should read.
+;
+; The kernel itself is not wrapped: a set! on the only definition the trial
+; calls can be rebound by the workspace rebuild, and the root row is supplied
+; by the caller (the kernel it timed). Every other top-level define whose
+; value is a procedure is fair game.
+
+(export perf:auto-worldline-measure perf-probe-state)
+
+; One box, not four exported variables: Aura exports procedures, and the
+; generated set! forms need to reach the same mutable state. The getter is
+; evaluated in the workspace by the wrappers below.
+(define probe-state-box (hash))
+
+(define (perf-probe-state) probe-state-box)
+
+(define (perf:probe-reset!)
+  (set! probe-state-box
+        (hash "stack" '() "acc" (hash) "stacks" (hash) "saved" (hash))))
+
+; One set! form per define. The generated lambda is variadic, so it does not
+; need the target's arity; apply forwards the original arguments. enter/leave
+; are inlined rather than called by name: an imported helper is a binding the
+; trial typecheck does not always see, while primitives and the exported
+; state getter are always in scope.
+(define (perf:probe-set-src name)
+  (string-append
+    "(set! " name " (lambda args\n"
+    "  (let ((st (perf-probe-state))"
+    "        (f (vector \"" name "\" (monotonic-ms) 0)))"
+    "    (hash-set! st \"stack\" (cons f (hash-ref st \"stack\" '())))"
+    "    (let ((ss (hash-ref st \"stacks\" (hash))))"
+    "      (hash-set! ss \"" name "\""
+    "        (map (lambda (x) (vector-ref x 0)) (reverse (hash-ref st \"stack\" '()))))"
+    "      (hash-set! st \"stacks\" ss)))"
+    "  (let ((v (apply (hash-ref (hash-ref (perf-probe-state) \"saved\" (hash)) \"" name "\") args)))"
+    "    (let* ((st (perf-probe-state))"
+    "           (g (car (hash-ref st \"stack\" '())))"
+    "           (dt (- (monotonic-ms) (vector-ref g 1)))"
+    "           (child (vector-ref g 2))"
+    "           (self (- dt child))"
+    "           (acc (hash-ref st \"acc\" (hash)))"
+    "           (cur (hash-ref acc \"" name "\" (hash \"calls\" 0 \"incl\" 0 \"self\" 0))))"
+    "      (hash-set! st \"stack\" (cdr (hash-ref st \"stack\" '())))"
+    "      (hash-set! acc \"" name "\""
+    "        (hash \"calls\" (+ (hash-ref cur \"calls\" 0) 1)"
+    "              \"incl\" (+ (hash-ref cur \"incl\" 0) dt)"
+    "              \"self\" (+ (hash-ref cur \"self\" 0) self)))"
+    "      (hash-set! st \"acc\" acc)"
+    "      (let ((stack (hash-ref st \"stack\" '())))"
+    "        (if (pair? stack)"
+    "            (let ((p (car stack)))"
+    "              (vector-set! p 2 (+ (vector-ref p 2) dt)))"
+    "            #f))"
+    "      v))))\n"))
+
+; Save the current value, not the seed's text: a candidate may already have
+; rebound one of these defines, and the measurement has to see the candidate.
+; A value that is not a procedure is skipped by install (below).
+(define (perf:probe-capture! names)
+  (let ((saved (hash-ref (perf-probe-state) "saved" (hash))))
+    (let loop ((xs names))
+      (if (null? xs)
+          (begin (hash-set! (perf-probe-state) "saved" saved) #t)
+          (let* ((name (car xs))
+                 (v (try (eval (string->symbol name)) (catch (e) #f))))
+            (if (procedure? v)
+                (hash-set! saved name v)
+                #f)
+            (loop (cdr xs)))))))
+
+; One eval for all set! forms, so the workspace rebuild happens once. A form
+; that fails aborts the batch; the caller restores whatever was installed.
+(define (perf:probe-install! names)
+  (let ((saved (hash-ref (perf-probe-state) "saved" (hash))))
+    (let loop ((xs names) (src ""))
+      (if (null? xs)
+          (if (> (string-length src) 0) (eval src) #t)
+          (if (procedure? (hash-ref saved (car xs) #f))
+              (loop (cdr xs) (string-append src (perf:probe-set-src (car xs)) "\n"))
+              (loop (cdr xs) src))))))
+
+; Put the candidate's values back. The saved values are runtime procedures,
+; so the restore form reads them from the state getter instead of embedding
+; them in source text.
+(define (perf:probe-restore! names)
+  (let ((saved (hash-ref (perf-probe-state) "saved" (hash))))
+    (let loop ((xs names) (src ""))
+      (if (null? xs)
+          (if (> (string-length src) 0) (eval src) #t)
+          (if (procedure? (hash-ref saved (car xs) #f))
+              (loop (cdr xs)
+                    (string-append src
+                                   "(set! " (car xs)
+                                   " (hash-ref (hash-ref (perf-probe-state) \"saved\" (hash)) \"" (car xs) "\"))\n"))
+              (loop (cdr xs) src))))))
+
+; Only called defines become rows. The stack is recorded at entry, so a
+; define reached from two parents keeps the first chain; the tree still has
+; one node per name, which is what perf:cct-build consumes.
+(define (perf:probe-rows root)
+  (let ((acc (hash-ref (perf-probe-state) "acc" (hash)))
+        (stacks (hash-ref (perf-probe-state) "stacks" (hash))))
+    (let loop ((ks (hash-keys acc)) (rows '()))
+      (if (null? ks)
+          (reverse rows)
+          (let* ((name (car ks))
+                 (h (hash-ref acc name (hash)))
+                 (calls (hash-ref h "calls" 0)))
+            (loop (cdr ks)
+                  (if (> calls 0)
+                      (cons (hash "name" name
+                                  "calls" calls
+                                  "task-clock" (hash-ref h "self" 0)
+                                  "stack" (cons root (reverse (hash-ref stacks name '()))))
+                            rows)
+                      rows)))))))
+
+; names: the defines to wrap (kernel excluded by the caller). '() returns
+; no rows. Every failure path restores what it installed: measurement must
+; never leave the trial workspace in a different shape than it found it.
+(define (perf:auto-worldline-measure kernel xs names root)
+  (perf:probe-reset!)
+  (perf:probe-capture! names)
+  (let ((installed (try (perf:probe-install! names) (catch (e) #f))))
+    (if (not installed)
+        (begin
+          (try (perf:probe-restore! names) (catch (e) #f))
+          '())
+        (begin
+          (try (kernel xs) (catch (e) #f))
+          (let ((rows (perf:probe-rows root)))
+            (try (perf:probe-restore! names) (catch (e) #f))
+            rows)))))

@@ -133,11 +133,15 @@ KEEP 不重启 agent。同一个进程里：
 
 ### 7. 每个 worldline 一棵 CCT
 
-Trial 子进程在 checksum 通过之后，量出那条 worldline 的树。**树是目标程序自己量的**：seed 可以定义 `(perf-worldline-measure kernel xs)`，它知道自己的 define 的元数，所以能装上计数器、跑一次 kernel、把每个 define 的调用次数和毫秒连同它自己的 stack 报回来。运行时只补上根（它量的那个 kernel）并建树。spec 用 `count-defines` 决定要不要这张树，也可以点名要哪些 define（`#t` = seed 报的全部）。
+Trial 子进程在 checksum 通过之后，量出那条 worldline 的树。**树优先由目标程序自己量**：seed 可以定义 `(perf-worldline-measure kernel xs)`，它知道自己的 define 的元数，所以能装上计数器、跑一次 kernel、把每个 define 的调用次数和毫秒连同它自己的 stack 报回来。运行时只补上根（它量的那个 kernel）并建树。spec 用 `count-defines` 决定要不要这张树，也可以点名要哪些 define（`#t` = seed 报的全部）。
+
+目标没写 `perf-worldline-measure` 时，运行时生成同样的探针（`lib/perf/probe.aura`）：从 seed 的顶层 define 里取过程名（`count-names` 点名时只用那几条），用一次 `eval` 装上一组 `set!` 包装（`set!` 改的是候选 rebind 之后的当前值），跑一次 kernel，读回调用次数、self-ms 和自己的 stack，再把每个绑定恢复。kernel 本身不包，根由运行时补；非过程绑定跳过。这是 Aura 的 workspace 自己在当探针：没有 perf 二进制、没有 PMU、没有第二次进程。报告里 `cct-source=target` 表示目标自己量的，`cct-source=auto-probe` 表示运行时生成的；`measured=0` 仍是「这条 worldline 没有树」。
+
+自动探针的毫秒是 `monotonic-ms`，调用次数精确、self-ms 是毫秒分辨率；包装本身给每次调用加一帧和一次 apply，所以绝对毫秒偏大。读法是树形、调用次数和相对份额，不是把自动探针的毫秒当 perf 的 task-clock。目标自己写的测量仍然优先，因为它知道自己的元数和哪些 define 属于树。
 
 父进程调用 `(perf:cct-worldline-query before after prefix)`，得到 `prefix-removed`、`cost-moved`、`moved-to`。`(perf:cct-cleared …)` 回答「哪次 mutation 去掉了同一条热前缀，且没有把代价挪到别的 define」。差分摘要写进该候选的 `evo:record!` evidence（`cct-delta`）。KEEP 之后若 `perf:should-continue?` 为真，用新树再 `perf:mine`；示例里线性扫描是 `continue 0`。
 
-度量：`cleared` 行点名候选；`worldline` 行给出 measured / prefix-removed / cost-moved。空树是 `measured=0`，不算「前缀被删掉」。没有实现 `perf-worldline-measure` 的目标没有这张树，报告如实写 `measured=0`。
+度量：`cleared` 行点名候选；`worldline` 行给出 measured / prefix-removed / cost-moved / cct-source。空树是 `measured=0`，不算「前缀被删掉」。目标自己的测量和自动探针都没有产出时，报告如实写 `measured=0`。
 
 ### 8. 负例按 class + hot-node，跨次累积
 

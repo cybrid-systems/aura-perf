@@ -7,7 +7,8 @@
         perf:named-let-reentrant? perf:named-let-fault-text
         perf:mutate-ops-present? perf:mutate-ops-fault-text
         perf:verdict-speedup perf:extract-define perf:sole-define
-        perf:define-header perf:squash perf:text-tag perf:ident-tokens)
+        perf:define-header perf:squash perf:text-tag perf:ident-tokens
+        perf:define-names)
 
 (require "std/string" all:)
 
@@ -287,6 +288,63 @@
                        (substring s start (+ i 1))
                        (loop (+ i 1) (- depth 1))))
                   (else (loop (+ i 1) depth))))))))
+
+(define (perf:symbol-at s i)
+  (let ((n (string-length s)))
+    (let loop ((j i))
+      (if (>= j n)
+          (substring s i j)
+          (let ((c (perf:char-at s j)))
+            (if (or (<= c 32) (= c 40) (= c 41))
+                (substring s i j)
+                (loop (+ j 1))))))))
+
+; The define's name from one top-level form: "(define (f x) ...)" or
+; "(define f ...)". "" for anything else.
+(define (perf:define-form-name form)
+  (if (not (perf:starts-at? form 0 "(define"))
+      ""
+      (let ((k (perf:skip-ws form 7)))
+        (if (>= k (string-length form))
+            ""
+            (if (= (perf:char-at form k) 40)
+                (perf:symbol-at form (perf:skip-ws form (+ k 1)))
+                (perf:symbol-at form k))))))
+
+; Names of the top-level defines in source text, in source order. Strings
+; and line comments are skipped, and a whole top-level form is consumed at
+; once, so a define inside a let is not mistaken for a top-level one. This
+; is how the auto-probe finds the defines it may wrap; a seed that names
+; its own measurement still wins.
+(define (perf:define-names source)
+  (if (not (string? source))
+      '()
+      (let ((n (string-length source)))
+        (let loop ((i 0) (acc '()))
+          (if (>= i n)
+              (reverse acc)
+              (let ((c (perf:char-at source i)))
+                (cond ((= c 59) (loop (perf:skip-comment source i) acc))
+                      ((= c 34) (loop (perf:skip-string source i) acc))
+                      ((= c 40)
+                       (let ((form (perf:balanced-form source i)))
+                         (if (= (string-length form) 0)
+                             (loop (+ i 1) acc)
+                             (let ((name (perf:define-form-name form)))
+                               (loop (+ i (string-length form))
+                                     (if (and (> (string-length name) 0)
+                                              (not (perf:member? acc name)))
+                                         (cons name acc)
+                                         acc))))))
+                      (else (loop (+ i 1) acc)))))))))
+
+; End of the line starting at the comment marker at i.
+(define (perf:skip-comment s i)
+  (let ((n (string-length s)))
+    (let loop ((j i))
+      (if (or (>= j n) (= (perf:char-at s j) 10))
+          (+ j 1)
+          (loop (+ j 1))))))
 
 (define (perf:extract-define source name)
   (if (or (not (string? source)) (not (string? name)) (string=? name ""))

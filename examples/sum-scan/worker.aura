@@ -10,6 +10,7 @@
 (require "lib/perf/cct" all:)
 (require "lib/perf/profile" all:)
 (require "lib/perf/gate" all:)
+(require "lib/perf/probe" all:)
 
 (define (worker-fail why)
   (display why)
@@ -42,6 +43,30 @@
 (define ident (hash-ref job "id" "candidate"))
 (define role (hash-ref job "role" "candidate"))
 (define repeats (hash-ref job "repeats" 3))
+
+; The defines the auto-probe may wrap. The spec's count-names wins; without
+; one, every top-level define in the seed except the kernel and the runtime's
+; own perf- helpers. The target's perf-worldline-measure, when present, is
+; still the measurement that runs.
+(define (probe-name? n)
+  (and (not (string=? n kernel-name))
+       (not (string-prefix? n "perf-"))
+       (not (string-prefix? n "perf:"))))
+
+(define probe-names
+  (let ((named (hash-ref job "count-names" '())))
+    (let loop ((xs (if (pair? named) named (perf:define-names seed)))
+               (acc '()))
+      (if (null? xs)
+          (reverse acc)
+          (loop (cdr xs)
+                (if (and (string? (car xs)) (probe-name? (car xs)))
+                    (cons (car xs) acc)
+                    acc))))))
+
+; Which measurement produced the worldline tree. "target" is the seed's own
+; perf-worldline-measure; "auto-probe" is the runtime-generated fallback.
+(define cct-source "none")
 
 ; An empty genome is the un-rebound baseline: same child shape as a
 ; candidate, but mutate:rebind is not applied. The null candidate passes
@@ -165,9 +190,16 @@
   (let ((measure (try (eval (string->symbol "perf-worldline-measure"))
                       (catch (e) #f))))
     (if (procedure? measure)
-        (let ((rows (try (measure kernel xs) (catch (e) '()))))
-          (if (list? rows) rows '()))
-        '())))
+        (begin
+          (set! cct-source "target")
+          (let ((rows (try (measure kernel xs) (catch (e) '()))))
+            (if (list? rows) rows '())))
+        (if (pair? probe-names)
+            (let ((rows (try (perf:auto-worldline-measure kernel xs probe-names kernel-name)
+                             (catch (e) '()))))
+              (set! cct-source (if (and (list? rows) (pair? rows)) "auto-probe" "none"))
+              (if (list? rows) rows '()))
+            '()))))
 
 ; The spec may name the defines that belong in the tree. Without a
 ; list every row the seed reports is kept.
@@ -302,6 +334,7 @@
         "fidelity" (hash-ref beh "fidelity" "")
         "screen-ms" (hash-ref beh "screen-ms" -1)
         "cct" (hash-ref beh "cct" (hash "kind" "perf-cct" "nodes" '()))
+        "cct-source" cct-source
         "base-cct" (hash-ref beh "base-cct" (hash "kind" "perf-cct" "nodes" '()))
         "null-heldout-ms" (hash-ref beh "null-heldout-ms" -1)
         "dur-ms" (hash-ref tr "dur-ms" 0)

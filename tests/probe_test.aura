@@ -1,0 +1,41 @@
+; The runtime can measure a target that never wrote perf-worldline-measure:
+; wrap its top-level procedures by rewriting the live bindings, run the kernel
+; once, restore, and return the rows. Call counts and tree shape are exact;
+; the millisecond column is deliberately not printed (it is a clock reading,
+; not a golden value).
+(require "lib/perf/util" all:)
+(require "lib/perf/probe" all:)
+
+(define seed
+  (string-append
+    "(define answer 42)\n"
+    "(define (k-length xs) (length xs))\n"
+    "(define (k-ref xs i) (list-ref xs i))\n"
+    "(define (bump x) (+ x answer))\n"
+    "(define (bench-kernel xs)\n"
+    "  (bump 0)\n"
+    "  (let ((n (k-length xs)))\n"
+    "    (let loop ((i 0) (acc 0))\n"
+    "      (if (>= i n) acc (loop (+ i 1) (+ acc (k-ref xs i)))))))\n"))
+
+(set-code seed)
+(eval-current)
+
+(define (row-name r) (hash-ref r "name" ""))
+(define (by-name a b) (string<? (row-name a) (row-name b)))
+
+(define rows
+  (perf:auto-worldline-measure bench-kernel (range 0 200)
+                               (list "answer" "k-length" "k-ref" "bump")
+                               "bench-kernel"))
+
+(display (perf:define-names seed))
+(newline)
+(display (map (lambda (r)
+                (list (row-name r)
+                      (hash-ref r "calls" 0)
+                      (hash-ref r "stack" '())))
+              (sort rows by-name)))
+(newline)
+(display (list (bench-kernel (range 0 5)) answer))
+(newline)

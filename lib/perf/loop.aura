@@ -488,7 +488,8 @@
                                                  " prefix-removed=" (number->string (hash-ref result "prefix-removed" 0))
                                                  " cost-moved=" (number->string (hash-ref result "cost-moved" 0))
                                                  " moved-to=" (hash-ref result "moved-to" "")
-                                                 " fidelity=" (hash-ref result "fidelity" "")))
+                                                 " fidelity=" (hash-ref result "fidelity" "")
+                                                 " cct-source=" (hash-ref result "cct-source" "none")))
                     (perf:note buf (if pass "pass" "reject") id (perf:short-reason reason))
                     (perf:audit-decision
                       (perf:cand-target spec (car xs))

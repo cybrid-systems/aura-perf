@@ -1,0 +1,3 @@
+(answer k-length k-ref bump bench-kernel)
+((bump 1 (bench-kernel bump)) (k-length 1 (bench-kernel k-length)) (k-ref 200 (bench-kernel k-ref)))
+(10 42)

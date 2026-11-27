@@ -251,6 +251,7 @@
     (list xs ms (measure-tree xs ms))))
 
 (define null-heldout-ms -1)
+(define null-sched (hash "available" 0))
 
 (define (measure-base)
   ; The null: the target rebound to its own body, measured in this
@@ -282,6 +283,7 @@
                                             (hash-ref ho "oracle" perf:sum-ref))))
                 (set! base-cct (car (cddr m)))
                 (set! null-heldout-ms (hash-ref tm "median" -1))
+                (set! null-sched (hash-ref tm "sched" (hash "available" 0)))
                 null-heldout-ms))))))
 
 (define (apply-candidate c)
@@ -475,6 +477,8 @@
                                        (hash-set! b "screen-site-ms" cand-site)
                                        (hash-set! b "screen-base-site-ms" base-site)
                                        (hash-set! b "screen-site" (perf:join screen-sites "+"))
+                                       (hash-set! b "sched" (hash-ref tm "sched" (hash "available" 0)))
+                                       (hash-set! b "heldout-dist" (hash-ref tm "dist" (hash)))
                                        r))))))))))))
 
 (define engine-after (perf:engine-brief))
@@ -507,6 +511,9 @@
         "cct-source" cct-source
         "base-cct" (hash-ref beh "base-cct" (hash "kind" "perf-cct" "nodes" '()))
         "null-heldout-ms" (hash-ref beh "null-heldout-ms" -1)
+        "null-sched" null-sched
+        "sched" (hash-ref beh "sched" (hash "available" 0))
+        "heldout-dist" (hash-ref beh "heldout-dist" (hash))
         "engine" engine-delta
         "dur-ms" (hash-ref tr "dur-ms" 0)
         "error" (let ((e (hash-ref tr "error" #f)))

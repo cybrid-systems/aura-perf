@@ -296,6 +296,64 @@ install group=pmu missing=perf optional=no command="sudo apt-get install -y linu
 必须仍在，报告不能出现伪造的 task-clock。`AURA_PERF_DOCTOR_PARANOID` / `AURA_PERF_DOCTOR_BPF_DISABLED`
 只覆盖探测值，方便在没有对应 /proc 文件的容器里验证同一个分支；它们不授予任何权限。
 
+### 12d. 调度等待和尾延迟（性能之巅的第一层）
+
+性能方法论里，平均值和中位数只能回答“典型情况”；候选看起来快了，也可能是
+它恰好没被调度器罚站。运行时把这两类证据都做成值：
+
+- **每个候选的 schedstat 差值。** worker 在每次 held-out 调用前后读
+  `/proc/self/schedstat` 和 `/proc/self/status`；`wait-ms` 是 runqueue 等
+  待，`cpu-ms` 是真正在 CPU 上的时间，`wait-pct` 是等待占比，另外还有
+  timeslice 数、自愿/非自愿上下文切换。报告多一行：
+
+  ```
+  sched linear-scan samples=5 wait-ms=0 cpu-ms=41 wait-pct=0 slices=5 vol=2 invol=0 max-wait-ms=0
+  ```
+
+  这些数不需要 root、不需要 perf、不需要 tracepoint。读不到时写
+  `available=0`，候选行不出现 `sched-wait-ms`，而不是写 0。
+- **尾延迟分布。** 每次 `perf:time-checked` 同时返回 `p50/p90/p99/min/max/spread`
+  （nearest-rank）。门仍然只比中位数；分布是证据，回答“快是不是靠一次幸运样本”。
+  报告多一行：
+
+  ```
+  latency linear-scan p50-ms=9 p90-ms=9 p99-ms=9 max-ms=9 spread-ms=0
+  ```
+
+  候选行带 `heldout-p90-ms`。样本少于 2 个时不打印，避免把单个读数包装成分布。
+- **这一层不改变 KEEP/ROLLBACK。** 它让“快”可解释：是 CPU 时间降了，还是
+  等待时间变了，还是尾样本被调度噪声拉长。真正的门仍是 checksum、held-out
+  中位数、位点地板和 protected。
+
+方法论映射：`perf:sysinfo` / `check` 是机器层；CCT + calls + counters 是工作负载
+刻画；`perf:mine` + 位点地板是 drill-down；schedstat 是 off-CPU/调度层的第一个
+探针；尾延迟是延迟分析。USE 的 CPU/内存/调度层和 `perf sched` / ftrace /
+bpftrace 的 adapter 仍在后面，未接的 source 在 `doctor` 里写 `wired=no`。
+
+### 12e. USE：CPU、内存、调度
+
+`性能之巅` 的 USE 把每个资源拆成 utilization / saturation / errors。`aura-perf use`
+在 1 秒窗口上读 `/proc/stat`、`/proc/meminfo`、`/proc/vmstat`、`/proc/pressure/*`、
+`/proc/loadavg`，输出三个资源行：
+
+```
+use cpu util-pct=16 sat=ok runnable=3 cpus=14 psi-avg10=-1 errors=unavailable
+use memory util-pct=12 sat=ok available-kib=39404260 swap-used-kib=88432 psi-avg10=-1 errors=unavailable
+use scheduler sat=ok runnable=3 blocked=0 load1=1.86 psi-avg10=-1
+use io psi-avg10=-1 note="disk sectors and net bytes are in perf:check-sample"
+```
+
+- **utilization 和 saturation 分开。** CPU 忙不等于饱和：runnable 超过 CPU 数、
+  PSI `some avg10` 高、或者 `procs_blocked` 大于 0 才是饱和。内存的 swap 占用本身
+  不是饱和；`pswpin/pswpout`、直接回收扫描、`allocstall` 在窗口内有增量才算。
+- **errors 不编造。** `/proc` 没有 CPU/内存错误计数，写 `errors=unavailable`，
+  不写 0。磁盘和网络已经有 `perf:check-sample` 的扇区/字节增量，USE 这里不重复
+  造 utilization。
+- **窗口自己定。** `AURA_PERF_USE_SEC` 默认 1；0 表示只取瞬时快照。
+
+这层是机器层，不是某个候选的账。候选自己的调度等待在 `sched` 行，尾延迟在
+`latency` 行；两者和 USE 分开，避免把机器噪声记到候选头上。
+
 ### 13. 模型提议者只提议
 
 `perf:llm-propose` 经 `std/llm` 的 `llm:chat` 问一次模型（aura-perf#29）。接线（三个环境变量）和调用预算写在 README 的「模型提议者」里。这里是边界：

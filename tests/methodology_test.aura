@@ -1,0 +1,50 @@
+; The methodology layer: nearest-rank percentiles, and scheduler deltas
+; parsed from /proc fields. Pure fixtures, no clock dependence.
+(require "std/string" all:)
+(require "lib/perf/sched" all:)
+(require "lib/perf/score" all:)
+
+(define (check label ok)
+  (if ok
+      #t
+      (error (string-append "methodology: " label))))
+
+(define ss (perf:sched-parse-schedstat "1000000 500000 3\n"))
+(check "schedstat cpu-ns" (= (hash-ref ss "cpu-ns" -1) 1000000))
+(check "schedstat wait-ns" (= (hash-ref ss "wait-ns" -1) 500000))
+(check "schedstat slices" (= (hash-ref ss "slices" -1) 3))
+(check "schedstat missing" (= (hash-ref (perf:sched-parse-schedstat "") "cpu-ns" -1) -1))
+
+(define st (perf:sched-parse-status "Name:\taura\nvoluntary_ctxt_switches:\t7\nnonvoluntary_ctxt_switches:\t2\n"))
+(check "status vol" (= (hash-ref st "vol" -1) 7))
+(check "status invol" (= (hash-ref st "invol" -1) 2))
+
+(define a (hash "available" 1 "cpu-ns" 1000000 "wait-ns" 500000 "slices" 3 "vol" 1 "invol" 2))
+(define b (hash "available" 1 "cpu-ns" 3000000 "wait-ns" 1500000 "slices" 5 "vol" 4 "invol" 6))
+(define d (perf:sched-delta a b))
+(check "delta cpu-ms" (= (hash-ref d "cpu-ms" -1) 2))
+(check "delta wait-ms" (= (hash-ref d "wait-ms" -1) 1))
+(check "delta wait-pct" (= (hash-ref d "wait-pct" -1) 33))
+(check "delta slices" (= (hash-ref d "slices" -1) 2))
+(check "delta vol" (= (hash-ref d "vol" -1) 3))
+(check "delta invol" (= (hash-ref d "invol" -1) 4))
+(check "unavailable delta" (= (hash-ref (perf:sched-delta (hash "available" 0) b) "available" 0) 0))
+
+(define sum (perf:sched-summary (list d d)))
+(check "summary samples" (= (hash-ref sum "samples" 0) 2))
+(check "summary wait" (= (hash-ref sum "wait-ms" -1) 2))
+(check "summary cpu" (= (hash-ref sum "cpu-ms" -1) 4))
+(check "summary max" (= (hash-ref sum "max-wait-ms" -1) 1))
+(check "summary median" (= (hash-ref sum "median-wait-ms" -1) 1))
+
+(check "p50" (= (perf:percentile (list 1 2 3 4 5 6 7 8 9 10) 50) 5))
+(check "p90" (= (perf:percentile (list 1 2 3 4 5 6 7 8 9 10) 90) 9))
+(check "p99" (= (perf:percentile (list 1 2 3 4 5 6 7 8 9 10) 99) 10))
+(check "empty percentile" (= (perf:percentile '() 50) -1))
+(define dist (perf:distribution (list 9 1 5 3 7)))
+(check "dist n" (= (hash-ref dist "n" 0) 5))
+(check "dist p50" (= (hash-ref dist "p50" -1) 5))
+(check "dist max" (= (hash-ref dist "max" -1) 9))
+(check "dist spread" (= (hash-ref dist "spread" -1) 8))
+(display "methodology ok")
+(newline)

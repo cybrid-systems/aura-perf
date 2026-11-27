@@ -1,0 +1,24 @@
+(require "std/process" all:)
+(require "lib/perf/use" all:)
+
+(define (env-sec)
+  (let ((v (getenv "AURA_PERF_USE_SEC")))
+    (if (and (string? v) (number? (string->number v)) (>= (string->number v) 0))
+        (string->number v)
+        1)))
+
+(define sec (env-sec))
+(define a (perf:use-sample))
+(if (> sec 0)
+    (shell (string-append "sleep " (number->string sec)))
+    #t)
+(define b (perf:use-sample))
+(define d (perf:use-delta a b))
+(define lines (perf:use-lines d))
+
+(display (string-append "use seconds=" (number->string sec))) (newline)
+(let loop ((xs lines))
+  (if (null? xs)
+      #t
+      (begin (display (car xs)) (newline) (loop (cdr xs)))))
+(display "")

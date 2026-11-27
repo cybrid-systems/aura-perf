@@ -1,0 +1,261 @@
+; USE method as values: utilization, saturation and errors for CPU and
+; memory, plus the scheduler's runnable/blocked queue. Reads /proc only.
+;
+; Utilization is not a synonym for load. A CPU can be 100% busy and still
+; not saturated; a runnable queue above the CPU count is saturation even
+; when the busy percentage is modest. Errors are not in /proc for CPU or
+; memory, so they stay unavailable instead of becoming a fabricated zero.
+;
+; Disk and network byte/sector counters already live in perf:check-sample;
+; their utilization/saturation is not invented here.
+
+(export perf:use-sample perf:use-delta perf:use-lines
+        perf:use-cpu perf:use-cpu-count perf:use-mem-field perf:use-psi
+        perf:use-load perf:use-proc-field)
+
+(require "std/string" all:)
+(require "lib/perf/util" all:)
+
+(define (perf:use-trim s)
+  (if (not (string? s))
+      ""
+      (let ((n (string-length s)))
+        (let lo ((i 0))
+          (if (or (>= i n) (> (perf:char-at s i) 32))
+              (let hi ((j n))
+                (if (or (<= j i) (> (perf:char-at s (- j 1)) 32))
+                    (substring s i j)
+                    (hi (- j 1))))
+              (lo (+ i 1)))))))
+
+(define (perf:use-prefix? s p)
+  (and (string? s) (string? p)
+       (>= (string-length s) (string-length p))
+       (string=? (substring s 0 (string-length p)) p)))
+
+(define (perf:use-sum8 xs)
+  (let loop ((i 0) (acc 0))
+    (if (or (>= i 8) (null? xs))
+        acc
+        (let ((n (perf:nth xs i)))
+          (loop (+ i 1) (+ acc (if (number? n) n 0)))))))
+
+; The aggregate "cpu " line. Fields: user nice system idle iowait irq
+; softirq steal guest guest_nice. guest is already in user.
+(define (perf:use-cpu text)
+  (let loop ((ls (if (string? text) (string-split text "\n") '())))
+    (if (null? ls)
+        (hash "available" 0 "total" -1 "idle" -1 "busy" -1)
+        (let ((line (perf:use-trim (car ls))))
+          (if (perf:use-prefix? line "cpu ")
+              (let* ((xs (perf:tokens line))
+                     (nums (map perf:parse-number (cdr xs)))
+                     (idle (+ (let ((v (perf:nth nums 3))) (if (number? v) v 0))
+                              (let ((v (perf:nth nums 4))) (if (number? v) v 0))))
+                     (total (perf:use-sum8 nums)))
+                (if (> total 0)
+                    (hash "available" 1 "total" total "idle" idle
+                          "busy" (- total idle))
+                    (hash "available" 0 "total" -1 "idle" -1 "busy" -1)))
+              (loop (cdr ls)))))))
+
+(define (perf:use-cpu-count text)
+  (let loop ((ls (if (string? text) (string-split text "\n") '())) (n 0))
+    (if (null? ls)
+        (if (> n 0) n 1)
+        (let ((line (perf:use-trim (car ls))))
+          (if (and (> (string-length line) 3)
+                   (perf:use-prefix? line "cpu")
+                   (>= (perf:char-at line 3) 48)
+                   (<= (perf:char-at line 3) 57))
+              (loop (cdr ls) (+ n 1))
+              (loop (cdr ls) n))))))
+
+; "procs_running 2" / "procs_blocked 0".
+(define (perf:use-proc-field text key)
+  (let loop ((ls (if (string? text) (string-split text "\n") '())))
+    (if (null? ls)
+        -1
+        (let* ((xs (perf:tokens (perf:use-trim (car ls))))
+               (n (if (and (pair? xs) (string=? (car xs) key)
+                           (pair? (cdr xs)))
+                      (perf:parse-number (car (cdr xs)))
+                      #f)))
+          (if (number? n) n (loop (cdr ls)))))))
+
+; "MemAvailable:  12345 kB".
+(define (perf:use-mem-field text key)
+  (let loop ((ls (if (string? text) (string-split text "\n") '())))
+    (if (null? ls)
+        -1
+        (let* ((line (perf:use-trim (car ls)))
+               (parts (string-split line ":")))
+          (if (and (pair? parts) (pair? (cdr parts))
+                   (string=? (perf:use-trim (car parts)) key))
+              (let ((n (perf:parse-number
+                         (car (perf:tokens (perf:use-trim (car (cdr parts))))))))
+                (if (number? n) n -1))
+              (loop (cdr ls)))))))
+
+; PSI: some avg10=0.00 avg60=... total=...
+(define (perf:use-psi text)
+  (let loop ((xs (perf:tokens (if (string? text) text ""))))
+    (if (null? xs)
+        -1
+        (if (perf:use-prefix? (car xs) "avg10=")
+            (let ((n (perf:parse-number (substring (car xs) 6 (string-length (car xs))))))
+              (if (number? n) n -1))
+            (loop (cdr xs))))))
+
+(define (perf:use-load text)
+  (let* ((xs (perf:tokens (if (string? text) text "")))
+         (l1 (if (pair? xs) (perf:parse-number (car xs)) #f))
+         (pair (let ((v (perf:nth xs 3))) (if (string? v) v "")))
+         (parts (string-split pair "/"))
+         (run (if (pair? parts) (perf:parse-number (car parts)) #f))
+         (threads (if (pair? (cdr parts)) (perf:parse-number (car (cdr parts))) #f)))
+    (hash "load1" (if (number? l1) l1 -1)
+          "runnable" (if (number? run) run -1)
+          "threads" (if (number? threads) threads -1))))
+
+(define (perf:use-sample)
+  (let* ((stat (perf:read-text "/proc/stat"))
+         (mem (perf:read-text "/proc/meminfo"))
+         (vm (perf:read-text "/proc/vmstat"))
+         (cpu (perf:use-cpu stat))
+         (cpus (perf:use-cpu-count stat))
+         (load (perf:use-load (perf:read-text "/proc/loadavg"))))
+    (hash "kind" "perf-use"
+          "cpu" cpu
+          "cpus" cpus
+          "running" (perf:use-proc-field stat "procs_running")
+          "blocked" (perf:use-proc-field stat "procs_blocked")
+          "mem-total-kib" (perf:use-mem-field mem "MemTotal")
+          "mem-available-kib" (perf:use-mem-field mem "MemAvailable")
+          "swap-total-kib" (perf:use-mem-field mem "SwapTotal")
+          "swap-free-kib" (perf:use-mem-field mem "SwapFree")
+          "psi-cpu10" (perf:use-psi (perf:read-text "/proc/pressure/cpu"))
+          "psi-mem10" (perf:use-psi (perf:read-text "/proc/pressure/memory"))
+          "psi-io10" (perf:use-psi (perf:read-text "/proc/pressure/io"))
+          "vm-swap-in" (perf:use-proc-field vm "pswpin")
+          "vm-swap-out" (perf:use-proc-field vm "pswpout")
+          "vm-scan-direct" (perf:use-proc-field vm "pgscan_direct")
+          "vm-steal-direct" (perf:use-proc-field vm "pgsteal_direct")
+          "vm-allocstall" (perf:use-proc-field vm "allocstall")
+          "load1" (hash-ref load "load1" -1)
+          "runnable" (hash-ref load "runnable" -1)
+          "threads" (hash-ref load "threads" -1))))
+
+(define (perf:use-pct part total)
+  (if (and (number? part) (number? total) (> total 0))
+      (quotient (* part 100) total)
+      -1))
+
+(define (perf:use-diff after before)
+  (if (and (number? after) (number? before) (>= after 0) (>= before 0))
+      (- after before)
+      -1))
+
+(define (perf:use-state util sat-count)
+  (cond ((< util 0) "unavailable")
+        ((> sat-count 0) "saturated")
+        ((>= util 90) "high")
+        (else "ok")))
+
+(define (perf:use-delta a b)
+  (let* ((ca (hash-ref a "cpu" (hash)))
+         (cb (hash-ref b "cpu" (hash)))
+         (total-a (hash-ref ca "total" -1))
+         (total-b (hash-ref cb "total" -1))
+         (busy-a (hash-ref ca "busy" -1))
+         (busy-b (hash-ref cb "busy" -1))
+         (dt (- total-b total-a))
+         (db (- busy-b busy-a))
+         (util (perf:use-pct db dt))
+         (cpus (hash-ref b "cpus" 1))
+         (running (hash-ref b "running" -1))
+         (blocked (hash-ref b "blocked" -1))
+         (load1 (hash-ref b "load1" -1))
+         (psi-cpu (hash-ref b "psi-cpu10" -1))
+         (mem-total (hash-ref b "mem-total-kib" -1))
+         (mem-avail (hash-ref b "mem-available-kib" -1))
+         (swap-total (hash-ref b "swap-total-kib" -1))
+         (swap-free (hash-ref b "swap-free-kib" -1))
+         (swap-used (if (and (number? swap-total) (number? swap-free)
+                             (>= swap-total 0) (>= swap-free 0))
+                        (- swap-total swap-free)
+                        -1))
+         (mem-util (if (and (number? mem-total) (number? mem-avail)
+                            (> mem-total 0))
+                       (perf:use-pct (- mem-total mem-avail) mem-total)
+                       -1))
+         (psi-mem (hash-ref b "psi-mem10" -1))
+         (psi-io (hash-ref b "psi-io10" -1))
+         (swap-in (perf:use-diff (hash-ref b "vm-swap-in" -1)
+                                 (hash-ref a "vm-swap-in" -1)))
+         (swap-out (perf:use-diff (hash-ref b "vm-swap-out" -1)
+                                  (hash-ref a "vm-swap-out" -1)))
+         (scan-direct (perf:use-diff (hash-ref b "vm-scan-direct" -1)
+                                     (hash-ref a "vm-scan-direct" -1)))
+         (allocstall (perf:use-diff (hash-ref b "vm-allocstall" -1)
+                                    (hash-ref a "vm-allocstall" -1)))
+         (cpu-sat (+ (if (and (number? running) (number? cpus) (> running cpus)) 1 0)
+                     (if (and (number? psi-cpu) (>= psi-cpu 10)) 1 0)))
+         (mem-sat (+ (if (and (number? swap-in) (> swap-in 0)) 1 0)
+                     (if (and (number? swap-out) (> swap-out 0)) 1 0)
+                     (if (and (number? scan-direct) (> scan-direct 0)) 1 0)
+                     (if (and (number? allocstall) (> allocstall 0)) 1 0)
+                     (if (and (number? psi-mem) (>= psi-mem 10)) 1 0)
+                     (if (and (number? mem-util) (>= mem-util 95)) 1 0)))
+         (sched-sat (+ (if (and (number? blocked) (> blocked 0)) 1 0)
+                       (if (and (number? running) (number? cpus) (> running cpus)) 1 0))))
+    (hash "kind" "perf-use-delta"
+          "available" (if (and (number? dt) (> dt 0) (>= db 0)) 1 0)
+          "cpu" (hash "util-pct" util
+                      "sat" (perf:use-state util cpu-sat)
+                      "errors" "unavailable"
+                      "runnable" running
+                      "cpus" cpus
+                      "psi-avg10" psi-cpu)
+          "memory" (hash "util-pct" mem-util
+                         "sat" (perf:use-state mem-util mem-sat)
+                         "errors" "unavailable"
+                         "available-kib" mem-avail
+                         "swap-used-kib" swap-used
+                         "swap-in" swap-in
+                         "swap-out" swap-out
+                         "scan-direct" scan-direct
+                         "allocstall" allocstall
+                         "psi-avg10" psi-mem)
+          "scheduler" (hash "sat" (if (> sched-sat 0) "saturated" "ok")
+                            "runnable" running
+                            "blocked" blocked
+                            "load1" load1
+                            "psi-avg10" psi-cpu)
+          "io" (hash "psi-avg10" psi-io))))
+
+(define (perf:use-lines d)
+  (let ((cpu (hash-ref d "cpu" (hash)))
+        (mem (hash-ref d "memory" (hash)))
+        (sched (hash-ref d "scheduler" (hash)))
+        (io (hash-ref d "io" (hash))))
+    (list
+      (string-append "use cpu util-pct=" (number->string (hash-ref cpu "util-pct" -1))
+                     " sat=" (hash-ref cpu "sat" "unavailable")
+                     " runnable=" (number->string (hash-ref cpu "runnable" -1))
+                     " cpus=" (number->string (hash-ref cpu "cpus" -1))
+                     " psi-avg10=" (number->string (hash-ref cpu "psi-avg10" -1))
+                     " errors=unavailable")
+      (string-append "use memory util-pct=" (number->string (hash-ref mem "util-pct" -1))
+                     " sat=" (hash-ref mem "sat" "unavailable")
+                     " available-kib=" (number->string (hash-ref mem "available-kib" -1))
+                     " swap-used-kib=" (number->string (hash-ref mem "swap-used-kib" -1))
+                     " psi-avg10=" (number->string (hash-ref mem "psi-avg10" -1))
+                     " errors=unavailable")
+      (string-append "use scheduler sat=" (hash-ref sched "sat" "unavailable")
+                     " runnable=" (number->string (hash-ref sched "runnable" -1))
+                     " blocked=" (number->string (hash-ref sched "blocked" -1))
+                     " load1=" (number->string (hash-ref sched "load1" -1))
+                     " psi-avg10=" (number->string (hash-ref sched "psi-avg10" -1)))
+      (string-append "use io psi-avg10=" (number->string (hash-ref io "psi-avg10" -1))
+                     " note=\"disk sectors and net bytes are in perf:check-sample\""))))

@@ -347,6 +347,15 @@
       (if (and (number? me) (number? rt))
           (string-append " mutation-effect-ms=" (number->string me)
                          " rebind-tax-ms=" (number->string rt))
+          ""))
+    (let ((sc (hash-ref result "sched" #f)))
+      (if (and (hash? sc) (= (hash-ref sc "available" 0) 1))
+          (string-append " sched-wait-ms=" (number->string (hash-ref sc "wait-ms" -1))
+                         " sched-wait-pct=" (number->string (hash-ref sc "wait-pct" -1)))
+          ""))
+    (let ((d (hash-ref result "heldout-dist" #f)))
+      (if (and (hash? d) (> (hash-ref d "n" 0) 1))
+          (string-append " heldout-p90-ms=" (number->string (hash-ref d "p90" -1)))
           "")))))
 
 (define (perf:sum-dur results)
@@ -678,6 +687,20 @@
                         #f)
                     (hash-set! buf "results" (append (hash-ref buf "results" '()) (list result)))
                     (perf:say buf (perf:format-candidate result cand-base pct raw site))
+                    (let ((sc (hash-ref result "sched" #f)))
+                      (if (and (hash? sc) (= (hash-ref sc "available" 0) 1))
+                          (perf:say buf (perf:sched-line id sc))
+                          #t))
+                    (let ((d (hash-ref result "heldout-dist" #f)))
+                      (if (and (hash? d) (> (hash-ref d "n" 0) 1))
+                          (perf:say buf (string-append
+                                          "latency " id
+                                          " p50-ms=" (number->string (hash-ref d "p50" -1))
+                                          " p90-ms=" (number->string (hash-ref d "p90" -1))
+                                          " p99-ms=" (number->string (hash-ref d "p99" -1))
+                                          " max-ms=" (number->string (hash-ref d "max" -1))
+                                          " spread-ms=" (number->string (hash-ref d "spread" -1))))
+                          #t))
                     (perf:say buf (string-append
                                     "split " id
                                     " raw-ms=" (number->string (if raw raw -1))

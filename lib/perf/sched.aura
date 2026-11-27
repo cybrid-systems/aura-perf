@@ -1,0 +1,162 @@
+; Scheduler evidence from /proc. Runqueue wait, on-CPU time, timeslices
+; and context switches. No root, no perf, no tracepoint, no log reader.
+;
+; The numbers are deltas over the measured window only. A counter that
+; cannot be read is available=0, never a zero that looks measured.
+;
+; This is the first layer of the off-CPU / scheduler methodology: it says
+; whether a candidate that looks faster actually ran sooner, or merely
+; got a quieter machine. It is evidence, not a new gate by itself.
+
+(export perf:sched-now perf:sched-delta perf:sched-summary perf:sched-line
+        perf:sched-parse-schedstat perf:sched-parse-status perf:sched-field)
+
+(require "std/string" all:)
+(require "lib/perf/util" all:)
+
+(define (perf:sched-trim s)
+  (if (not (string? s))
+      ""
+      (let ((n (string-length s)))
+        (let lo ((i 0))
+          (if (or (>= i n) (> (perf:char-at s i) 32))
+              (let hi ((j n))
+                (if (or (<= j i) (> (perf:char-at s (- j 1)) 32))
+                    (substring s i j)
+                    (hi (- j 1))))
+              (lo (+ i 1)))))))
+
+; One line of /proc/PID/status: "voluntary_ctxt_switches:	12".
+(define (perf:sched-field text key)
+  (let loop ((ls (if (string? text) (string-split text "\n") '())))
+    (if (null? ls)
+        -1
+        (let* ((line (perf:sched-trim (car ls)))
+               (parts (string-split line ":")))
+          (if (and (pair? parts) (pair? (cdr parts))
+                   (string=? (perf:sched-trim (car parts)) key))
+              (let ((n (perf:parse-number (perf:sched-trim
+                                            (perf:join (cdr parts) ":")))))
+                (if (number? n) n -1))
+              (loop (cdr ls)))))))
+
+; /proc/self/schedstat: "cpu-ns wait-ns timeslices".
+(define (perf:sched-parse-schedstat text)
+  (let ((xs (perf:tokens text)))
+    (if (>= (length xs) 3)
+        (let ((cpu (perf:parse-number (car xs)))
+              (wait (perf:parse-number (car (cdr xs))))
+              (slices (perf:parse-number (car (cdr (cdr xs))))))
+          (hash "cpu-ns" (if (number? cpu) cpu -1)
+                "wait-ns" (if (number? wait) wait -1)
+                "slices" (if (number? slices) slices -1)))
+        (hash "cpu-ns" -1 "wait-ns" -1 "slices" -1))))
+
+(define (perf:sched-parse-status text)
+  (hash "vol" (perf:sched-field text "voluntary_ctxt_switches")
+        "invol" (perf:sched-field text "nonvoluntary_ctxt_switches")))
+
+(define (perf:sched-now)
+  (let* ((ss (perf:sched-parse-schedstat
+               (perf:read-text "/proc/self/schedstat")))
+         (st (perf:sched-parse-status (perf:read-text "/proc/self/status")))
+         (ok (and (number? (hash-ref ss "cpu-ns" -1))
+                  (>= (hash-ref ss "cpu-ns" -1) 0)
+                  (number? (hash-ref ss "wait-ns" -1))
+                  (>= (hash-ref ss "wait-ns" -1) 0)
+                  (number? (hash-ref ss "slices" -1))
+                  (>= (hash-ref ss "slices" -1) 0))))
+    (hash "available" (if ok 1 0)
+          "cpu-ns" (hash-ref ss "cpu-ns" -1)
+          "wait-ns" (hash-ref ss "wait-ns" -1)
+          "slices" (hash-ref ss "slices" -1)
+          "vol" (hash-ref st "vol" -1)
+          "invol" (hash-ref st "invol" -1))))
+
+(define (perf:sched-diff after before)
+  (if (and (number? after) (number? before)) (- after before) -1))
+
+(define (perf:sched-delta before after)
+  (if (or (= (hash-ref before "available" 0) 0)
+          (= (hash-ref after "available" 0) 0))
+      (hash "available" 0 "cpu-ms" -1 "wait-ms" -1 "wait-pct" -1
+            "slices" -1 "vol" -1 "invol" -1)
+      (let* ((dcpu (perf:sched-diff (hash-ref after "cpu-ns" 0)
+                                    (hash-ref before "cpu-ns" 0)))
+             (dwait (perf:sched-diff (hash-ref after "wait-ns" 0)
+                                     (hash-ref before "wait-ns" 0)))
+             (dsl (perf:sched-diff (hash-ref after "slices" 0)
+                                   (hash-ref before "slices" 0)))
+             (dvol (perf:sched-diff (hash-ref after "vol" 0)
+                                    (hash-ref before "vol" 0)))
+             (dinv (perf:sched-diff (hash-ref after "invol" 0)
+                                    (hash-ref before "invol" 0))))
+        (if (or (< dcpu 0) (< dwait 0) (< dsl 0))
+            (hash "available" 0 "cpu-ms" -1 "wait-ms" -1 "wait-pct" -1
+                  "slices" -1 "vol" -1 "invol" -1)
+            (let ((total (+ dcpu dwait)))
+              (hash "available" 1
+                    "cpu-ms" (quotient dcpu 1000000)
+                    "wait-ms" (quotient dwait 1000000)
+                    "wait-pct" (if (> total 0)
+                                   (quotient (* dwait 100) total)
+                                   0)
+                    "slices" dsl
+                    "vol" (if (number? dvol) dvol -1)
+                    "invol" (if (number? dinv) dinv -1)))))))
+
+(define (perf:sched-sort xs)
+  (sort (let loop ((ys xs) (acc '()))
+          (if (null? ys)
+              (reverse acc)
+              (loop (cdr ys) (cons (car ys) acc))))
+        <))
+
+(define (perf:sched-summary deltas)
+  (let loop ((xs (if (list? deltas) deltas '()))
+             (n 0) (cpu 0) (wait 0) (slices 0) (vol 0) (invol 0)
+             (max-wait 0) (waits '()))
+    (cond ((null? xs)
+           (if (= n 0)
+               (hash "available" 0 "samples" 0
+                     "cpu-ms" -1 "wait-ms" -1 "wait-pct" -1
+                     "slices" -1 "vol" -1 "invol" -1
+                     "max-wait-ms" -1 "median-wait-ms" -1)
+               (let ((ws (perf:sched-sort waits))
+                     (total (+ cpu wait)))
+                 (hash "available" 1
+                       "samples" n
+                       "cpu-ms" cpu
+                       "wait-ms" wait
+                       "wait-pct" (if (> total 0)
+                                      (quotient (* wait 100) total)
+                                      0)
+                       "slices" slices
+                       "vol" vol
+                       "invol" invol
+                       "max-wait-ms" max-wait
+                       "median-wait-ms" (list-ref ws (quotient (- n 1) 2))))))
+          ((= (hash-ref (car xs) "available" 0) 0)
+           (loop (cdr xs) n cpu wait slices vol invol max-wait waits))
+          (else
+           (let ((w (hash-ref (car xs) "wait-ms" 0)))
+             (loop (cdr xs)
+                   (+ n 1)
+                   (+ cpu (hash-ref (car xs) "cpu-ms" 0))
+                   (+ wait w)
+                   (+ slices (hash-ref (car xs) "slices" 0))
+                   (+ vol (max 0 (hash-ref (car xs) "vol" 0)))
+                   (+ invol (max 0 (hash-ref (car xs) "invol" 0)))
+                   (max max-wait w)
+                   (cons w waits)))))))
+
+(define (perf:sched-line id sc)
+  (string-append "sched " id
+                 " samples=" (number->string (hash-ref sc "samples" 0))
+                 " wait-ms=" (number->string (hash-ref sc "wait-ms" -1))
+                 " cpu-ms=" (number->string (hash-ref sc "cpu-ms" -1))
+                 " wait-pct=" (number->string (hash-ref sc "wait-pct" -1))
+                 " slices=" (number->string (hash-ref sc "slices" -1))
+                 " vol=" (number->string (hash-ref sc "vol" -1))
+                 " invol=" (number->string (hash-ref sc "invol" -1))
+                 " max-wait-ms=" (number->string (hash-ref sc "max-wait-ms" -1))))

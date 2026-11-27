@@ -48,6 +48,9 @@ aura-perf - an optimization runtime for agents
   sysinfo    export this machine's inventory to out/sysinfo.txt and .json
   check      CPU, memory, disk, network and interrupt deltas (1 s sample)
   test       run the value-level tests, then the round tests (python3)
+  judge      read a live bus round's result metrics as a judge peer
+             AURA_PERF_BUS_WORKSPACE=N AURA_PERF_JUDGE_PCT=20 aura-perf judge
+             AURA_PERF_JUDGE_APPLY=1 also calls bus:keep / bus:rollback
   profile    native perf profile of ANY process; needs no Aura and no LLM
              aura-perf profile --pid PID [--seconds N] [--out DIR]
              aura-perf profile --seconds N -- COMMAND [ARGS...]
@@ -218,6 +221,10 @@ case "$cmd" in
     cd "$ROOT"
     mkdir -p out
     exec "$AURA" --preset dev --grant exec examples/sum-scan/check.aura
+    ;;
+  judge)
+    cd "$ROOT"
+    exec "$AURA" --preset dev "$ROOT/scripts/bus-judge.aura"
     ;;
   test)
     cd "$ROOT"

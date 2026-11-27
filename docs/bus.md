@@ -98,6 +98,24 @@ readings are published as 0; `valid` says whether the rest are a
 measurement. A reader that has the CCT mark's `mid` can compute the
 base without the report.
 
+## Judge peer
+
+`aura-perf judge` attaches as a judge (role 2, full caps), reads the
+metrics channel, reconstructs each candidate's result block from the key
+base, and prints:
+
+```
+judge base=5213506592 wl=1 heldout-ms=9 ref-ms=198 checksum=1 pass=1
+```
+
+It is advisory by default: the self-host parent still runs its own gate
+and KEEPs/ROLLs back. `AURA_PERF_JUDGE_APPLY=1` also calls
+`bus:keep` / `bus:rollback` on the worldline id (+8), for a round whose
+verdict was left pending (attach-only or externally judged).
+`AURA_PERF_JUDGE_PCT` sets the program floor (default 20). The judge uses
+the same `(heldout, ref)` comparison and the site-floor flag it reads;
+it does not need the report file.
+
 ## Channel mapping
 
 The image carries immediates, not text; the mapping is:

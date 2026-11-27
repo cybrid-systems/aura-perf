@@ -220,9 +220,10 @@
 ; the CCT mark can compute it; the report line carries it too.
 ;   +0 valid  +1 checksum-ok  +2 mismatches  +3 heldout-ms
 ;   +4 ref-ms +5 site-floor   +6 rebuild     +7 ref-source
+;   +8 worldline id (0 when none)
 ; Negative readings are published as 0; valid says whether the rest are
 ; a measurement or a rollback without one.
-(define (perf:bus-result bus result)
+(define (perf:bus-result bus result . rest)
   (if (not (and (hash? bus) (hash? result)))
       -1
       (let* ((sid (hash-ref bus "session"))
@@ -234,6 +235,7 @@
              (source (cond ((string=? (hash-ref result "ref-source" "") "null-job") 1)
                            ((string=? (hash-ref result "ref-source" "") "round") 2)
                            (else 0)))
+             (wl (if (pair? rest) (car rest) 0))
              (vals (list (if (string=? (hash-ref result "status" "") "ok") 1 0)
                          (num "checksum-ok" 0)
                          (num "mismatches" 0)
@@ -242,7 +244,8 @@
                          (num "site-floor" 0)
                          (let ((e (hash-ref result "engine" (hash))))
                            (if (= (hash-ref e "world-rebuilt" 0) 1) 1 0))
-                         source)))
+                         source
+                         (if (and (number? wl) (> wl 0)) wl 0))))
         (let loop ((i 0) (xs vals))
           (if (null? xs)
               #t

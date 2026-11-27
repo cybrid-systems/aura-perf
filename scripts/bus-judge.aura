@@ -1,0 +1,104 @@
+; A judge peer over the bus: read the metrics a perf round published and
+; decide each candidate from those numbers. Advisory by default; with
+; AURA_PERF_JUDGE_APPLY=1 it also calls bus:keep / bus:rollback on the
+; worldline id in the result block (+8). The parent still owns its own
+; local gate in this version; this peer is how an external judge sees the
+; same evidence.
+;
+;   AURA_PERF_BUS_WORKSPACE=N AURA_PERF_JUDGE_PCT=20 aura-perf judge
+;
+; The key layout is the one published by perf:bus-result:
+;   base = 1_000_000_000 + 16*mid(candidate)
+;   +0 valid +1 checksum +2 mismatches +3 heldout +4 ref
+;   +5 site-floor +6 rebuild +7 ref-source +8 worldline
+(require "std/bus" all:)
+(require "std/string" all:)
+
+(define (env-int name default)
+  (let ((v (getenv name)))
+    (if (and (string? v) (number? (string->number v)))
+        (string->number v)
+        default)))
+
+(define ws (env-int "AURA_PERF_BUS_WORKSPACE" 0))
+(define pct (env-int "AURA_PERF_JUDGE_PCT" 20))
+(define apply? (let ((v (getenv "AURA_PERF_JUDGE_APPLY")))
+                 (and (string? v) (string=? v "1"))))
+
+(if (<= ws 0)
+    (begin (display "judge: AURA_PERF_BUS_WORKSPACE is unset") (newline) (exit 1))
+    #t)
+
+(define a (bus:attach "" ws 2 255 255))
+(if (not (bus:ok? a))
+    (begin (display "judge: attach failed: ") (display (bus:message a)) (newline) (exit 1))
+    #t)
+(define sid (car (cdr a)))
+
+(define q (bus:query sid 1 0 0))
+(if (not (bus:ok? q))
+    (begin (display "judge: metrics query failed: ") (display (bus:message q)) (newline)
+           (bus:detach sid) (exit 1))
+    #t)
+
+(define (put tab base off value)
+  (let ((h (hash-ref tab base (hash))))
+    (hash-set! h off value)
+    (hash-set! tab base h)))
+
+(define tab (hash))
+(let loop ((rows (list-ref q 4)))
+  (if (null? rows)
+      #t
+      (let* ((row (car rows))
+             (k (car row))
+             (v (car (cdr row))))
+        (if (and (number? k) (>= k 1000000000))
+            (let* ((d (- k 1000000000))
+                   (base (+ 1000000000 (* 16 (quotient d 16))))
+                   (off (modulo d 16)))
+              (put tab base off v))
+            #f)
+        (loop (cdr rows)))))
+
+(define (val h k) (hash-ref h k 0))
+(define (speedup? ref held)
+  (and (number? ref) (> ref 0)
+       (number? held) (>= held 0)
+       (<= (* held 100) (* ref (- 100 pct)))))
+
+(define (judge-one base h)
+  (let* ((valid (val h 0))
+         (checksum (val h 1))
+         (mismatches (val h 2))
+         (held (val h 3))
+         (ref (val h 4))
+         (site (val h 5))
+         (wl (val h 8))
+         (pass (and (= valid 1) (= checksum 1) (= mismatches 0)
+                    (or (speedup? ref held) (= site 1)))))
+    (display "judge base=") (display base)
+    (display " wl=") (display wl)
+    (display " heldout-ms=") (display held)
+    (display " ref-ms=") (display ref)
+    (display " checksum=") (display checksum)
+    (display " pass=") (display (if pass 1 0))
+    (newline)
+    (if (and apply? (> wl 0))
+        (let ((r (if pass
+                     (bus:keep sid wl -1 held)
+                     (bus:rollback sid wl))))
+          (display "judge-apply wl=") (display wl)
+          (display " ") (display (if pass "keep" "rollback"))
+          (display " ok=") (display (if (bus:ok? r) 1 0))
+          (newline))
+        #f)))
+
+(let loop ((ks (hash-keys tab)))
+  (if (null? ks)
+      #t
+      (begin (judge-one (car ks) (hash-ref tab (car ks) (hash)))
+             (loop (cdr ks)))))
+
+(bus:detach sid)
+(exit 0)

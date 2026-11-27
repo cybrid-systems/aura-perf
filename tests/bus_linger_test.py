@@ -93,6 +93,14 @@ def main():
                 print("FAIL linger: witness could not read the round's evidence")
                 print(w.stdout, w.stderr[:300])
                 fail = 1
+            j = subprocess.run([str(aura), "--quiet", str(ROOT / "scripts" / "bus-judge.aura")],
+                               capture_output=True, text=True, env=env, timeout=30)
+            if "judge base=" in j.stdout and "pass=1" in j.stdout:
+                print("ok linger: the judge peer read the result metrics and passed the candidate")
+            else:
+                print("FAIL linger: judge peer produced no verdict")
+                print(j.stdout, j.stderr[:300])
+                fail = 1
             # EOF on stdin ends the window early; the round unhosts and exits.
             sleeper.kill()
             try:

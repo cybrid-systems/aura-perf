@@ -406,6 +406,29 @@ schedswitch task=aura pid=1 on-ms=7 off-ms=5 switches=3 max-off-ms=5 open=1
 `AURA_PERF_TRACEFS` 可以指向一个替代 tracefs 根（测试或容器里用）；
 `AURA_PERF_TRACE_KEEP=1` 只用于保留已有 trace 文本做解析测试。
 
+### 12h. bpftrace off-CPU：一行值，不交栈文本
+
+tracefs 给的是全局切换轨迹；如果只关心一个 pid 的 off-CPU 总量，bpftrace 更直接：
+
+```
+offcpuctx tool=bpftrace file=out/offcpu.txt
+offcpu pid=123 total-ms=12 max-ms=5 samples=3
+```
+
+- **只输出摘要。** bpftrace 程序在 `sched_switch` 上记录目标 pid 的让出时刻，下一次
+  换入时累加 off-CPU；结尾打印 `total-ms`、`max-ms`、`samples`。不把调用栈或
+  bpftrace 的原始 map 文本塞进 prompt。
+- **两种入口。** `aura-perf offcpu --file offcpu.txt` 只解析已有输出；
+  `aura-perf offcpu --pid PID [--seconds N]` 用 `timeout -s INT` 跑 bpftrace，
+  再解析。后者需要 bpftrace 和 BPF 权限。
+- **权限是显式的。** 没有 bpftrace：`offcpu unavailable reason=no-bpftrace
+  command="aura-perf doctor --install" fallback=trace`，退出 3。权限失败：
+  `offcpu blocked reason=permission command="sudo -v" fallback=trace`，退出 4。
+- **不是每轮都开。** round 仍用 schedstat；bpftrace 是 agent 的诊断入口。
+  `doctor` 的 `source bpf` 仍是 `wired=no`，因为自动轮次没用它。
+
+`BPFTRACE_BIN` 可以指向替代二进制（测试里用假 bpftrace）。
+
 ### 13. 模型提议者只提议
 
 `perf:llm-propose` 经 `std/llm` 的 `llm:chat` 问一次模型（aura-perf#29）。接线（三个环境变量）和调用预算写在 README 的「模型提议者」里。这里是边界：

@@ -1,0 +1,12 @@
+(require "std/process" all:)
+(require "lib/perf/offcpu" all:)
+
+(define path (let ((v (getenv "AURA_PERF_OFFCPU_FILE"))) (if (string? v) v "")))
+(define tool (let ((v (getenv "AURA_PERF_OFFCPU_TOOL"))) (if (string? v) v "file")))
+(define v (perf:offcpu-parse (perf:read-text path)))
+
+(display (string-append "offcpuctx tool=" tool " file=" path))
+(newline)
+(if (= (hash-ref v "available" 0) 1)
+    (begin (display (perf:offcpu-line v)) (newline) (display "") (exit 0))
+    (begin (display "offcpu unavailable reason=no-sample") (newline) (display "") (exit 1)))

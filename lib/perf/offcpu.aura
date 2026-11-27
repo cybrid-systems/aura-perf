@@ -1,0 +1,60 @@
+; bpftrace off-CPU summary as a value.
+;
+; The bpftrace program prints one line:
+;   offcpu pid=123 total-ms=12 max-ms=5 samples=3
+; The parser does not care about the surrounding map output. A missing
+; line is available=0, not an off-CPU time of zero.
+
+(export perf:offcpu-parse perf:offcpu-line)
+
+(require "std/string" all:)
+(require "lib/perf/util" all:)
+
+(define (perf:offcpu-trim s)
+  (if (not (string? s))
+      ""
+      (let ((n (string-length s)))
+        (let lo ((i 0))
+          (if (or (>= i n) (> (perf:char-at s i) 32))
+              (let hi ((j n))
+                (if (or (<= j i) (> (perf:char-at s (- j 1)) 32))
+                    (substring s i j)
+                    (hi (- j 1))))
+              (lo (+ i 1)))))))
+
+(define (perf:offcpu-field line key)
+  (let ((prefix (string-append key "=")))
+    (let loop ((xs (perf:tokens line)))
+      (if (null? xs)
+          #f
+          (let ((t (car xs)))
+            (if (and (>= (string-length t) (string-length prefix))
+                     (string=? (substring t 0 (string-length prefix)) prefix))
+                (substring t (string-length prefix) (string-length t))
+                (loop (cdr xs))))))))
+
+(define (perf:offcpu-number line key)
+  (let ((v (perf:offcpu-field line key)))
+    (if (string? v)
+        (let ((n (perf:parse-number v))) (if (number? n) n -1))
+        -1)))
+
+(define (perf:offcpu-parse text)
+  (let loop ((ls (if (string? text) (string-split text "\n") '())))
+    (if (null? ls)
+        (hash "available" 0 "pid" -1 "total-ms" -1 "max-ms" -1 "samples" -1)
+        (let ((line (perf:offcpu-trim (car ls))))
+          (if (and (>= (string-length line) 7)
+                   (string=? (substring line 0 7) "offcpu "))
+              (hash "available" 1
+                    "pid" (perf:offcpu-number line "pid")
+                    "total-ms" (perf:offcpu-number line "total-ms")
+                    "max-ms" (perf:offcpu-number line "max-ms")
+                    "samples" (perf:offcpu-number line "samples"))
+              (loop (cdr ls)))))))
+
+(define (perf:offcpu-line v)
+  (string-append "offcpu pid=" (number->string (hash-ref v "pid" -1))
+                 " total-ms=" (number->string (hash-ref v "total-ms" -1))
+                 " max-ms=" (number->string (hash-ref v "max-ms" -1))
+                 " samples=" (number->string (hash-ref v "samples" -1))))

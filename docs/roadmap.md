@@ -147,7 +147,8 @@ spec 给一条命令和它的 golden，运行时跑它、读退出码。aura-run
 - 语义火焰：节点可以是策略阶段或规则。
 - `perf sched` 的 latency 解析和 `aura-perf sched` 已接；live record 仍要权限，schedstat 是默认 round 证据。
 - ~~tracefs `sched_switch` 的 on/off-CPU 解析和采样~~ ✅：`aura-perf trace`，权限失败显式退出。
-- bpftrace 的 off-CPU 聚合脚本还没接；留到下一层。
+- ~~bpftrace 的 off-CPU 聚合~~ ✅：`aura-perf offcpu` 一行值，权限失败显式退出。
+- `perf c2c` / `perf mem` 仍只探测；cache-to-cache / SPE 的采样还没接。
 - `perf c2c` / `perf mem` 只探测子命令；tracefs / bpftrace 的 sched_switch / off-CPU 采样还没接。
 - bpftrace / bcc 只在已经安装时登记，不附带脚本；`doctor` 报告 `probe-only`，安装命令显式列出。
 - 机器层建议的跨次负例（现在的负例记的是同一次 autotune 里的程序热点）。

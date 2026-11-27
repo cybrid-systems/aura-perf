@@ -1,0 +1,16 @@
+(require "std/string" all:)
+(require "lib/perf/offcpu" all:)
+
+(define (check label ok)
+  (if ok #t (error (string-append "offcpu: " label))))
+
+(define v (perf:offcpu-parse "noise\noffcpu pid=123 total-ms=12 max-ms=5 samples=3\n"))
+(check "available" (= (hash-ref v "available" 0) 1))
+(check "pid" (= (hash-ref v "pid" -1) 123))
+(check "total" (= (hash-ref v "total-ms" -1) 12))
+(check "max" (= (hash-ref v "max-ms" -1) 5))
+(check "samples" (= (hash-ref v "samples" -1) 3))
+(check "missing is explicit" (= (hash-ref (perf:offcpu-parse "") "available" 0) 0))
+(check "line" (string-contains? (perf:offcpu-line v) "total-ms=12"))
+(display "offcpu ok")
+(newline)

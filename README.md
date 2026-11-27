@@ -143,6 +143,8 @@ to reports or `out/`.
 | `aura-perf sched -- CMD` | record and parse a command with `perf sched` (permission) |
 | `aura-perf trace --file F` | on/off-CPU from a `sched_switch` trace |
 | `aura-perf trace --seconds N` | sample `sched_switch` via tracefs (permission) |
+| `aura-perf offcpu --file F` | off-CPU summary from a bpftrace output |
+| `aura-perf offcpu --pid PID` | bpftrace off-CPU summary (permission) |
 | `aura-perf doctor [--install]` | evidence-source readiness, exact install and permission commands |
 | `aura-perf test` | runtime and round tests |
 | `aura-perf install` | install nightly if needed, link the command |
@@ -157,6 +159,7 @@ to reports or `out/`.
 | `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` | unset; no model call |
 | `AURA_PERF_USE_SEC` | 1s window for `use`; 0 takes an instant snapshot |
 | `AURA_PERF_TRACEFS` | tracefs root for `trace` (default `/sys/kernel/tracing`) |
+| `BPFTRACE_BIN` | bpftrace binary for `offcpu`; auto-detected |
 | `AURA_PERF_DOCTOR_GROUPS` | groups `doctor --install` may install (default: non-optional) |
 | `AURA_PERF_DIR` | `~/.local/share/aura-perf` for the curl installer |
 | `PREFIX` | `~/.local/bin` |

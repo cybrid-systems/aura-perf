@@ -52,6 +52,10 @@ aura-perf - an optimization runtime for agents
              AURA_PERF_BUS_WORKSPACE=N AURA_PERF_JUDGE_PCT=20 aura-perf judge
              AURA_PERF_JUDGE_APPLY=1 + AURA_PERF_JUDGE_AUTHORIZED=1
              also calls bus:keep / bus:rollback (attach-only)
+  doctor     which evidence sources this machine can give, what is missing,
+             and the exact install / permission command.  --install runs the
+             missing package groups after a sudo -n precheck (never a prompt); --strict
+             exits 4 unless the PMU tier is ready.
   profile    native perf profile of ANY process; needs no Aura and no LLM
              aura-perf profile --pid PID [--seconds N] [--out DIR]
              aura-perf profile --seconds N -- COMMAND [ARGS...]
@@ -227,6 +231,15 @@ case "$cmd" in
     cd "$ROOT"
     exec "$AURA" --preset dev "$ROOT/scripts/bus-judge.aura"
     ;;
+  doctor)
+    cd "$ROOT"
+    case "${1:-}" in
+      --install) export AURA_PERF_DOCTOR_EXEC=1 ;;
+      --strict) export AURA_PERF_DOCTOR_STRICT=1 ;;
+      --install-strict) export AURA_PERF_DOCTOR_EXEC=1 AURA_PERF_DOCTOR_STRICT=1 ;;
+    esac
+    exec "$AURA" --preset dev --grant exec "$ROOT/scripts/doctor.aura"
+    ;;
   test)
     cd "$ROOT"
     # Probe first so a named-let regression is named, then run every
@@ -251,6 +264,7 @@ case "$cmd" in
     screen_site_rc=0
     headroom_memory_rc=0
     engine_metrics_rc=0
+    doctor_rc=0
     joint_rc=0
     if command -v python3 >/dev/null 2>&1; then
       python3 tests/bus_linger_test.py
@@ -293,6 +307,10 @@ case "$cmd" in
       # Every trial carries its compile/mutate/jit/arena delta as evidence.
       python3 tests/engine_metrics_round_test.py
       engine_metrics_rc=$?
+      # Readiness is a value: missing perf degrades to the workspace probes,
+      # and install / permission are explicit asks rather than prompts.
+      python3 tests/doctor_test.py
+      doctor_rc=$?
       # aura-perf#30: an agent that cannot boot leaves a report with
       # its log, not a cleanup traceback.
       python3 tests/joint_agent_absent_test.py
@@ -345,6 +363,9 @@ case "$cmd" in
     fi
     if [ "$engine_metrics_rc" -ne 0 ]; then
       exit "$engine_metrics_rc"
+    fi
+    if [ "$doctor_rc" -ne 0 ]; then
+      exit "$doctor_rc"
     fi
     if [ "$joint_rc" -ne 0 ]; then
       exit "$joint_rc"

@@ -1,0 +1,628 @@
+; Readiness as a value: which evidence sources this machine can give, which
+; tool or permission is missing, and the exact command that would change it.
+;
+; The runtime never silently pretends a source is there. A missing perf is
+; not a zero task-clock: it selects the workspace probes and says so. A
+; restricted perf_event_paranoid is not "no data": it names the sysctl and
+; keeps the region timers. bpftrace and perf sched are reported as probed
+; but not wired, so installing them does not promise evidence the runtime
+; does not read yet.
+;
+; This module only reads /proc, /sys and `which`. The exec path is opt-in
+; (AURA_PERF_DOCTOR_EXEC=1) and uses sudo -n, never an interactive prompt.
+
+(export perf:doctor perf:doctor-lines perf:doctor-install! perf:doctor-family
+        perf:doctor-parse-caps perf:doctor-sources)
+
+(require "std/string" all:)
+(require "std/process" all:)
+(require "lib/perf/util" all:)
+
+; -- small text helpers ------------------------------------------------
+
+(define (perf:doctor-trim s)
+  (if (not (string? s))
+      ""
+      (let ((n (string-length s)))
+        (let lo ((i 0))
+          (if (or (>= i n) (> (perf:char-at s i) 32))
+              (let hi ((j n))
+                (if (or (<= j i) (> (perf:char-at s (- j 1)) 32))
+                    (substring s i j)
+                    (hi (- j 1))))
+              (lo (+ i 1)))))))
+
+(define (perf:doctor-one-line s)
+  (let ((t (if (string? s) s "")))
+    (let loop ((i 0) (acc ""))
+      (if (>= i (string-length t))
+          acc
+          (let ((c (perf:char-at t i)))
+            (loop (+ i 1)
+                  (string-append acc
+                                 (cond ((or (= c 10) (= c 13) (= c 9)) " ")
+                                       ((= c 34) "'")
+                                       (else (substring t i (+ i 1)))))))))))
+
+(define (perf:doctor-clip s n)
+  (let ((t (perf:doctor-trim (perf:doctor-one-line s))))
+    (if (<= (string-length t) n)
+        t
+        (substring t 0 n))))
+
+(define (perf:doctor-unquote s)
+  (let ((t (perf:doctor-trim s)))
+    (if (and (>= (string-length t) 2)
+             (= (perf:char-at t 0) 34)
+             (= (perf:char-at t (- (string-length t) 1)) 34))
+        (substring t 1 (- (string-length t) 1))
+        t)))
+
+(define (perf:doctor-bool b)
+  (if b "yes" "no"))
+
+; -- os-release and package families -----------------------------------
+
+(define (perf:doctor-field text key sep)
+  (let loop ((ls (if (string? text) (string-split text "\n") '())))
+    (if (null? ls)
+        ""
+        (let* ((line (perf:doctor-trim (car ls)))
+               (parts (string-split line sep)))
+          (if (and (pair? parts)
+                   (pair? (cdr parts))
+                   (string=? (perf:doctor-trim (car parts)) key))
+              (perf:doctor-unquote
+                (perf:join (map perf:doctor-trim (cdr parts)) sep))
+              (loop (cdr ls)))))))
+
+(define (perf:doctor-token? text token)
+  (perf:member? (perf:tokens text) token))
+
+(define (perf:doctor-family id like)
+  (cond ((or (string=? id "debian")
+             (string=? id "ubuntu")
+             (perf:doctor-token? like "debian"))
+         "apt")
+        ((or (string=? id "fedora")
+             (string=? id "rhel")
+             (string=? id "centos")
+             (string=? id "rocky")
+             (string=? id "almalinux")
+             (perf:doctor-token? like "fedora")
+             (perf:doctor-token? like "rhel"))
+         "dnf")
+        ((or (string=? id "arch")
+             (string=? id "manjaro"))
+         "pacman")
+        ((string=? id "alpine") "apk")
+        ((or (string=? id "opensuse-leap")
+             (string=? id "opensuse-tumbleweed")
+             (string=? id "sles")
+             (perf:doctor-token? like "suse"))
+         "zypper")
+        ((string=? id "darwin") "brew")
+        (else "unknown")))
+
+(define (perf:doctor-os)
+  (let* ((override (getenv "AURA_PERF_DOCTOR_OS_RELEASE"))
+         (path (if (and (string? override) (not (string=? override "")))
+                   override "/etc/os-release"))
+         (text (begin
+                 (shell (string-append "cat '" path "' > /tmp/aura-perf-doctor-os.txt 2>/dev/null"))
+                 (perf:read-text "/tmp/aura-perf-doctor-os.txt")))
+         (id (perf:doctor-field text "ID" "="))
+         (like (perf:doctor-field text "ID_LIKE" "="))
+         (pretty (perf:doctor-field text "PRETTY_NAME" "="))
+         (family (perf:doctor-family id like)))
+    (hash "id" (if (string=? id "") "unknown" id)
+          "like" like
+          "pretty" pretty
+          "family" family
+          "path" path)))
+
+; -- capabilities ------------------------------------------------------
+
+(define (perf:doctor-hex-digit c)
+  (cond ((and (>= c 48) (<= c 57)) (- c 48))
+        ((and (>= c 97) (<= c 102)) (+ (- c 97) 10))
+        ((and (>= c 65) (<= c 70)) (+ (- c 65) 10))
+        (else -1)))
+
+(define (perf:doctor-hex->int s)
+  (let loop ((i 0) (acc 0))
+    (if (>= i (string-length s))
+        acc
+        (let ((d (perf:doctor-hex-digit (perf:char-at s i))))
+          (if (< d 0)
+              acc
+              (loop (+ i 1) (+ (* acc 16) d)))))))
+
+(define (perf:doctor-bit? n i)
+  (let loop ((k i) (v n))
+    (cond ((< v 0) #f)
+          ((= k 0) (= 1 (modulo v 2)))
+          (else (loop (- k 1) (quotient v 2))))))
+
+(define (perf:doctor-read-uid)
+  (shell "id -u > /tmp/aura-perf-doctor-uid.txt 2>/dev/null")
+  (let ((n (perf:parse-number (perf:read-text "/tmp/aura-perf-doctor-uid.txt"))))
+    (if (number? n) n -1)))
+
+(define (perf:doctor-caps)
+  (let* ((status (perf:read-text "/proc/self/status"))
+         (hex (perf:doctor-field status "CapEff" ":"))
+         (n (perf:doctor-hex->int hex))
+         (uid (perf:doctor-read-uid)))
+    (hash "hex" hex
+          "perfmon" (perf:doctor-bit? n 38)
+          "bpf" (perf:doctor-bit? n 39)
+          "sys-admin" (perf:doctor-bit? n 21)
+          "sys-ptrace" (perf:doctor-bit? n 19)
+          "root" (= uid 0)
+          "uid" uid)))
+
+(define (perf:doctor-parse-caps text)
+  (let* ((hex (perf:doctor-trim text))
+         (n (perf:doctor-hex->int hex)))
+    (hash "hex" hex
+          "perfmon" (perf:doctor-bit? n 38)
+          "bpf" (perf:doctor-bit? n 39)
+          "sys-admin" (perf:doctor-bit? n 21)
+          "sys-ptrace" (perf:doctor-bit? n 19)
+          "root" #f
+          "uid" -1)))
+
+; -- tools -------------------------------------------------------------
+
+(define (perf:doctor-which name)
+  ; which(1) is not on every minimal image; the shell builtin is.
+  (let ((tmp "/tmp/aura-perf-doctor-which.txt"))
+    (if (= 0 (shell (string-append "command -v " name " > " tmp " 2>/dev/null")))
+        (let ((p (perf:doctor-trim (perf:read-text tmp))))
+          (if (string=? p "") "missing" p))
+        "missing")))
+
+(define (perf:doctor-sub bin name)
+  (if (string=? bin "missing")
+      "missing"
+      (if (= (shell (string-append bin " " name " --help >/dev/null 2>&1")) 0)
+          "present"
+          "missing")))
+
+(define (perf:doctor-perf-smoke bin)
+  (if (string=? bin "missing")
+      (hash "state" "missing" "why" "")
+      (let ((rc (shell (string-append bin
+                                      " stat -e task-clock -- true"
+                                      " >/tmp/aura-perf-doctor-perf.out"
+                                      " 2>/tmp/aura-perf-doctor-perf.err"))))
+        (if (= rc 0)
+            (hash "state" "ok" "why" "")
+            (hash "state" "blocked"
+                  "why" (perf:doctor-clip
+                          (perf:read-text "/tmp/aura-perf-doctor-perf.err") 120))))))
+
+(define (perf:doctor-tool name role pkg group)
+  (let* ((path (perf:doctor-which name))
+         (smoke (if (string=? name "perf")
+                    (perf:doctor-perf-smoke path)
+                    (hash "state" (if (string=? path "missing") "missing" "present")
+                          "why" ""))))
+    (hash "name" name
+          "role" role
+          "group" group
+          "pkg" pkg
+          "path" path
+          "state" (hash-ref smoke "state" "missing")
+          "why" (hash-ref smoke "why" "")
+          "subs" (if (string=? name "perf")
+                     (hash "stat" (perf:doctor-sub path "stat")
+                           "record" (perf:doctor-sub path "record")
+                           "sched" (perf:doctor-sub path "sched")
+                           "c2c" (perf:doctor-sub path "c2c")
+                           "mem" (perf:doctor-sub path "mem"))
+                     (hash)))))
+
+(define (perf:doctor-pkg family tool)
+  (cond ((string=? tool "perf")
+         (cond ((string=? family "apt") "linux-perf")
+               (else "perf")))
+        ((string=? tool "gprof") "binutils")
+        ((string=? tool "python3") "python3")
+        (else tool)))
+
+(define (perf:doctor-tools family)
+  (list
+    (perf:doctor-tool "perf" "pmu" (perf:doctor-pkg family "perf") "pmu")
+    (perf:doctor-tool "bpftrace" "bpf-probe" (perf:doctor-pkg family "bpftrace") "bpf")
+    (perf:doctor-tool "numactl" "inventory" (perf:doctor-pkg family "numactl") "inventory")
+    (perf:doctor-tool "dmidecode" "inventory" (perf:doctor-pkg family "dmidecode") "inventory")
+    (perf:doctor-tool "gprof" "native-profile" (perf:doctor-pkg family "gprof") "dev")
+    (perf:doctor-tool "python3" "tests" (perf:doctor-pkg family "python3") "dev")))
+
+(define (perf:doctor-tool-ref tools name)
+  (let loop ((xs tools))
+    (cond ((null? xs) (hash "name" name "state" "missing" "subs" (hash)))
+          ((string=? (hash-ref (car xs) "name" "") name) (car xs))
+          (else (loop (cdr xs))))))
+
+; -- permissions -------------------------------------------------------
+
+(define (perf:doctor-int-file path)
+  (let ((n (perf:parse-number (perf:read-text path))))
+    (if (number? n) n -1)))
+
+(define (perf:doctor-int-env path envname)
+  (let ((v (getenv envname)))
+    (if (and (string? v) (not (string=? v "")))
+        (let ((n (perf:parse-number v)))
+          (if (number? n) n -1))
+        (perf:doctor-int-file path))))
+
+(define (perf:doctor-perms tools caps)
+  (let* ((paranoid (perf:doctor-int-env "/proc/sys/kernel/perf_event_paranoid" "AURA_PERF_DOCTOR_PARANOID"))
+         (perf-tool (perf:doctor-tool-ref tools "perf"))
+         (perf-state (hash-ref perf-tool "state" "missing"))
+         (root? (hash-ref caps "root" #f))
+         (perfmon? (hash-ref caps "perfmon" #f))
+         (perf-events
+           (cond ((string=? perf-state "missing")
+                  (hash "state" "no-tool" "paranoid" paranoid
+                        "need" "" "why" "no perf binary"))
+                 ((string=? perf-state "ok")
+                  ; The smoke test already opened a counter. That is stronger
+                  ; evidence than the sysctl number, so do not ask for a sysctl
+                  ; that would change nothing.
+                  (hash "state" "ok" "paranoid" paranoid
+                        "need" "" "why" ""))
+                 ((string=? perf-state "blocked")
+                  (let ((why (hash-ref perf-tool "why" "")))
+                    (cond ((not (string-contains? why "ermission"))
+                           (hash "state" "tool-blocked" "paranoid" paranoid
+                                 "need" "" "why" why))
+                          ((and (>= paranoid 3) (not (or root? perfmon?)))
+                           (hash "state" "restricted" "paranoid" paranoid
+                                 "need" "sudo sysctl -w kernel.perf_event_paranoid=2"
+                                 "why" "perf_event_open for own processes"))
+                          ((or root? perfmon?)
+                           (hash "state" "blocked-via-cap" "paranoid" paranoid
+                                 "need" "" "why" why))
+                          (else
+                           (hash "state" "permission" "paranoid" paranoid
+                                 "need" "sudo -v" "why" why)))))
+                 (else
+                  (hash "state" "unknown" "paranoid" paranoid
+                        "need" "" "why" "/proc/sys/kernel/perf_event_paranoid unreadable"))))
+         (bpf-disabled (perf:doctor-int-env "/proc/sys/kernel/unprivileged_bpf_disabled" "AURA_PERF_DOCTOR_BPF_DISABLED"))
+         (bpf-cap? (or root? (hash-ref caps "bpf" #f) (hash-ref caps "sys-admin" #f)))
+         (bpf
+           (cond ((= bpf-disabled 0)
+                  (hash "state" "ok" "unprivileged" bpf-disabled "need" "" "why" ""))
+                 ((and (= bpf-disabled 1) bpf-cap?)
+                  (hash "state" "ok-via-cap" "unprivileged" bpf-disabled
+                        "need" "" "why" "CAP_BPF or root"))
+                 ((= bpf-disabled 1)
+                  (hash "state" "requires-root" "unprivileged" bpf-disabled
+                        "need" "sudo -v"
+                        "why" "unprivileged BPF disabled; CAP_BPF or root"))
+                 ((= bpf-disabled 2)
+                  (hash "state" "disabled" "unprivileged" bpf-disabled
+                        "need" ""
+                        "why" "unprivileged_bpf_disabled=2 is permanent"))
+                 ((< bpf-disabled 0)
+                  (hash "state" "unknown" "unprivileged" bpf-disabled
+                        "need" "" "why" "/proc/sys/kernel/unprivileged_bpf_disabled unreadable"))
+                 (else
+                  (hash "state" "unknown" "unprivileged" bpf-disabled
+                        "need" "" "why" "unexpected value"))))
+         (trace-mounted (= 0 (shell "test -e /sys/kernel/tracing/available_tracers -o -e /sys/kernel/debug/tracing/available_tracers")))
+         (ftrace
+           (if trace-mounted
+               (hash "state" "ok" "need" "" "why" "")
+               (hash "state" "not-mounted"
+                     "need" "sudo mount -t tracefs tracefs /sys/kernel/tracing"
+                     "why" "tracefs available_tracers not visible"))))
+    (hash "perf-events" perf-events
+          "bpf" bpf
+          "ftrace" ftrace)))
+
+; -- sources -----------------------------------------------------------
+
+(define (perf:doctor-sources tools perms)
+  (let* ((perf-tool (perf:doctor-tool-ref tools "perf"))
+         (perf-state (hash-ref perf-tool "state" "missing"))
+         (perf-sched (hash-ref (hash-ref perf-tool "subs" (hash)) "sched" "missing"))
+         (schedstat (= 0 (shell "test -r /proc/self/schedstat")))
+         (bpf-tool (perf:doctor-tool-ref tools "bpftrace"))
+         (bpf-state (hash-ref bpf-tool "state" "missing"))
+         (ftrace (hash-ref (hash-ref perms "ftrace" (hash)) "state" "unknown"))
+         (events (hash-ref (hash-ref perms "perf-events" (hash)) "state" "unknown")))
+    (list
+      (hash "name" "pmu"
+            "state" (cond ((string=? perf-state "ok") "ok")
+                          ((string=? perf-state "blocked") "blocked")
+                          (else "missing"))
+            "via" "perf stat"
+            "wired" #t
+            "why" (if (string=? events "restricted") "perf-events restricted" ""))
+      (hash "name" "region"
+            "state" "ok" "via" "target regions" "wired" #t "why" "")
+      (hash "name" "auto-probe"
+            "state" "ok" "via" "workspace set! wrappers" "wired" #t "why" "")
+      (hash "name" "sched"
+            "state" (if (string=? perf-sched "present") "probe-only" "missing")
+            "via" "perf sched"
+            "wired" #f
+            "why" (if (string=? perf-sched "present")
+                      "subcommand probed; latency adapter not wired"
+                      "no perf sched subcommand"))
+      (hash "name" "schedstat"
+            "state" (if schedstat "ok" "missing")
+            "via" "/proc/PID/schedstat"
+            "wired" #f
+            "why" (if schedstat
+                      "readable; not sampled by a round yet"
+                      "schedstat not readable"))
+      (hash "name" "ftrace"
+            "state" ftrace
+            "via" "tracefs"
+            "wired" #f
+            "why" "trace events are not read by a round yet")
+      (hash "name" "bpf"
+            "state" (cond ((string=? bpf-state "missing") "missing")
+                          ((string=? bpf-state "blocked") "blocked")
+                          (else "probe-only"))
+            "via" "bpftrace"
+            "wired" #f
+            "why" (if (string=? bpf-state "missing")
+                      "no bpftrace binary"
+                      "binary probed; script adapter not wired")))))
+
+; -- install plan ------------------------------------------------------
+
+(define (perf:doctor-needs-install? t)
+  (let ((state (hash-ref t "state" ""))
+        (name (hash-ref t "name" ""))
+        (why (hash-ref t "why" "")))
+    (cond ((string=? state "missing") #t)
+          ((and (string=? name "perf")
+                (string=? state "blocked")
+                (not (string-contains? why "ermission")))
+           #t)
+          (else #f))))
+
+(define (perf:doctor-missing tools group)
+  (let loop ((xs tools) (acc '()))
+    (cond ((null? xs) (reverse acc))
+          ((and (string=? (hash-ref (car xs) "group" "") group)
+                (perf:doctor-needs-install? (car xs)))
+           (loop (cdr xs) (cons (car xs) acc)))
+          (else (loop (cdr xs) acc)))))
+
+(define (perf:doctor-install-command family pkgs)
+  (if (null? pkgs)
+      ""
+      (let ((p (perf:join
+                 (let loop ((xs pkgs) (acc '()))
+                   (if (null? xs)
+                       (reverse acc)
+                       (loop (cdr xs)
+                             (cons (perf:doctor-pkg family (hash-ref (car xs) "name" ""))
+                                   acc))))
+                 " ")))
+        (cond ((string=? family "apt")
+               (string-append "sudo apt-get install -y " p))
+              ((string=? family "dnf")
+               (string-append "sudo dnf install -y " p))
+              ((string=? family "pacman")
+               (string-append "sudo pacman -S --needed --noconfirm " p))
+              ((string=? family "apk")
+               (string-append "sudo apk add " p))
+              ((string=? family "zypper")
+               (string-append "sudo zypper install -y " p))
+              ((string=? family "brew")
+               (string-append "brew install " p))
+              (else "")))))
+
+(define (perf:doctor-groups tools family)
+  (let loop ((gs (list "pmu" "inventory" "bpf" "dev")) (acc '()))
+    (if (null? gs)
+        (reverse acc)
+        (let* ((g (car gs))
+               (missing (perf:doctor-missing tools g))
+               (cmd (perf:doctor-install-command family missing)))
+          (if (null? missing)
+              (loop (cdr gs) acc)
+              (loop (cdr gs)
+                    (cons (hash "group" g
+                                "missing" (map (lambda (x) (hash-ref x "name" "")) missing)
+                                "command" cmd
+                                "optional" (if (or (string=? g "bpf")
+                                                   (string=? g "dev"))
+                                               #t #f))
+                          acc)))))))
+
+; -- the value ---------------------------------------------------------
+
+(define (perf:doctor)
+  (let* ((os (perf:doctor-os))
+         (family (hash-ref os "family" "unknown"))
+         (caps (perf:doctor-caps))
+         (tools (perf:doctor-tools family))
+         (perms (perf:doctor-perms tools caps))
+         (sources (perf:doctor-sources tools perms))
+         (sudo (perf:doctor-sudo (hash-ref caps "root" #f)))
+         (perf-tool (perf:doctor-tool-ref tools "perf"))
+         (tier (if (string=? (hash-ref perf-tool "state" "") "ok")
+                   "full" "degraded"))
+         (installs (perf:doctor-groups tools family)))
+    (hash "kind" "perf-doctor"
+          "os" os
+          "caps" caps
+          "tools" tools
+          "perms" perms
+          "sudo" sudo
+          "sources" sources
+          "tier" tier
+          "installs" installs)))
+
+(define (perf:doctor-tool-line t)
+  (let* ((subs (hash-ref t "subs" (hash)))
+         (subtext (if (pair? (hash-keys subs))
+                      (string-append " subs="
+                                     (perf:join
+                                       (map (lambda (k)
+                                              (string-append k ":" (hash-ref subs k "missing")))
+                                            (sort (hash-keys subs) string<?))
+                                       ","))
+                      "")))
+    (string-append "tool " (hash-ref t "name" "?")
+                   " state=" (hash-ref t "state" "?")
+                   (if (string=? (hash-ref t "path" "missing") "missing")
+                       ""
+                       (string-append " path=" (hash-ref t "path" "")))
+                   " role=" (hash-ref t "role" "?")
+                   subtext
+                   (if (string=? (hash-ref t "role" "") "bpf-probe")
+                       " wired=no" "")
+                   (if (string=? (hash-ref t "why" "") "")
+                       ""
+                       (string-append " why=\"" (hash-ref t "why" "") "\"")))))
+
+(define (perf:doctor-source-line s)
+  (string-append "source " (hash-ref s "name" "?")
+                 " state=" (hash-ref s "state" "?")
+                 " via=\"" (hash-ref s "via" "") "\""
+                 " wired=" (perf:doctor-bool (hash-ref s "wired" #f))
+                 (if (string=? (hash-ref s "why" "") "")
+                     ""
+                     (string-append " why=\"" (hash-ref s "why" "") "\""))))
+
+(define (perf:doctor-perm-line name p)
+  (string-append "perm " name
+                 " state=" (hash-ref p "state" "?")
+                 (cond ((string=? name "perf-events")
+                        (string-append " paranoid="
+                                       (number->string (hash-ref p "paranoid" -1))))
+                       ((string=? name "bpf")
+                        (string-append " unprivileged="
+                                       (number->string (hash-ref p "unprivileged" -1))))
+                       (else ""))
+                 (if (string=? (hash-ref p "need" "") "")
+                     ""
+                     (string-append " need=\"" (hash-ref p "need" "") "\""))
+                 (if (string=? (hash-ref p "why" "") "")
+                     ""
+                     (string-append " why=\"" (hash-ref p "why" "") "\""))))
+
+(define (perf:doctor-lines d)
+  (let* ((os (hash-ref d "os" (hash)))
+         (caps (hash-ref d "caps" (hash)))
+         (tools (hash-ref d "tools" '()))
+         (perms (hash-ref d "perms" (hash)))
+         (sources (hash-ref d "sources" '()))
+         (sudo (hash-ref d "sudo" (hash)))
+         (installs (hash-ref d "installs" '())))
+    (append
+      (list
+        (string-append "doctor tier=" (hash-ref d "tier" "?")
+                       " os=" (hash-ref os "id" "?")
+                       " family=" (hash-ref os "family" "?")
+                       " pretty=\"" (hash-ref os "pretty" "") "\"")
+        (string-append "caps uid=" (number->string (hash-ref caps "uid" -1))
+                       " root=" (perf:doctor-bool (hash-ref caps "root" #f))
+                       " perfmon=" (perf:doctor-bool (hash-ref caps "perfmon" #f))
+                       " bpf=" (perf:doctor-bool (hash-ref caps "bpf" #f))
+                       " sys-admin=" (perf:doctor-bool (hash-ref caps "sys-admin" #f))
+                       " sys-ptrace=" (perf:doctor-bool (hash-ref caps "sys-ptrace" #f)))
+        (string-append "sudo state=" (hash-ref sudo "state" "?")
+                       (if (string=? (hash-ref sudo "need" "") "")
+                           ""
+                           (string-append " need=\"" (hash-ref sudo "need" "") "\""))))
+      (map perf:doctor-tool-line tools)
+      (map perf:doctor-source-line sources)
+      (list (perf:doctor-perm-line "perf-events" (hash-ref perms "perf-events" (hash)))
+            (perf:doctor-perm-line "bpf" (hash-ref perms "bpf" (hash)))
+            (perf:doctor-perm-line "ftrace" (hash-ref perms "ftrace" (hash))))
+      (map (lambda (g)
+             (string-append "install group=" (hash-ref g "group" "?")
+                            " missing=" (perf:join (hash-ref g "missing" '()) ",")
+                            " optional=" (perf:doctor-bool (hash-ref g "optional" #f))
+                            (if (string=? (hash-ref g "command" "") "")
+                                " command=\"\" hint=\"install the packages with your package manager\""
+                                (string-append " command=\"" (hash-ref g "command" "") "\""))))
+           installs)
+      (append
+        (let ((pe (hash-ref perms "perf-events" (hash))))
+          (if (string=? (hash-ref pe "need" "") "")
+              '()
+              (list (string-append "ask permission name=perf-events command=\""
+                                   (hash-ref pe "need" "")
+                                   "\" why=\"" (hash-ref pe "why" "")
+                                   "\" fallback=region-timers"))))))))
+
+
+; -- opt-in install ----------------------------------------------------
+
+(define (perf:doctor-strip-sudo cmd)
+  (if (and (>= (string-length cmd) 5)
+           (string=? (substring cmd 0 5) "sudo "))
+      (substring cmd 5 (string-length cmd))
+      cmd))
+
+(define (perf:doctor-sudo root?)
+  (cond (root? (hash "state" "not-needed" "need" ""))
+        ((not (= 0 (shell "command -v sudo >/dev/null 2>&1")))
+         (hash "state" "missing" "need" ""))
+        ((= 0 (shell "sudo -n true 2>/dev/null"))
+         (hash "state" "passwordless" "need" ""))
+        (else (hash "state" "needs-password" "need" "sudo -v"))))
+
+(define (perf:doctor-selected? g wanted)
+  (if (null? wanted)
+      (not (hash-ref g "optional" #f))
+      (perf:member? wanted (hash-ref g "group" "?"))))
+
+(define (perf:doctor-exec?)
+  (let ((v (getenv "AURA_PERF_DOCTOR_EXEC")))
+    (and (string? v) (string=? v "1"))))
+
+(define (perf:doctor-install! d)
+  (if (not (perf:doctor-exec?))
+      '()
+      (let* ((installs (hash-ref d "installs" '()))
+             (wanted (let ((v (getenv "AURA_PERF_DOCTOR_GROUPS")))
+                       (if (and (string? v) (not (string=? v "")))
+                           (perf:tokens v)
+                           '()))))
+        (if (null? installs)
+            (list "install none missing=0")
+            (if (not (= 0 (shell "sh -c 'test \"$(id -u)\" -eq 0 || sudo -n true' >/dev/null 2>&1")))
+                (append
+                  (map (lambda (g)
+                         (string-append "install blocked group=" (hash-ref g "group" "?")
+                                        " reason=sudo-needs-tty command=\""
+                                        (hash-ref g "command" "") "\""))
+                       installs)
+                  (list "ask permission name=sudo command=\"sudo -v\" why=\"install needs root\" fallback=none"))
+                (let loop ((gs installs) (acc '()))
+                  (if (null? gs)
+                      (reverse acc)
+                      (let* ((g (car gs))
+                             (group (hash-ref g "group" "?"))
+                             (cmd (hash-ref g "command" ""))
+                             (selected (perf:doctor-selected? g wanted))
+                             (run (if (hash-ref (hash-ref d "caps" (hash)) "root" #f)
+                                      (perf:doctor-strip-sudo cmd)
+                                      cmd)))
+                        (if (or (not selected) (string=? cmd ""))
+                            (loop (cdr gs) acc)
+                            (let ((rc (shell (string-append run " </dev/null"))))
+                              (loop (cdr gs)
+                                    (cons (string-append
+                                            (if (= rc 0) "install ok" "install failed")
+                                            " group=" group " rc=" (number->string rc)
+                                            " command=\"" cmd "\"")
+                                          acc))))))))))))
+

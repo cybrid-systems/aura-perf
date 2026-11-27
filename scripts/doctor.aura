@@ -1,0 +1,32 @@
+(require "lib/perf/doctor" all:)
+
+(define d (perf:doctor))
+(define lines (append (perf:doctor-lines d) (perf:doctor-install! d)))
+
+(let loop ((xs lines))
+  (if (null? xs)
+      #t
+      (begin
+        (display (car xs))
+        (newline)
+        (loop (cdr xs)))))
+
+(define (any-prefix? xs prefix)
+  (let loop ((ys xs))
+    (cond ((null? ys) #f)
+          ((and (>= (string-length (car ys)) (string-length prefix))
+                (string=? (substring (car ys) 0 (string-length prefix)) prefix))
+           #t)
+          (else (loop (cdr ys))))))
+
+(define strict? (let ((v (getenv "AURA_PERF_DOCTOR_STRICT")))
+                  (and (string? v) (string=? v "1"))))
+
+(if (and strict? (not (string=? (hash-ref d "tier" "") "full")))
+    (exit 4)
+    #t)
+
+(if (or (any-prefix? lines "install failed")
+        (any-prefix? lines "install blocked"))
+    (exit 4)
+    (exit 0))

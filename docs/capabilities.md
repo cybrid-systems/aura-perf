@@ -257,6 +257,45 @@ trial-engine linear-scan rebuild=0 cascade-full=0 body-only=2 relower-full=1 ...
 
 候选行同时带 `rebuild=`。这回答的是「候选看起来快，但它是不是靠一次 full rebuild 换来的」：mutation 自身的收益和重编译/GC 的代价分开写，KEEP 时的 compile-delta 只是这条账的另一个读者。sandbox 不是 `off` 时快照返回 `available=0`，不把读不到写成 0。
 
+### 12c. 工具就绪、权限和自动安装
+
+机器上有没有 perf，和运行时能不能用 PMU，是两件事。`aura-perf doctor` 把这两层拆成一个值：
+
+```
+doctor tier=degraded os=ubuntu family=apt pretty="Ubuntu 26.10"
+tool perf state=missing role=pmu
+tool bpftrace state=missing role=bpf-probe wired=no
+source pmu state=missing via="perf stat" wired=yes
+source auto-probe state=ok via="workspace set! wrappers" wired=yes
+source sched state=probe-only via="perf sched" wired=no
+perm perf-events state=no-tool paranoid=2 why="no perf binary"
+install group=pmu missing=perf optional=no command="sudo apt-get install -y linux-perf"
+```
+
+- **每个 source 都有 state 和 wired。** `pmu`、`region`、`auto-probe` 已经接进证据链；
+  `perf sched`、`/proc/PID/schedstat`、`tracefs`、`bpftrace` 只做了探测，写 `wired=no`。
+  所以「装了 bpftrace」不会假装运行时已经在读内核探针。
+- **缺工具不是失败。** 没有 perf 时 tier 是 `degraded`，`region` 和 `auto-probe` 仍是 `ok`；
+  树、调用次数和相对份额还在，只是没有 task-clock 的硬件计数。`doctor` 默认退出 0；
+  `--strict` 才在 PMU 未就绪时退出 4。
+- **安装是显式命令。** 每个缺的组打印 `install group=… missing=… command="…"`，按
+  `/etc/os-release` 选 apt / dnf / pacman / apk / zypper / brew。默认只打印，不执行。
+  `aura-perf doctor --install` 才执行，而且先跑 `sudo -n true` 预检：没有免密 sudo 就打印
+  `install blocked reason=sudo-needs-tty` 并退出 4，绝不在这里等一个 TTY 输入。
+  `AURA_PERF_DOCTOR_GROUPS=bpf` 可以只装可选组；默认跳过 `optional=yes` 的组。
+  `sudo state=passwordless|needs-password|missing|not-needed` 先说明这次 `--install` 会不会
+  卡在密码上；`needs-password` 就是调用方该去问用户的地方。
+- **权限是给 agent 的 ask 行，不是弹窗。** 受限的 `perf_event_paranoid`、被禁的
+  unprivileged BPF、没挂载的 tracefs 都变成
+  `ask permission name=… command="…" why="…" fallback=…`。调用方（agent）把这一行
+  转给用户或自己的审批层；运行时不会自己提权，也不会因为没有权限就写 0。
+- **测试用真实的分支。** `tests/doctor_test.py` 用只含必要命令的 PATH 跑：
+  缺 perf 的降级、可用的 perf、受限的 paranoid、被拒绝的 sudo、以及 dry-run 不碰包管理器。
+
+度量：`doctor tier=full` 且 `source pmu state=ok` 时 PMU 进证据链；否则 `source auto-probe state=ok`
+必须仍在，报告不能出现伪造的 task-clock。`AURA_PERF_DOCTOR_PARANOID` / `AURA_PERF_DOCTOR_BPF_DISABLED`
+只覆盖探测值，方便在没有对应 /proc 文件的容器里验证同一个分支；它们不授予任何权限。
+
 ### 13. 模型提议者只提议
 
 `perf:llm-propose` 经 `std/llm` 的 `llm:chat` 问一次模型（aura-perf#29）。接线（三个环境变量）和调用预算写在 README 的「模型提议者」里。这里是边界：
@@ -297,7 +336,7 @@ Trial 在子进程的 `evo:trial` 里做，live 指纹不变；过门才在父�
 
 ### 机器层探针还没采样
 
-`perf c2c`、`perf mem`、`perf sched` 只回答子命令是否存在。cache-to-cache、SPE、跨 die 的命中数没有测到就是 `skipped`，没有 0。bpftrace 未安装就不运行。
+`perf c2c`、`perf mem`、`perf sched` 只回答子命令是否存在；`doctor` 把它们标成 `wired=no`。cache-to-cache、SPE、跨 die 的命中数没有测到就是 `skipped`，没有 0。bpftrace 未安装就不运行，安装了也还没有 adapter。
 
 ## 未开始
 

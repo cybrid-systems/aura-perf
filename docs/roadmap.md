@@ -140,9 +140,11 @@ spec 给一条命令和它的 golden，运行时跑它、读退出码。aura-run
 
 ## 接着做
 
+- 把 `/proc/PID/schedstat` 接进 trial：runqueue wait、timeslice、context switch 的差值，
+  不需要 root；perf sched / ftrace / bpftrace 需要权限，先走 doctor 的 ask 行。
 - 语义火焰：节点可以是策略阶段或规则。
-- `perf c2c` / `perf mem` / `perf sched` 现在只探测子命令在不在。PMU 可用时才采样，并仍不把缺测写成 0。
-- bpftrace / bcc 只在已经安装时登记，不附带脚本。
+- `perf c2c` / `perf mem` / `perf sched` 现在只探测子命令在不在；`aura-perf doctor` 明确写 `wired=no`。PMU 可用时才采样，并仍不把缺测写成 0。
+- bpftrace / bcc 只在已经安装时登记，不附带脚本；`doctor` 报告 `probe-only`，安装命令显式列出。
 - 机器层建议的跨次负例（现在的负例记的是同一次 autotune 里的程序热点）。
 - KernelBench 式算子和 [aura-kernel-sink](https://github.com/cybrid-systems/aura-kernel-sink) 的 C 下沉，作为一种假设接进 autotune。没有 GPU 就不报 SOL。
 - Warpline 一类 trace 作为另一种 CCT 来源。

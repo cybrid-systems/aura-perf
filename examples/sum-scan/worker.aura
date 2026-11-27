@@ -193,6 +193,17 @@
       (worldline-cct run-kernel screen-xs screen-ms
                     (hash-ref job "kernel" "bench-kernel"))))
 
+; The sites the screen decision is made on. The parent names them per
+; candidate (a set has several); the fallback is the single target, so a
+; job written before this field still screens the whole kernel.
+(define screen-sites
+  (let ((ss (hash-ref job "screen-sites" '())))
+    (if (and (list? ss) (pair? ss)) ss (list target))))
+
+; One cheap input, one timed run, one tree. The tree is what the screen
+; reads now: a 25% win on a hot site is visible even when the whole
+; kernel's median moves less than the timer. When count-defines is off
+; the tree is empty and the caller falls back to the whole-kernel number.
 (define (screen-measure)
   (let* ((spec (screen-of))
          (xs (if spec (hash-ref spec "input" '()) '()))
@@ -202,7 +213,7 @@
                                         (hash-ref spec "input" '())
                                         (hash-ref spec "oracle" perf:sum-ref))))
          (ms (hash-ref screen "median" -1)))
-    (list xs ms)))
+    (list xs ms (measure-tree xs ms))))
 
 (define null-heldout-ms -1)
 
@@ -234,7 +245,7 @@
                      (tm (perf:time-checked repeats run-kernel
                                             (hash-ref ho "input" '())
                                             (hash-ref ho "oracle" perf:sum-ref))))
-                (set! base-cct (measure-tree (car m) (cadr m)))
+                (set! base-cct (car (cddr m)))
                 (set! null-heldout-ms (hash-ref tm "median" -1))
                 null-heldout-ms))))))
 
@@ -376,46 +387,53 @@
                                           (hash-ref chk "mismatches")
                                           '())
                            (let* ((screen-spec (screen-of))
-                                  (screen (if (not screen-spec)
-                                              (hash "median" -1)
-                                              (perf:time-checked 1 run-kernel
-                                                                 (hash-ref screen-spec "input" '())
-                                                                 (hash-ref screen-spec "oracle" perf:sum-ref))))
-                                  (screen-ms (hash-ref screen "median" -1))
-                                  (screen-xs (if screen-spec (hash-ref screen-spec "input" '()) '()))
+                                  (m (if screen-spec
+                                         (screen-measure)
+                                         (list '() -1 (hash "kind" "perf-cct" "nodes" '()))))
+                                  (screen-xs (car m))
+                                  (screen-ms (cadr m))
+                                  (screen-cct (car (cddr m)))
+                                  (base-site (perf:site-sum base-cct screen-sites #t))
+                                  (cand-site (perf:site-sum screen-cct screen-sites #f))
+                                  (site-screen? (and screen-spec
+                                                     (number? base-site) (> base-site 0)
+                                                     (number? cand-site) (>= cand-site 0)))
                                   (hold (and (not (string=? role "null"))
                                              (not (string=? role "baseline"))
-                                             (perf:screen-prune?
-                                               (hash-ref job "screen-baseline-ms" -1)
-                                               screen-ms
-                                               (hash-ref job "screen-slack-ms" 5)))))
-                             ; The worldline tree is measured after the
-                             ; timing, never between the checksum and
-                             ; the timing: the target's own measurement
-                             ; installs its wrappers around the hot
-                             ; defines, and a program that has been
-                             ; measured that way must not be the program
-                             ; whose result is compared.
+                                             (if site-screen?
+                                                 (perf:screen-prune?
+                                                   base-site cand-site
+                                                   (hash-ref job "screen-slack-ms" 5))
+                                                 (perf:screen-prune?
+                                                   (hash-ref job "screen-baseline-ms" -1)
+                                                   screen-ms
+                                                   (hash-ref job "screen-slack-ms" 5))))))
+                             ; The tree is from the cheap screen input, in the
+                             ; same process as the screen timing. The screen
+                             ; decision reads the candidate's sites against
+                             ; the null base's sites; the whole-kernel number
+                             ; is the fallback when the tree has no sites.
                              (if hold
-                                 (let ((cct (if (or (not screen-spec)
-                                                   (not (= (hash-ref job "count-defines" 0) 1)))
-                                               (hash "kind" "perf-cct" "nodes" '())
-                                               (worldline-cct run-kernel screen-xs screen-ms
-                                                             (hash-ref job "kernel" "bench-kernel")))))
-                                   (screen-result screen-ms cct "screen-pruned" -1 0 '()))
+                                 (let ((r (screen-result screen-ms screen-cct
+                                                         "screen-pruned" -1 0 '())))
+                                   (let ((b (hash-ref r "behavior" (hash))))
+                                     (hash-set! b "screen-site-ms" cand-site)
+                                     (hash-set! b "screen-base-site-ms" base-site)
+                                     (hash-set! b "screen-site" (perf:join screen-sites "+"))
+                                     r))
                                  (let* ((ho (heldout-of))
                                         (tm (perf:time-checked repeats run-kernel
                                                                (hash-ref ho "input" '())
-                                                               (hash-ref ho "oracle" perf:sum-ref)))
-                                        (cct (if (or (not screen-spec)
-                                                     (not (= (hash-ref job "count-defines" 0) 1)))
-                                                 (hash "kind" "perf-cct" "nodes" '())
-                                                 (worldline-cct run-kernel screen-xs screen-ms
-                                                                   (hash-ref job "kernel" "bench-kernel")))))
-                                   (screen-result screen-ms cct "held-out"
-                                                  (hash-ref tm "median")
-                                                  (hash-ref tm "mismatches")
-                                                  (hash-ref tm "samples" '()))))))))))))
+                                                               (hash-ref ho "oracle" perf:sum-ref))))
+                                   (let ((r (screen-result screen-ms screen-cct "held-out"
+                                                           (hash-ref tm "median")
+                                                           (hash-ref tm "mismatches")
+                                                           (hash-ref tm "samples" '()))))
+                                     (let ((b (hash-ref r "behavior" (hash))))
+                                       (hash-set! b "screen-site-ms" cand-site)
+                                       (hash-set! b "screen-base-site-ms" base-site)
+                                       (hash-set! b "screen-site" (perf:join screen-sites "+"))
+                                       r))))))))))))
 
 (define objs (hash-ref tr "objectives" (hash)))
 (define beh (hash-ref tr "behavior" (hash)))
@@ -437,6 +455,9 @@
         "fidelity" (hash-ref beh "fidelity" "")
         "headroom-restored" (hash-ref beh "restored" 0)
         "screen-ms" (hash-ref beh "screen-ms" -1)
+        "screen-site-ms" (hash-ref beh "screen-site-ms" -1)
+        "screen-base-site-ms" (hash-ref beh "screen-base-site-ms" -1)
+        "screen-site" (hash-ref beh "screen-site" "")
         "cct" (hash-ref beh "cct" (hash "kind" "perf-cct" "nodes" '()))
         "cct-source" cct-source
         "base-cct" (hash-ref beh "base-cct" (hash "kind" "perf-cct" "nodes" '()))

@@ -7,7 +7,8 @@
         perf:cct-actionable perf:cct-delta perf:mine perf:mine-with
         perf:hypotheses perf:split-protected perf:node-clock
         perf:count-rows perf:prefix-leaf perf:cct-worldline-query
-        perf:cct-cleared perf:should-continue? perf:delta-brief perf:site-ms)
+        perf:cct-cleared perf:should-continue? perf:delta-brief perf:site-ms
+        perf:site-sum)
 
 (require "std/string" all:)
 (require "lib/perf/util" all:)
@@ -57,6 +58,20 @@
       -1
       (let ((n (perf:cct-node cct name)))
         (if (hash? n) (hash-ref n "task-clock" -1) -1))))
+
+; Sum of the sites' task-clock in one tree. In the base tree a missing
+; site is a site that was not measured, and the floor cannot be claimed
+; (-1). In the candidate tree a missing site is a site the candidate
+; stopped calling: that is 0, not a missing measurement — a set that
+; removes one of its own sites must not fail its site floor.
+(define (perf:site-sum cct sites strict)
+  (let loop ((xs (if (list? sites) sites '())) (sum 0))
+    (if (null? xs)
+        sum
+        (let ((v (perf:site-ms cct (car xs))))
+          (cond ((or (not (number? v)) (< v 0))
+                 (if strict -1 (loop (cdr xs) sum)))
+                (else (loop (cdr xs) (+ sum v))))))))
 
 ; Hottest root-to-leaf path by task-clock of the leaf under a parent.
 (define (perf:cct-hot-prefix cct)

@@ -91,12 +91,11 @@ catalog 条目现在可以带 `genomes`（一组 `(target, genome)`，或 target
 
 策略已经用上：候选按 `headroom-pct` 从高到低排（`headroom-order #f` 关闭），`headroom-min-pct` 让上限不够的候选不进这一轮（`headroom-skip`），不占预算。还差：把「这个位点没余量」写进跨次负例。
 
-### 4. 便宜的 screen 量位点，不量整个目标 —— 还差一半
+### 4. 便宜的 screen 量位点，不量整个目标 —— 做了
 
-位点的地板已经用上了 ✓（位点的时间来自 worldline 树 ✓），但 screen 还在量整个
-kernel ✗，而且位点的时间只量了一次 ✗：机器一忙，位点的数字就抖（aura-runner 那次
-461→339 赢、下一次 543→526 就输了 ✗）。量几次取中位数，是 seed 自己的事
-（`perf-worldline-measure` 是目标写的 ✓），运行时只要把位点的地板和噪声分开 ✓。
+screen 的同一轮里量 screen 输入的 worldline 树，决策读候选位点（组求和）对 null base 的同一组位点；base 没有位点时退回整 kernel。候选行带 `screen-site-ms` / `screen-base-site-ms`，`screen-pruned` 不再花 held-out。
+
+还剩下噪声：位点目前只量一次；量几次取中位数是 seed 自己的事（`perf-worldline-measure` 是目标写的），运行时把地板和噪声分开即可。
 
 ### 4b. 基线和候选要交错着量
 
@@ -104,12 +103,6 @@ kernel ✗，而且位点的时间只量了一次 ✗：机器一忙，位点的
 不是同一个时刻的 ✗。aura-runner 那次跑出来的基线是 1313 ms / 1388 ms / 1400 ms 三
 个不同的值 ✗。null 候选（门自己的参照 ✓）应该每一轮都重测 ✓，那一轮的候选就对着同一
 时刻的参照比 ✓。
-
-### 4. 便宜的 screen 量位点，不量整个目标
-
-screen 现在量整个 kernel，位点上 25% 的赢在噪声里看不见。screen 应该量热叶子的那个 region（region timer 已经按 define 分开了 ✓），于是「这个位点快了 25%」在便宜的一轮就能看见。
-
-验收：screen 的毫秒是位点的毫秒，报告写明是哪个 region；sum-scan 的 screen 结论不变。
 
 ### 5. 门把三段时间拆开
 

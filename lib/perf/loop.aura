@@ -280,6 +280,7 @@
           "screen-n" (hash-ref spec "screen-n" 0)
           "screen-baseline-ms" (hash-ref spec "screen-baseline-ms" -1)
           "screen-slack-ms" (hash-ref spec "screen-slack-ms" 5)
+          "screen-sites" (perf:cand-sites cand)
           "result" (string-append out "/jobs/" id ".result.json")
           "job" (string-append out "/jobs/" id ".job.json")
           "log" (string-append out "/trials/" id ".jsonl"))))
@@ -327,6 +328,12 @@
     (let ((hp (hash-ref result "headroom-pct" #f)))
       (if (number? hp)
           (string-append " headroom-pct=" (number->string hp))
+          ""))
+    (let ((ss (hash-ref result "screen-site-ms" -1)))
+      (if (and (number? ss) (>= ss 0))
+          (string-append " screen-site-ms=" (number->string ss)
+                         " screen-base-site-ms="
+                         (number->string (hash-ref result "screen-base-site-ms" -1)))
           "")))))
 
 (define (perf:sum-dur results)
@@ -364,20 +371,6 @@
                              (cons t acc)
                              acc))))))
           (else (list (hash-ref cand "target" ""))))))
-
-; Sum of the sites' task-clock in one tree. In the base tree a missing
-; site is a site that was not measured, and the floor cannot be claimed
-; (-1). In the candidate tree a missing site is a site the candidate
-; stopped calling: that is 0, not a missing measurement — a set that
-; removes one of its own sites must not fail its site floor.
-(define (perf:site-sum cct sites strict)
-  (let loop ((xs (if (list? sites) sites '())) (sum 0))
-    (if (null? xs)
-        sum
-        (let ((v (perf:site-ms cct (car xs))))
-          (cond ((or (not (number? v)) (< v 0))
-                 (if strict -1 (loop (cdr xs) sum)))
-                (else (loop (cdr xs) (+ sum v))))))))
 
 ; The site's two times: the baseline's and the candidate's, both from
 ; the worldline trees, and the floor the intend asks for. The result

@@ -302,7 +302,9 @@
 ; The define's name from one top-level form: "(define (f x) ...)" or
 ; "(define f ...)". "" for anything else.
 (define (perf:define-form-name form)
-  (if (not (perf:starts-at? form 0 "(define"))
+  (if (not (and (perf:starts-at? form 0 "(define")
+                (let ((c (perf:char-at form 7)))
+                  (or (<= c 32) (= c 40)))))
       ""
       (let ((k (perf:skip-ws form 7)))
         (if (>= k (string-length form))

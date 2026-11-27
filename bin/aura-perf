@@ -236,6 +236,7 @@ case "$cmd" in
     attach_rc=0
     llm_rc=0
     checksum_rc=0
+    auto_probe_rc=0
     joint_rc=0
     if command -v python3 >/dev/null 2>&1; then
       python3 tests/bus_linger_test.py
@@ -252,6 +253,10 @@ case "$cmd" in
       # not match, a slower pass) goes on to its next round.
       python3 tests/checksum_round_test.py
       checksum_rc=$?
+      # A target that never wrote perf-worldline-measure gets a tree from
+      # the runtime's auto-probe, in the trial and in the base measurement.
+      python3 tests/auto_probe_worker_test.py
+      auto_probe_rc=$?
       # aura-perf#30: an agent that cannot boot leaves a report with
       # its log, not a cleanup traceback.
       python3 tests/joint_agent_absent_test.py
@@ -283,6 +288,9 @@ case "$cmd" in
     fi
     if [ "$checksum_rc" -ne 0 ]; then
       exit "$checksum_rc"
+    fi
+    if [ "$auto_probe_rc" -ne 0 ]; then
+      exit "$auto_probe_rc"
     fi
     if [ "$joint_rc" -ne 0 ]; then
       exit "$joint_rc"

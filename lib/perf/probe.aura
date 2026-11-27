@@ -58,7 +58,7 @@
     "           (g (car (hash-ref st \"stack\" '())))"
     "           (dt (- (monotonic-ms) (vector-ref g 1)))"
     "           (child (vector-ref g 2))"
-    "           (self (- dt child))"
+    "           (self (let ((s (- dt child))) (if (< s 0) 0 s)))"
     "           (acc (hash-ref st \"acc\" (hash)))"
     "           (cur (hash-ref acc \"" name "\" (hash \"calls\" 0 \"incl\" 0 \"self\" 0))))"
     "      (hash-set! st \"stack\" (cdr (hash-ref st \"stack\" '())))"

@@ -119,6 +119,11 @@ def main():
                 else:
                     print("FAIL linger: no per-job worker task")
                     fail = 1
+                if "bus-result " in report_text:
+                    print("ok linger: the result metrics are on the bus")
+                else:
+                    print("FAIL linger: no bus-result line")
+                    fail = 1
             except subprocess.TimeoutExpired:
                 print("FAIL linger: round did not exit after stdin EOF")
                 fail = 1

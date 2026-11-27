@@ -669,6 +669,7 @@
                           #f))
                     (hash-set! result "site-context" site)
                     (hash-set! result "site-floor" site-floor)
+                    (perf:bus-result bus result)
                     (hash-set! result "bus-verdict" bus-res)
                     (if (and bus (>= bus-wl 0))
                         (perf:say buf (string-append "bus-worldline " id

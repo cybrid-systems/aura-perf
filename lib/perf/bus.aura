@@ -49,7 +49,8 @@
         perf:bus-workspace perf:bus-linger-seconds perf:bus-linger
         perf:bus-host-enabled? perf:bus-propose perf:bus-propose-multi
         perf:bus-subscribe-signals perf:bus-define-nodes
-        perf:bus-task-open perf:bus-task-close perf:bus-tag-jobs)
+        perf:bus-task-open perf:bus-task-close perf:bus-tag-jobs
+        perf:bus-result)
 
 (define (perf:bus-workspace spec)
   (let ((cfg (hash-ref spec "bus" (hash))))
@@ -213,6 +214,45 @@
                                         "bus-task job-post-failed id=" id
                                         " " (bus:message p))))
                 (loop (cdr xs))))))))
+
+; The numbers a judge peer needs, on the metrics channel. The key base
+; is derived from the candidate id's rolling hash, so a reader that saw
+; the CCT mark can compute it; the report line carries it too.
+;   +0 valid  +1 checksum-ok  +2 mismatches  +3 heldout-ms
+;   +4 ref-ms +5 site-floor   +6 rebuild     +7 ref-source
+; Negative readings are published as 0; valid says whether the rest are
+; a measurement or a rollback without one.
+(define (perf:bus-result bus result)
+  (if (not (and (hash? bus) (hash? result)))
+      -1
+      (let* ((sid (hash-ref bus "session"))
+             (id (hash-ref result "id" "candidate"))
+             (base (+ 1000000000 (* 16 (perf:bus-mid id))))
+             (num (lambda (k d)
+                    (let ((v (hash-ref result k d)))
+                      (if (and (number? v) (> v 0)) v 0))))
+             (source (cond ((string=? (hash-ref result "ref-source" "") "null-job") 1)
+                           ((string=? (hash-ref result "ref-source" "") "round") 2)
+                           (else 0)))
+             (vals (list (if (string=? (hash-ref result "status" "") "ok") 1 0)
+                         (num "checksum-ok" 0)
+                         (num "mismatches" 0)
+                         (num "heldout-ms" -1)
+                         (num "ref-ms" -1)
+                         (num "site-floor" 0)
+                         (let ((e (hash-ref result "engine" (hash))))
+                           (if (= (hash-ref e "world-rebuilt" 0) 1) 1 0))
+                         source)))
+        (let loop ((i 0) (xs vals))
+          (if (null? xs)
+              #t
+              (begin
+                (bus:publish sid (+ base i) (car xs))
+                (loop (+ i 1) (cdr xs)))))
+        (perf:bus-say (hash-ref bus "buf" (hash))
+                      (string-append "bus-result " id
+                                     " key=" (number->string base)))
+        base)))
 
 ; Publish the profile's CCT, one record per name in stack order.
 ; Returns the number of accepted records.

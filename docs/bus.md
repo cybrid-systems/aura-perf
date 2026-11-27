@@ -81,6 +81,23 @@ line; the job still runs directly. The round itself remains a task as
 above. This is the first split of execution behind `bus:claim`; the
 judge is still the perf parent.
 
+### Result metrics
+
+After a candidate's gate fields are set, perf publishes the numbers a
+judge peer needs on the metrics channel under a key derived from the
+candidate id's rolling hash:
+
+```
+key = 1_000_000_000 + 16 * mid(id)
++0 valid   +1 checksum-ok  +2 mismatches  +3 heldout-ms
++4 ref-ms  +5 site-floor   +6 rebuild     +7 ref-source (0 same-process, 1 null-job, 2 round)
+```
+
+`bus-result <id> key=<base>` names the base in the report. Negative
+readings are published as 0; `valid` says whether the rest are a
+measurement. A reader that has the CCT mark's `mid` can compute the
+base without the report.
+
 ## Channel mapping
 
 The image carries immediates, not text; the mapping is:

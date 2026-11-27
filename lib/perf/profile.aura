@@ -17,7 +17,8 @@
         perf:engine-snap perf:collect perf:hottest perf:hot-child
         perf:measure-live perf:compile-snap perf:compile-delta
         perf:engine-brief perf:engine-delta
-        perf:region-sample perf:statm-resident perf:stat-text)
+        perf:parse-batch-regions perf:region-sample
+        perf:statm-resident perf:stat-text)
 
 (require "std/string" all:)
 (require "std/process" all:)
@@ -834,6 +835,50 @@
 
 ; A command is a fresh process. It prints `ms <median>` and `alloc <pages>`
 ; for the thunk only, so the parent's allocation history is not in the number.
+; One child can measure every region: the target prints one line per
+; define, and the parent builds the same rows without a process per
+; region. The format is deliberately boring:
+;   region <name> ms <number> calls <number> stack <caller>|<leaf>
+; A line that does not fit is skipped; the caller's other evidence is
+; still the truth.
+(define (perf:batch-line-row line)
+  (let ((toks (perf:tokens line)))
+    (if (and (>= (length toks) 8)
+             (string=? (car toks) "region")
+             (string=? (perf:nth toks 2) "ms")
+             (string=? (perf:nth toks 4) "calls")
+             (string=? (perf:nth toks 6) "stack"))
+        (let ((name (perf:nth toks 1))
+              (ms (perf:parse-number (perf:nth toks 3)))
+              (calls (perf:parse-number (perf:nth toks 5)))
+              (stack (string-split (perf:nth toks 7) ">")))
+          (if (and (string? name) (number? ms)
+                   (number? calls) (>= calls 0))
+              (hash "name" name
+                    "self-ms" ms
+                    "incl-ms" 0
+                    "calls" calls
+                    "stack" (if (pair? stack) stack (list name))
+                    "unit" "ms"
+                    "source" "region-timer"
+                    "alloc-pages" 0
+                    "measure" "batch-child")
+              #f))
+        #f)))
+
+(define (perf:parse-batch-regions text)
+  (let loop ((lines (if (string? text) (string-split text "\n") '())) (acc '()))
+    (if (null? lines)
+        (reverse acc)
+        (let ((row (perf:batch-line-row (car lines))))
+          (loop (cdr lines) (if (hash? row) (cons row acc) acc))))))
+
+(define (perf:batch-command-rows cmd)
+  (let ((out (string-append "/tmp/aura-perf-batch-"
+                            (number->string (monotonic-ms)) ".out")))
+    (shell (string-append cmd " > " out " 2>/tmp/aura-perf-batch.err"))
+    (perf:parse-batch-regions (perf:read-text out))))
+
 (define (perf:region-command cmd)
   (let ((out "/tmp/aura-perf-region.out"))
     (shell (string-append cmd " > " out " 2>/tmp/aura-perf-region.err"))
@@ -873,21 +918,27 @@
   (hash-ref (perf:region-sample region repeats) "ms" -1))
 
 (define (perf:region-mode rows)
-  (let loop ((xs (if (list? rows) rows '())) (saw-f #f) (saw-i #f))
+  (let loop ((xs (if (list? rows) rows '())) (saw-f #f) (saw-i #f) (saw-b #f))
     (if (null? xs)
         (cond ((and saw-f saw-i) "mixed")
+              (saw-b "batch-child")
               (saw-f "fresh-child")
               (else "in-process"))
-        (let ((m (hash-ref (car xs) "measure" "in-process")))
+        (let* ((m (hash-ref (car xs) "measure" "in-process"))
+               (batch (string=? m "batch-child")))
           (loop (cdr xs)
-                (or saw-f (string=? m "fresh-child"))
-                (or saw-i (not (string=? m "fresh-child"))))))))
+                (or saw-f (or (string=? m "fresh-child") batch))
+                (or saw-i (not (or (string=? m "fresh-child") batch)))
+                (or saw-b batch))))))
 
 (define (perf:region-notes mode)
   (list
-    (if (string=? mode "fresh-child")
-        "regions: each region was timed in a fresh child, so the number is not this process's allocation history. alloc-pages is that child's resident delta."
-        "regions: timed in this process. alloc-pages is the resident-page delta; a region after a large allocation measures the allocator as well as the thunk.")
+    (cond ((string=? mode "fresh-child")
+           "regions: each region was timed in a fresh child, so the number is not this process's allocation history. alloc-pages is that child's resident delta.")
+          ((string=? mode "batch-child")
+           "regions: one batch child timed every region, so there is one process startup and one history for all of them. alloc-pages is not tracked in this mode.")
+          (else
+           "regions: timed in this process. alloc-pages is the resident-page delta; a region after a large allocation measures the allocator as well as the thunk."))
     "held-out: timed in a trial child. Region times and held-out times come from different process states."))
 
 (define (perf:median-samples samples)
@@ -1020,23 +1071,26 @@
          (eng-before (perf:engine-snap))
          (proc-before (perf:read-proc))
          (t0 (monotonic-ms))
-         (raw (let loop ((xs (if (list? regions) regions '())) (acc '()))
-                (if (null? xs)
-                    (reverse acc)
-                    (let* ((r (car xs))
-                           (sample (perf:region-sample r repeats)))
-                      (loop (cdr xs)
-                            (cons (hash "name" (hash-ref r "name" "region")
-                                        "self-ms" (hash-ref sample "ms" -1)
-                                        "incl-ms" 0
-                                        "calls" (hash-ref r "calls" 1)
-                                        "stack" (hash-ref r "stack" (list (hash-ref r "name" "region")))
-                                        "unit" "ms"
-                                        "source" "region-timer"
-                                        "alloc-pages" (hash-ref sample "alloc" 0)
-                                        "measure" (hash-ref sample "measure" "in-process")
-                                        "workload" (eq? (hash-ref r "workload" #f) #t))
-                                  acc))))))
+         (raw (let ((batch (hash-ref o "batch-command" "")))
+                (if (and (string? batch) (> (string-length batch) 0))
+                    (perf:batch-command-rows batch)
+                    (let loop ((xs (if (list? regions) regions '())) (acc '()))
+                      (if (null? xs)
+                          (reverse acc)
+                          (let* ((r (car xs))
+                                 (sample (perf:region-sample r repeats)))
+                            (loop (cdr xs)
+                                  (cons (hash "name" (hash-ref r "name" "region")
+                                              "self-ms" (hash-ref sample "ms" -1)
+                                              "incl-ms" 0
+                                              "calls" (hash-ref r "calls" 1)
+                                              "stack" (hash-ref r "stack" (list (hash-ref r "name" "region")))
+                                              "unit" "ms"
+                                              "source" "region-timer"
+                                              "alloc-pages" (hash-ref sample "alloc" 0)
+                                              "measure" (hash-ref sample "measure" "in-process")
+                                              "workload" (eq? (hash-ref r "workload" #f) #t))
+                                        acc))))))))
          (t1 (monotonic-ms))
          (eng-after (perf:engine-snap))
          (proc-after (perf:read-proc))

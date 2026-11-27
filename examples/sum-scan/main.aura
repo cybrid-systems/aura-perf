@@ -28,6 +28,14 @@
 
 ; Each region is timed in its own process. The in-process thunk is only
 ; the fallback if that command does not print a median.
+; One child measures every region. The runtime passes this as the
+; batch command; a spec that has no batch command keeps the per-region
+; path. The 4000-element workload is the profile input, separate from
+; the held-out/screen sizes.
+(define (batch-cmd)
+  (string-append "env AURA_SANDBOX=off AURA_PERF_REGION=all AURA_PERF_N=4000 AURA_PERF_REPS=3 "
+                 (aura-bin) " examples/sum-scan/perf-region.aura"))
+
 (define (region-cmd name)
   (string-append "env AURA_SANDBOX=off AURA_PERF_TIME=1 AURA_PERF_REGION=" name
                  " AURA_PERF_N=4000 AURA_PERF_REPS=3 "
@@ -75,6 +83,7 @@
         "kernel" "bench-kernel"
         "count-defines" #t
         "regions-fn" regions
+        "profile-command" (batch-cmd)
         "perf-after" (perf-cmd "linear")
         "perf-targets"
         (list (hash "name" "k-length" "calls" 1

@@ -1,0 +1,22 @@
+; One child can print every region; the parser turns those lines into
+; the same rows a per-region command would have produced. Noise lines
+; are skipped, and a stack is split on ">".
+(require "lib/perf/profile" all:)
+
+(define text
+  (string-append
+    "region bench-kernel ms 91 calls 1 stack bench-kernel\n"
+    "region k-ref ms 99 calls 4000 stack bench-kernel>k-ref\n"
+    "not a region line\n"
+    "region k-length ms 0 calls 1 stack bench-kernel>k-length\n"))
+
+(define rows (perf:parse-batch-regions text))
+
+(for-each (lambda (r)
+            (display (list (hash-ref r "name")
+                           (hash-ref r "self-ms")
+                           (hash-ref r "calls")
+                           (hash-ref r "stack")
+                           (hash-ref r "measure"))))
+          rows)
+(newline)

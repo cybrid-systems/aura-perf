@@ -65,6 +65,39 @@
         (else
          (bench-kernel xs))))
 
+; AURA_PERF_REGION=all: every define in one child, one line each. The
+; parent's batch parser turns these into the same rows a per-region
+; command would have produced, without one process per region.
+(define (once-region name)
+  (cond ((string=? name "k-ref")
+         (let loop ((i 0) (acc 0))
+           (if (>= i n) acc (loop (+ i 1) (+ acc (k-ref xs i))))))
+        ((string=? name "k-length")
+         (k-length xs))
+        ((string=? name "linear")
+         (linear-kernel xs))
+        (else
+         (bench-kernel xs))))
+
+(define (print-region name calls stack)
+  (once-region name)
+  (let loop ((i 0) (samples '()))
+    (if (>= i reps)
+        (let ((ms (median (reverse samples))))
+          (display "region ") (display name)
+          (display " ms ") (display ms)
+          (display " calls ") (display calls)
+          (display " stack ") (display stack)
+          (newline))
+        (let ((t0 (monotonic-ms)))
+          (once-region name)
+          (loop (+ i 1) (cons (- (monotonic-ms) t0) samples))))))
+
+(define (print-all)
+  (print-region "bench-kernel" 1 "bench-kernel")
+  (print-region "k-length" 1 "bench-kernel>k-length")
+  (print-region "k-ref" n "bench-kernel>k-ref"))
+
 (define timing (let ((v (getenv "AURA_PERF_TIME")))
                  (and (string? v) (string=? v "1"))))
 
@@ -90,6 +123,8 @@
         (begin (display acc) (newline))
         (loop (+ i 1) (+ acc (once))))))
 
-(if timing
-    (print-time)
-    (print-sum))
+(if (string=? region "all")
+    (print-all)
+    (if timing
+        (print-time)
+        (print-sum)))

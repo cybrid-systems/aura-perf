@@ -22,6 +22,7 @@ spec 是目标项目和运行时之间的那份约定，运行时按它工作：
 | `oracle` | `(inputs -> expected)` | `perf:sum-ref` |
 | `check-inputs` | checksum 用的那几组输入（列表或过程） | sum-scan 的几组 |
 | `regions-fn` | 要计时的 define 和它们的 stack | 无 |
+| `profile-command` | 一个 child 打印所有 region 的命令（每行 `region <name> ms <n> calls <n> stack <a>|<b>`）；有它就不为每个 region 起进程 | 无 |
 | `catalog` | 候选：id、target、genome、thought；或 `genomes` 一组 `(target, genome)`（也接受 target → genome 的 hash），一条候选一次改多个 define | 无 |
 | `intend` | 最低加速、checksum、预算、protected | 无 |
 | `headroom` | 跑不跑天花板探针；`#f` 关闭 | `#t` |
@@ -208,6 +209,17 @@ catalog 条目可以带 `genomes`：一组 `(target, genome)`，或 target → g
 ### 11. 便宜筛选，再花 held-out
 
 Checksum 失败的候选不做 held-out。正确的候选先在 `screen-n` 上计一次，**同时在同一 child 里量这次 screen 输入的 worldline 树**（目标自己的 `perf-worldline-measure`，没有就用 auto-probe）。screen 决策读候选的位点（组候选是各位点之和）对 null base 的同一组位点：只有位点明显更差（慢过两倍，并且慢过 base 加 slack）才 `screen-pruned`。base 树没有位点时退回整 kernel 的 `screen-ms`。活下来的才跑 held-out。候选行带 `screen-site-ms=… screen-base-site-ms=…`，报告写明 `screen-site=<site>`；位点快了但整 kernel 没动，screen 也能看见。
+
+### 11b. 初始 profile 一个 batch child
+
+spec 可以给 `profile-command`：一个命令，在自己的 child 里量完所有 region，按行打印
+
+```
+region bench-kernel ms 91 calls 1 stack bench-kernel
+region k-ref ms 99 calls 4000 stack bench-kernel>k-ref
+```
+
+运行时只起这一个 child，`perf:parse-batch-regions` 把行变成和逐 region 路径相同的 rows，CCT / 热点 / 分享比都不变。报告写 `measure=batch-child`，notes 说明「one batch child timed every region」。没有这个键时仍是原来的每 region 一个 fresh child；单个 region 的 `ms` 语义不变。sum-scan 的 `profile-command` 指向 `perf-region.aura` 的 `AURA_PERF_REGION=all`。
 
 ### 12. 机器层库存和建议
 

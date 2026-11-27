@@ -18,12 +18,27 @@
 (check "psi" (> (perf:use-psi "some avg10=12.50 avg60=3.00 total=42") 12))
 (check "load" (= (hash-ref (perf:use-load "1.50 1.20 0.90 4/200 123") "runnable" -1) 4))
 
-(define a (perf:use-sample))
-(define b (perf:use-sample))
+(define a (hash "cpu" (hash "total" 100 "busy" 15)
+                 "cpus" 2 "running" 1 "blocked" 0 "load1" 1
+                 "psi-cpu10" 1 "mem-total-kib" 1000 "mem-available-kib" 500
+                 "swap-total-kib" 0 "swap-free-kib" 0
+                 "psi-mem10" 0 "psi-io10" 1
+                 "vm-swap-in" 0 "vm-swap-out" 0 "vm-scan-direct" 0
+                 "vm-allocstall" 0))
+(define b (hash "cpu" (hash "total" 200 "busy" 40)
+                 "cpus" 2 "running" 4 "blocked" 2 "load1" 3
+                 "psi-cpu10" 1 "mem-total-kib" 1000 "mem-available-kib" 200
+                 "swap-total-kib" 100 "swap-free-kib" 0
+                 "psi-mem10" 0 "psi-io10" 1
+                 "vm-swap-in" 0 "vm-swap-out" 2 "vm-scan-direct" 0
+                 "vm-allocstall" 0))
 (define d (perf:use-delta a b))
 (check "delta available" (= (hash-ref d "available" 0) 1))
-(check "delta cpu util sane" (and (number? (hash-ref (hash-ref d "cpu") "util-pct" -1))
-                                  (>= (hash-ref (hash-ref d "cpu") "util-pct" -1) 0)))
+(check "delta cpu util" (= (hash-ref (hash-ref d "cpu") "util-pct" -1) 25))
+(check "cpu saturation is the runqueue" (string=? (hash-ref (hash-ref d "cpu") "sat" "") "saturated"))
+(check "memory saturation is swap activity" (string=? (hash-ref (hash-ref d "memory") "sat" "") "saturated"))
+(check "scheduler saturation is blocked" (string=? (hash-ref (hash-ref d "scheduler") "sat" "") "saturated"))
+(check "live sample is a hash" (hash? (perf:use-sample)))
 (check "USE lines" (and (= (length (perf:use-lines d)) 4)
                         (string? (car (perf:use-lines d)))))
 (display "use ok")

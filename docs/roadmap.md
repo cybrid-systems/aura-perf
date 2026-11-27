@@ -46,7 +46,7 @@ hotspot block-ahead?     self-ms=67   calls=900 share=0
 
 ## 工具：aura 有、aura-perf 还没用上的
 
-- **类型门当便宜的预筛。** `mutate:rebind` 自己过 selective typecheck，类型不过的候选连计时都不该跑。现在候选是直接进 trial 的。
+- **类型门当便宜的预筛。** ✅ 做了：`(mutate :check)` 在父进程 dry-run parse + typecheck，失败记 `type-gate`，不写 job、不起子进程、不花 held-out；构建没有这个原语时退回 trial。
 - **JIT 的预热税。** 一次 rebind 会让 JIT 重编译，实测 40–60% 的税（见 findings 的历史条目）。held-out 的第一个样本带着这段税，中位数能盖住，但报告会应该把「null 候选的时间」和「mutation 自己的效果」分开写：候选时间 − null 时间 = mutation 的效果，null 时间 − 基线 = rebind 的税。现在 null 候选已经在跑，门也用它，但报告没有把三段拆开。
 - **稳态而不是第一个样本。** held-out 应该丢掉第一次（预热）再取中位，并把丢掉的那次写在报告里。
 - **目标自己的测试命令当 checksum。** spec 可以给一条命令（`aura test`），运行时的门跑它、读它的退出码和 golden 差异。

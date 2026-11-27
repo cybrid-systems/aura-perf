@@ -217,7 +217,9 @@ KEEP 时若 `AURA_SANDBOX=off`，读 compile 组的 `cascade_full_count` 和 `mo
 
 ### 观察、试探、证明、提交是同一语言
 
-Trial 在子进程的 `evo:trial` 里做，live 指纹不变；过门才在父进程 snapshot → rebind → 再测，失败则 restore。KEEP 只认 gate。`(perf:intend-seal …)` 把 checksum、最低加速和 protected 收成一次运行里改不掉的值。类型检查仍会拒绝 typecheck 失败的 genome。
+Trial 在子进程的 `evo:trial` 里做，live 指纹不变；过门才在父进程 snapshot → rebind → 再测，失败则 restore。KEEP 只认 gate。`(perf:intend-seal …)` 把 checksum、最低加速和 protected 收成一次运行里改不掉的值。
+
+类型门在 trial 之前：`(mutate :check target genome)` 在父进程里读 workspace、在 call-local 存储里 parse + typecheck、什么都不写。不过的候选是 `candidate <id> ROLLBACK reason=type-gate`，没有 job 文件、没有子进程、没有 screen、没有 held-out；诊断单独一行 `type-gate <id> <tag>: <message>`，audit 里也有。它不占 intend 的预算，但当轮就进 `refused`，下一轮不会再排。构建上没有 `mutate:check` 时返回 `unavailable`，候选照旧进 trial，不把「门不可用」当成「候选错了」。
 
 ### 计数器 join 到节点
 

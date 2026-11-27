@@ -237,6 +237,7 @@ case "$cmd" in
     llm_rc=0
     checksum_rc=0
     auto_probe_rc=0
+    type_gate_rc=0
     joint_rc=0
     if command -v python3 >/dev/null 2>&1; then
       python3 tests/bus_linger_test.py
@@ -257,6 +258,10 @@ case "$cmd" in
       # the runtime's auto-probe, in the trial and in the base measurement.
       python3 tests/auto_probe_worker_test.py
       auto_probe_rc=$?
+      # A candidate that cannot typecheck is rejected in the parent; no
+      # worker, no job file, no held-out sample.
+      python3 tests/type_gate_round_test.py
+      type_gate_rc=$?
       # aura-perf#30: an agent that cannot boot leaves a report with
       # its log, not a cleanup traceback.
       python3 tests/joint_agent_absent_test.py
@@ -291,6 +296,9 @@ case "$cmd" in
     fi
     if [ "$auto_probe_rc" -ne 0 ]; then
       exit "$auto_probe_rc"
+    fi
+    if [ "$type_gate_rc" -ne 0 ]; then
+      exit "$type_gate_rc"
     fi
     if [ "$joint_rc" -ne 0 ]; then
       exit "$joint_rc"

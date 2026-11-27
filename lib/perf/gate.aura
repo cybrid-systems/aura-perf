@@ -5,13 +5,49 @@
 (export perf:speedup-ok? perf:accept? perf:intend-seal perf:gate-pct
         perf:gene-bypasses? perf:screen-prune? perf:covers?
         perf:result-reject perf:effective-pct perf:reason perf:site-ok?
-        perf:judged?)
+        perf:judged? perf:type-gate perf:type-gate-detail)
 
 ; A candidate median of 0 ms is a reading, not a missing one: the
 ; kernel ran in less than the timer's resolution (a rewrite that hands
 ; the list to a native fold does). Against a reference above 0 it is
 ; the largest speedup there is. A reference of 0 has nothing to beat,
 ; and -1 is no measurement at all.
+; Cheap dry-run gate before a candidate gets a process. (mutate :check)
+; parses the candidate on its own, typechecks workspace + candidate in
+; call-local storage, and writes nothing (#4742). A candidate that cannot
+; typecheck cannot pass any later gate, so it should not spend a worker, a
+; screen or a held-out sample. On a build without the primitive the gate is
+; "unavailable" and the trial runs exactly as before; the gate is an economy,
+; not a new correctness boundary.
+;
+; #t = clean, a pair = the tagged failure, 'unavailable = primitive missing.
+(define (perf:type-gate target genome)
+  (if (or (not (string? target)) (string=? target "")
+          (not (string? genome)) (string=? genome ""))
+      #t
+      (let ((r (try (mutate :check target genome) (catch (e) 'unavailable))))
+        (cond ((eq? r #t) #t)
+              ((pair? r) r)
+              (else 'unavailable)))))
+
+; One report-sized line for a failed gate: the tag and, when the payload
+; carries one, the first diagnostic's message. Never English-parsed by the
+; gate itself; this is for the reader and the audit.
+(define (perf:type-gate-detail r)
+  (if (not (pair? r))
+      "check-error"
+      (let* ((tag (car r))
+             (payload (if (pair? (cdr r)) (car (cdr r)) ""))
+             (msg (cond ((string? payload) payload)
+                        ((and (list? payload) (pair? payload) (hash? (car payload)))
+                         (hash-ref (car payload) "message" ""))
+                        (else "")))
+             (text (string-append (if (string? tag) tag "error")
+                                  (if (string=? msg "") "" (string-append ": " msg)))))
+        (if (> (string-length text) 120)
+            (substring text 0 120)
+            text))))
+
 (define (perf:speedup-ok? baseline-ms cand-ms pct)
   (and (number? baseline-ms) (> baseline-ms 0)
        (number? cand-ms) (>= cand-ms 0)

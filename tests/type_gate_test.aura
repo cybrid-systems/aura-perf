@@ -1,0 +1,23 @@
+; The cheap gate: (mutate :check) reads the workspace, parses and typechecks
+; the candidate in call-local storage, and writes nothing. A candidate that
+; cannot typecheck never gets a worker or a held-out sample.
+(require "lib/perf/util" all:)
+(require "lib/perf/gate" all:)
+
+(set-code (perf:read-text "examples/sum-scan/seed.aura"))
+(eval-current)
+
+(define good (perf:read-text "examples/sum-scan/candidates/linear-scan.aura"))
+(define bad "(define (bench-kernel xs) (undefined-thing xs))\n")
+
+(define before (current-source :workspace))
+(define pass (perf:type-gate "bench-kernel" good))
+(define fail (perf:type-gate "bench-kernel" bad))
+(define empty (perf:type-gate "bench-kernel" ""))
+
+(display (list (eq? pass #t)
+               (pair? fail)
+               (eq? empty #t)
+               (> (string-length (perf:type-gate-detail fail)) 0)
+               (equal? before (current-source :workspace))))
+(newline)

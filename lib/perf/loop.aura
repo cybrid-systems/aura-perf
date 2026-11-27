@@ -301,6 +301,25 @@
            (nulls (perf:null-results spec results)))
       (hash "raw" raw "null" nul "nulls" nulls))))
 
+; Split before a single job is written. A candidate that cannot typecheck
+; is a ROLLBACK here, not a worker launch; the budget counts trials that
+; actually ran. A build without mutate:check returns 'unavailable and every
+; candidate goes to trial, which is the old behavior.
+(define (perf:type-split spec cands)
+  (let loop ((xs (if (list? cands) cands '())) (ok '()) (bad '()))
+    (if (null? xs)
+        (list (reverse ok) (reverse bad))
+        (let* ((cand (car xs))
+               (check (perf:type-gate (perf:cand-target spec cand)
+                                      (hash-ref cand "genome" ""))))
+          (cond ((eq? check #t)
+                 (loop (cdr xs) (cons cand ok) bad))
+                ((eq? check 'unavailable)
+                 (loop (cdr xs) (cons cand ok) bad))
+                (else
+                 (loop (cdr xs) ok
+                       (cons (hash "cand" cand "check" check) bad))))))))
+
 (define (perf:trial-round spec cands out buf baseline)
   (let* ((refs (perf:round-references spec out))
          (raw-res (hash-ref refs "raw" #f))
@@ -315,8 +334,11 @@
          ; they rebind. The rest are rejected, not measured against
          ; another define's null.
          (split (perf:split-reference spec nulls cands))
-         (trialable (car split))
+         (trialable0 (car split))
          (unjudgeable (car (cdr split)))
+         (type-split (perf:type-split spec trialable0))
+         (trialable (car type-split))
+         (type-rejected (car (cdr type-split)))
          (bus (hash-ref buf "bus" #f))
          (records (let loop ((xs trialable) (acc '()))
                     (if (null? xs)
@@ -367,6 +389,31 @@
                       "live-fingerprint-during-trials "
                       (number->string fp-before) " -> " (number->string fp-after)
                       (if (= fp-before fp-after) " unchanged" " CHANGED")))
+      ; The candidates the dry-run mutation gate refused: no process, no
+      ; screen, no held-out. They are still ROLLBACK decisions with their
+      ; own audit row, so the report does not hide them.
+      (let loop ((xs type-rejected))
+        (if (null? xs)
+            #t
+            (let* ((row (car xs))
+                   (cand (hash-ref row "cand" (hash)))
+                   (check (hash-ref row "check" #f))
+                   (id (hash-ref cand "id" "?"))
+                   (target (perf:cand-target spec cand))
+                   (detail (perf:type-gate-detail check)))
+              (perf:say buf (string-append "candidate " id
+                                           " ROLLBACK reason=type-gate"))
+              (perf:say buf (string-append "type-gate " id " " detail))
+              (perf:note buf "reject" id "type-gate")
+              (perf:bump buf "rollback")
+              ; Keep the next round's order from re-planning a candidate
+              ; that cannot typecheck. This is per-run: the same id may
+              ; carry a fixed genome in the next run.
+              (hash-set! buf "refused"
+                         (cons id (hash-ref buf "refused" '())))
+              (perf:audit-decision target "ROLLBACK" "type-gate"
+                                   (hash "id" id "detail" detail))
+              (loop (cdr xs)))))
       ; The candidates with no reference of their own.
       (let loop ((xs unjudgeable))
         (if (null? xs)

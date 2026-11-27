@@ -145,6 +145,8 @@ to reports or `out/`.
 | `aura-perf trace --seconds N` | sample `sched_switch` via tracefs (permission) |
 | `aura-perf offcpu --file F` | off-CPU summary from a bpftrace output |
 | `aura-perf offcpu --pid PID` | bpftrace off-CPU summary (permission) |
+| `aura-perf c2c --file F` | cache-line contention from a `perf c2c` report |
+| `aura-perf c2c -- CMD` | record and parse `perf c2c` (permission) |
 | `aura-perf doctor [--install]` | evidence-source readiness, exact install and permission commands |
 | `aura-perf test` | runtime and round tests |
 | `aura-perf install` | install nightly if needed, link the command |

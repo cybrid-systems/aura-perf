@@ -1,0 +1,88 @@
+; perf c2c summary as values.
+;
+; The parser reads the "Trace Event Information" block of
+; perf c2c report --stdio: total records, loads, stores, LLC hits,
+; local RAM hits and remote HITM. Missing counters stay missing; this is
+; cache-line contention evidence, not a made-up hit rate.
+
+(export perf:c2c-parse perf:c2c-line)
+
+(require "std/string" all:)
+(require "lib/perf/util" all:)
+
+(define (perf:c2c-trim s)
+  (if (not (string? s))
+      ""
+      (let ((n (string-length s)))
+        (let lo ((i 0))
+          (if (or (>= i n) (> (perf:char-at s i) 32))
+              (let hi ((j n))
+                (if (or (<= j i) (> (perf:char-at s (- j 1)) 32))
+                    (substring s i j)
+                    (hi (- j 1))))
+              (lo (+ i 1)))))))
+
+(define (perf:c2c-start? s p)
+  (and (string? s) (string? p)
+       (>= (string-length s) (string-length p))
+       (string=? (substring s 0 (string-length p)) p)))
+
+(define (perf:c2c-line-value line label)
+  ; Label, then ":" and a number somewhere after it.
+  (if (not (perf:c2c-start? line label))
+      #f
+      (let ((colon (let loop ((i 0))
+                     (if (>= i (string-length line))
+                         -1
+                         (if (= (perf:char-at line i) 58) i (loop (+ i 1)))))))
+        (if (or (< colon 0)
+                (not (string=? (perf:c2c-trim (substring line 0 colon)) label)))
+            #f
+            (let ((rest (substring line (+ colon 1) (string-length line))))
+              (let loop ((xs (perf:tokens rest)))
+                (if (null? xs)
+                    -1
+                    (let ((n (perf:parse-number (car xs))))
+                      (if (number? n) n (loop (cdr xs)))))))))))
+
+(define (perf:c2c-parse text)
+  (let loop ((ls (if (string? text) (string-split text "\n") '()))
+             (total -1) (loads -1) (stores -1) (llc -1) (local -1)
+             (remote -1) (dram -1) (seen 0))
+    (if (null? ls)
+        (hash "available" (if (> seen 0) 1 0)
+              "total-records" total
+              "loads" loads
+              "stores" stores
+              "llc-hits" llc
+              "local-ram-hits" local
+              "remote-hitm" remote
+              "remote-dram" dram)
+        (let* ((line (perf:c2c-trim (car ls)))
+               (tv (perf:c2c-line-value line "Total records"))
+               (lv (perf:c2c-line-value line "Loads"))
+               (sv (perf:c2c-line-value line "Stores"))
+               (cv (perf:c2c-line-value line "LLC hits"))
+               (rv (perf:c2c-line-value line "Local RAM hits"))
+               (hv (perf:c2c-line-value line "Remote HITM"))
+               (dv (perf:c2c-line-value line "Remote DRAM")))
+          (loop (cdr ls)
+                (if (number? tv) tv total)
+                (if (number? lv) lv loads)
+                (if (number? sv) sv stores)
+                (if (number? cv) cv llc)
+                (if (number? rv) rv local)
+                (if (number? hv) hv remote)
+                (if (number? dv) dv dram)
+                (if (or (number? tv) (number? lv) (number? sv)
+                        (number? cv) (number? rv) (number? hv) (number? dv))
+                    (+ seen 1) seen))))))
+
+(define (perf:c2c-line v)
+  (string-append "c2c total-records=" (number->string (hash-ref v "total-records" -1))
+                 " loads=" (number->string (hash-ref v "loads" -1))
+                 " stores=" (number->string (hash-ref v "stores" -1))
+                 " llc-hits=" (number->string (hash-ref v "llc-hits" -1))
+                 " local-ram-hits=" (number->string (hash-ref v "local-ram-hits" -1))
+                 " remote-hitm=" (number->string (hash-ref v "remote-hitm" -1))
+                 " remote-dram=" (number->string (hash-ref v "remote-dram" -1))))

@@ -429,6 +429,28 @@ offcpu pid=123 total-ms=12 max-ms=5 samples=3
 
 `BPFTRACE_BIN` 可以指向替代二进制（测试里用假 bpftrace）。
 
+### 12i. perf c2c：cache-line 争用也是值
+
+`aura-perf c2c` 把 `perf c2c report --stdio` 的 `Trace Event Information` 块
+收成一行：
+
+```
+c2c total-records=1234 loads=1000 stores=234 llc-hits=900 local-ram-hits=200 remote-hitm=34 remote-dram=10
+```
+
+- **两种入口。** `aura-perf c2c --file c2c.txt` 只解析已有报告；
+  `aura-perf c2c -- COMMAND [ARGS...]` 用 `perf c2c record` 记录命令，再跑
+  `perf c2c report --stdio`。
+- **权限是显式的。** 没有 perf：`c2c unavailable reason=no-perf
+  command="aura-perf doctor --install" fallback=profile`，退出 3。权限或 PMU
+  不支持：`c2c blocked reason=permission command="sudo sysctl -w
+  kernel.perf_event_paranoid=2" fallback=profile`，退出 4。
+- **缺的计数不补 0。** 报告里没有的字段是 `-1`，不是“没有争用”。
+- **不是每轮都开。** round 仍走 profile/CCT；c2c 是 agent 针对 cache 争用的诊断入口。
+  `doctor` 的 `source pmu` 已说明 c2c 子命令是否在。
+
+`perf mem` 仍只探测子命令；它需要另一套 `mem-loads` 采样和符号化，不在这层。
+
 ### 13. 模型提议者只提议
 
 `perf:llm-propose` 经 `std/llm` 的 `llm:chat` 问一次模型（aura-perf#29）。接线（三个环境变量）和调用预算写在 README 的「模型提议者」里。这里是边界：

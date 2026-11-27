@@ -1,0 +1,16 @@
+(require "std/string" all:)
+(require "lib/perf/c2c" all:)
+
+(define (check label ok)
+  (if ok #t (error (string-append "c2c: " label))))
+
+(define text "=================================================\n            Trace Event Information\n=================================================\n  Total records                     :      1,234\n  Loads                             :      1,000\n  Stores                            :        234\n  LLC hits                          :        900\n  Local RAM hits                    :        200\n  Remote HITM                       :         34\n  Remote DRAM                       :         10\n")
+(define v (perf:c2c-parse text))
+(check "available" (= (hash-ref v "available" 0) 1))
+(check "total" (= (hash-ref v "total-records" -1) 1234))
+(check "loads" (= (hash-ref v "loads" -1) 1000))
+(check "remote hitm" (= (hash-ref v "remote-hitm" -1) 34))
+(check "missing is explicit" (= (hash-ref (perf:c2c-parse "") "available" 0) 0))
+(check "line" (string-contains? (perf:c2c-line v) "remote-hitm=34"))
+(display "c2c ok")
+(newline)

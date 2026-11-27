@@ -58,6 +58,9 @@ aura-perf - an optimization runtime for agents
   offcpu    bpftrace off-CPU summary for one pid
              aura-perf offcpu --file offcpu.txt
              aura-perf offcpu --pid PID [--seconds N]  (bpftrace + permission)
+  c2c        perf c2c cache-line contention summary
+             aura-perf c2c --file c2c.txt
+             aura-perf c2c -- COMMAND [ARGS...]  (perf + permission)
   test       run the value-level tests, then the round tests (python3)
   judge      read a live bus round's result metrics as a judge peer
              AURA_PERF_BUS_WORKSPACE=N AURA_PERF_JUDGE_PCT=20 aura-perf judge
@@ -255,6 +258,9 @@ case "$cmd" in
   offcpu)
     exec sh "$ROOT/scripts/native-offcpu.sh" "$@"
     ;;
+  c2c)
+    exec sh "$ROOT/scripts/native-c2c.sh" "$@"
+    ;;
   doctor)
     cd "$ROOT"
     case "${1:-}" in
@@ -293,6 +299,7 @@ case "$cmd" in
     sched_cli_rc=0
     trace_cli_rc=0
     offcpu_cli_rc=0
+    c2c_cli_rc=0
     joint_rc=0
     if command -v python3 >/dev/null 2>&1; then
       python3 tests/bus_linger_test.py
@@ -352,6 +359,9 @@ case "$cmd" in
       # bpftrace off-CPU summary and its permission gate.
       python3 tests/offcpu_cli_test.py
       offcpu_cli_rc=$?
+      # perf c2c summary and its permission gate.
+      python3 tests/c2c_cli_test.py
+      c2c_cli_rc=$?
       # aura-perf#30: an agent that cannot boot leaves a report with
       # its log, not a cleanup traceback.
       python3 tests/joint_agent_absent_test.py
@@ -419,6 +429,9 @@ case "$cmd" in
     fi
     if [ "$offcpu_cli_rc" -ne 0 ]; then
       exit "$offcpu_cli_rc"
+    fi
+    if [ "$c2c_cli_rc" -ne 0 ]; then
+      exit "$c2c_cli_rc"
     fi
     if [ "$joint_rc" -ne 0 ]; then
       exit "$joint_rc"

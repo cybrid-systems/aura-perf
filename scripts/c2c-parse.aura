@@ -1,0 +1,12 @@
+(require "std/process" all:)
+(require "lib/perf/c2c" all:)
+
+(define path (let ((v (getenv "AURA_PERF_C2C_FILE"))) (if (string? v) v "")))
+(define tool (let ((v (getenv "AURA_PERF_C2C_TOOL"))) (if (string? v) v "file")))
+(define v (perf:c2c-parse (perf:read-text path)))
+
+(display (string-append "c2ctrace tool=" tool " file=" path))
+(newline)
+(if (= (hash-ref v "available" 0) 1)
+    (begin (display (perf:c2c-line v)) (newline) (display "") (exit 0))
+    (begin (display "c2c unavailable reason=no-sample") (newline) (display "") (exit 1)))

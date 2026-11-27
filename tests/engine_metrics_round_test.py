@@ -41,6 +41,8 @@ def main():
                        for ln in splits), str(splits))
         check.that("engine: the candidate line carries the mutation effect",
                    any("mutation-effect-ms=" in ln for ln in candidates), str(candidates))
+        check.that("engine: the reference names its source",
+                   any("ref-source=" in ln for ln in candidates), str(candidates))
     check.that("engine: the round still met its intend",
                run.returncode == 0 and lines[:1] and lines[0].startswith("verdict intend-met=1"),
                f"rc={run.returncode} {lines[:1]}")

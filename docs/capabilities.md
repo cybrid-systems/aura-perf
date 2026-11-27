@@ -220,6 +220,8 @@ split linear-scan raw-ms=245 null-ms=857 cand-ms=9 mutation-effect-ms=-848 rebin
 
 这样 `null-ms` 远大于 `raw-ms` 的 run（JIT 预热、rebind 税）不会把「候选写得好」和「参照物被 rebind 拖慢」混成一个数；门仍然用同一轮的 null 作参考，报告同时把两段差写出来。
 
+同一进程里的 null 是先量的，可能吃到 JIT 的第一次 tier-up；它超过 null job 自己测量的 1.5 倍时，门改用 null job 的数，候选行列 `ref-source=null-job`（否则 `same-process`；没有可用 null 时 `round`）。选择从不沉默。
+
 ### 11. 便宜筛选，再花 held-out
 
 Checksum 失败的候选不做 held-out。正确的候选先在 `screen-n` 上计一次，**同时在同一 child 里量这次 screen 输入的 worldline 树**（目标自己的 `perf-worldline-measure`，没有就用 auto-probe）。screen 决策读候选的位点（组候选是各位点之和）对 null base 的同一组位点：只有位点明显更差（慢过两倍，并且慢过 base 加 slack）才 `screen-pruned`。base 树没有位点时退回整 kernel 的 `screen-ms`。活下来的才跑 held-out。候选行带 `screen-site-ms=… screen-base-site-ms=…`，报告写明 `screen-site=<site>`；位点快了但整 kernel 没动，screen 也能看见。

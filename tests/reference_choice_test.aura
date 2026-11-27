@@ -1,0 +1,12 @@
+; The gate's reference: same-process null by default, the null job's
+; own measurement when the same-process number is more than 1.5x it.
+(require "lib/perf/loop" all:)
+
+(display (perf:reference-choice 100 50 999))
+(newline)
+(display (perf:reference-choice 50 48 999))
+(newline)
+(display (perf:reference-choice -1 50 999))
+(newline)
+(display (perf:reference-choice -1 -1 999))
+(newline)

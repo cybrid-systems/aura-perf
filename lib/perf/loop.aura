@@ -7,7 +7,8 @@
         perf:null-body perf:null-id perf:cand-baseline perf:split-reference
         perf:run-targets perf:llm-context perf:llm-round-candidates
         perf:rule-results perf:any-infra?
-        perf:headroom-cand-pct perf:headroom-order perf:headroom-filter)
+        perf:headroom-cand-pct perf:headroom-order perf:headroom-filter
+        perf:reference-choice)
 
 (require "std/evo-core" all:)
 (require "std/evo" all:)
@@ -320,6 +321,7 @@
     " reason=" reason
     " heldout-ms=" (number->string (hash-ref result "heldout-ms" -1))
     " ref-ms=" (number->string baseline)
+    " ref-source=" (hash-ref result "ref-source" "")
     " ref-target=" (hash-ref result "ref-target" "")
     " site-floor=" (number->string (hash-ref result "site-floor" 0))
     " mismatches=" (number->string (hash-ref result "mismatches" -1))
@@ -603,18 +605,12 @@
                          ; The reference of this candidate is the null of
                          ; the define IT rebinds: a candidate and its
                          ; reference have to pay the same rebind.
-                         (cand-base (let ((own (hash-ref result "null-heldout-ms" -1)))
-                                      ; The reference of this candidate: the
-                                      ; null of the define it rebinds,
-                                      ; measured in the SAME process (the
-                                      ; worker measures it right before it
-                                      ; applies the candidate). Across
-                                      ; processes the two numbers differ by
-                                      ; the machine's load, which is worth
-                                      ; more than the floor.
-                                      (if (and (number? own) (> own 0))
-                                          own
-                                          (perf:cand-baseline spec nulls baseline cand-target))))
+                         (ref-choice (perf:reference-choice
+                                       (hash-ref result "null-heldout-ms" -1)
+                                       (perf:cand-baseline spec nulls baseline cand-target)
+                                       baseline))
+                         (cand-base (car ref-choice))
+                         (ref-source (car (cdr ref-choice)))
                          (reason0 (if raw
                                       (perf:reason result cand-base pct raw site)
                                       (perf:reason result cand-base pct site)))
@@ -649,6 +645,7 @@
                     (hash-set! result "moved-to" (perf:join (hash-ref q "moved-to" '()) ","))
                     (hash-set! result "target" (hash-ref (car xs) "target" ""))
                     (hash-set! result "ref-ms" cand-base)
+                    (hash-set! result "ref-source" ref-source)
                     (let* ((held (hash-ref result "heldout-ms" -1))
                            (effect (if (and (number? held) (>= held 0)
                                             (number? cand-base) (> cand-base 0))
@@ -1592,6 +1589,21 @@
                (r (perf:find-result results (perf:null-id spec target))))
           (if r (hash-set! acc target r) #f)
           (loop (cdr ts) acc)))))
+
+; Which reference the gate uses. The same-process null is the shape-
+; matched one, but it is measured first in a fresh child and can pay the
+; JIT tier-up (the split line exposes this). When it is more than 1.5x
+; the null job's own measurement, take the job's: the job was measured
+; on its own, not after a candidate's setup. Otherwise keep the same-
+; process number. The choice is reported as ref-source, never silent.
+(define (perf:reference-choice own job fallback)
+  (let* ((own-ok (and (number? own) (> own 0)))
+         (job-ok (and (number? job) (> job 0))))
+    (cond ((and own-ok job-ok (> (* own 2) (* job 3)))
+           (list job "null-job"))
+          (own-ok (list own "same-process"))
+          (job-ok (list job "null-job"))
+          (else (list fallback "round")))))
 
 ; The reference of a candidate: the null of the define the candidate
 ; rebinds. When that define has no null of its own, the round's

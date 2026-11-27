@@ -61,10 +61,17 @@ jobs:
         working-directory: aura-perf
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/aura-nightly.tgz \
-            https://github.com/cybrid-systems/aura/releases/download/nightly/aura-nightly-linux-x86_64.tar.gz
+          # The nightly tag is rebuilt in place, so the archive is verified
+          # against the digest published beside it: an unverified tarball
+          # must never reach the lane.
+          base=https://github.com/cybrid-systems/aura/releases/download/nightly
+          aura=aura-nightly-linux-x86_64.tar.gz
+          curl -fsSL --retry 3 --retry-delay 1 -o "/tmp/$aura" "$base/$aura"
+          curl -fsSL --retry 3 --retry-delay 1 -o "/tmp/$aura.sha256" "$base/$aura.sha256"
+          cd /tmp && sha256sum -c "$aura.sha256"
+          cd "$GITHUB_WORKSPACE/aura-perf"
           mkdir -p aura-nightly
-          tar -xzf /tmp/aura-nightly.tgz -C aura-nightly --strip-components=1
+          tar -xzf "/tmp/$aura" -C aura-nightly --strip-components=1
           ./aura-nightly/bin/aura --version
 
       - name: Build the real RESP data plane

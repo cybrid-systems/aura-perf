@@ -139,7 +139,7 @@ install_nightly() {
   fi
   [ -x "$ROOT/.aura/bin/aura" ] && return 0
   printf 'installing pinned Aura nightly...\n' >&2
-  cache_bin=$(AURA_VERSION=nightly sh "$ROOT/scripts/install-aura.sh") || {
+  cache_bin=$(AURA_VERSION=nightly bash "$ROOT/scripts/install-aura.sh") || {
     echo "aura-perf: nightly install failed" >&2
     exit 1
   }

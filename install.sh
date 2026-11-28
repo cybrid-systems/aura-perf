@@ -24,7 +24,7 @@ elif [ ! -f "$root/bin/aura-perf" ]; then
 fi
 
 if [ -z "${AURA_BIN:-}" ] && ! (command -v aura >/dev/null 2>&1 && aura --version 2>/dev/null | grep -q nightly); then
-  AURA_VERSION=nightly sh "$root/scripts/install-aura.sh" >/dev/null
+  AURA_VERSION=nightly bash "$root/scripts/install-aura.sh" >/dev/null
 fi
 AURA_VERSION=nightly sh "$root/bin/aura-perf" install
 printf '\nready: aura-perf\n'

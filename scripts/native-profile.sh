@@ -38,6 +38,7 @@ mkdir -p "$out"
 data="$out/perf.data"
 report="$out/profile.txt"
 rm -f "$data"
+workload_exit=""
 
 # Collect. A PID is the useful mode for a server (redis-server, postgres,
 # a game core); a command is useful for a batch job that exits.
@@ -52,19 +53,26 @@ if [ -n "$pid" ]; then
 else
   [ $# -gt 0 ] || { echo "aura-perf profile: give --pid PID or -- COMMAND" >&2; exit 2; }
   command_line="$*"
-  if ! timeout "$seconds" "$perf" record -F 999 -g -o "$data" -- "$@" >"$out/perf-record.log" 2>&1; then
-    rc=$?
-    # 124 is the normal timeout for a server/batch command; only a perf
-    # failure (no data) is fatal.
-    if [ "$rc" -ne 124 ]; then
-      echo "aura-perf profile: perf record failed" >&2
-      tail -20 "$out/perf-record.log" >&2 || true
-      exit 1
-    fi
+  # perf record propagates the command's exit code when it ends before
+  # the window (a benchmark assertion, a server error exit). That is not
+  # a perf failure: the samples already on disk are the evidence, and
+  # the report is written for them. 124 is timeout's own code: the
+  # window ended while the command was still running.
+  rc=0
+  timeout "$seconds" "$perf" record -F 999 -g -o "$data" -- "$@" >"$out/perf-record.log" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+    workload_exit=$rc
   fi
 fi
 
-[ -s "$data" ] || { echo "aura-perf profile: perf produced no samples" >&2; exit 1; }
+if [ ! -s "$data" ]; then
+  echo "aura-perf profile: perf produced no samples" >&2
+  tail -20 "$out/perf-record.log" >&2 || true
+  exit 1
+fi
+if [ -n "$workload_exit" ]; then
+  echo "aura-perf profile: note: workload exited rc=$workload_exit before the window ended" >&2
+fi
 
 # Optional counters. Unsupported PMU events are reported, never invented.
 counters="$out/perf-counters.txt"
@@ -78,6 +86,9 @@ fi
   printf 'command: %s\n' "$command_line"
   printf 'seconds: %s\n' "$seconds"
   printf 'perf: %s\n' "$perf"
+  if [ -n "$workload_exit" ]; then
+    printf 'workload-exit: %s\n' "$workload_exit"
+  fi
   printf 'data: %s\n' "$data"
   printf '\nTop self symbols (perf report, no children):\n'
   "$perf" report --stdio -i "$data" -g none --no-children --sort symbol --percent-limit 0.5 2>/dev/null |
@@ -95,9 +106,9 @@ fi
 
 # A tiny machine-readable view for agents; Python is already required by
 # the pinned installer.
-python3 - "$report" "$out/profile.json" "$data" "${pid:-}" "$seconds" "$command_line" <<'PY'
+python3 - "$report" "$out/profile.json" "$data" "${pid:-}" "$seconds" "$command_line" "$workload_exit" <<'PY'
 import json, re, sys
-report, dest, data, pid, seconds, cmd = sys.argv[1:7]
+report, dest, data, pid, seconds, cmd, wexit = sys.argv[1:8]
 top = []
 for line in open(report, encoding="utf-8", errors="replace"):
     m = re.match(r"\s*([0-9.]+)%\s+(?:\[[^\]]+\]\s+)?(.*?)\s{2,}.*$", line)
@@ -106,7 +117,8 @@ for line in open(report, encoding="utf-8", errors="replace"):
         if len(top) >= 20:
             break
 json.dump({"kind": "native-profile", "pid": pid or None, "seconds": int(seconds),
-           "command": cmd, "data": data, "report": report, "top": top},
+           "command": cmd, "data": data, "report": report,
+           "workload_exit": int(wexit) if wexit else None, "top": top},
           open(dest, "w", encoding="utf-8"), indent=2)
 PY
 

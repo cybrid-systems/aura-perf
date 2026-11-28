@@ -327,6 +327,7 @@ case "$cmd" in
     mem_cli_rc=0
     cachestat_cli_rc=0
     bcchist_cli_rc=0
+    profile_cli_rc=0
     joint_rc=0
     if command -v python3 >/dev/null 2>&1; then
       python3 tests/bus_linger_test.py
@@ -402,6 +403,10 @@ case "$cmd" in
       # its log, not a cleanup traceback.
       python3 tests/joint_agent_absent_test.py
       joint_rc=$?
+      # aura-perf#35: a workload that exits non-zero before the window
+      # ends keeps its sampled report; workload_exit rides the JSON.
+      python3 tests/profile_cli_test.py
+      profile_cli_rc=$?
     fi
     set -e
     if [ "$rc" -ne 0 ]; then
@@ -480,6 +485,9 @@ case "$cmd" in
     fi
     if [ "$joint_rc" -ne 0 ]; then
       exit "$joint_rc"
+    fi
+    if [ "$profile_cli_rc" -ne 0 ]; then
+      exit "$profile_cli_rc"
     fi
     exit "$exit_rc"
     ;;

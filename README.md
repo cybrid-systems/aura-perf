@@ -67,6 +67,12 @@ Outputs, in the current directory:
 - `out/profile.json` — the same top rows for agents
 - `out/perf.data` — raw `perf` data
 
+A launched command that exits before the window ends — including a
+non-zero exit — still gets its report: the samples already captured are
+the evidence. The exit code is a note (`workload exited rc=N`), written
+to `profile.txt` as `workload-exit:` and to `profile.json` as
+`workload_exit` (`null` when the command ran to the window's end).
+
 Example with Redis:
 
 ```sh

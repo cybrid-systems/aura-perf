@@ -114,7 +114,7 @@
           (length (hash-ref buf1 "memory" '()))
           ; The idea that failed on this hotspot before is not trialed.
           (perf:neg-blocked? (hash-ref buf1 "memory" '()) "flat-hot" "k-ref"
-                             "llm-sum-33333333")
+                             "llm-sum-33333333" "")
           ; The filters leave the catalog alone.
           (length (hash-ref spec "catalog" '()))
           ; 2. No more than the allowance, first come.

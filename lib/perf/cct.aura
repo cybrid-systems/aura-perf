@@ -8,7 +8,7 @@
         perf:hypotheses perf:split-protected perf:node-clock
         perf:count-rows perf:prefix-leaf perf:cct-worldline-query
         perf:cct-cleared perf:should-continue? perf:delta-brief perf:site-ms
-        perf:site-sum)
+        perf:site-sum perf:profile-fingerprint perf:cct-untimed-root)
 
 (require "std/string" all:)
 (require "lib/perf/util" all:)
@@ -85,6 +85,89 @@
             (if (and (list? stack) (pair? (cdr stack)) (number? ms) (> ms best-ms))
                 (loop (cdr xs) stack ms)
                 (loop (cdr xs) best best-ms)))))))
+
+; The workload root: a depth-1 node that has timed callees under it.
+; Its task-clock is the root region's own timer reading — it contains
+; the callees' time, so it must not compete with them for the hot
+; prefix. A depth-1 node without callees is a flat region, not a root.
+(define (perf:cct-root nodes)
+  (let loop ((xs (if (list? nodes) nodes '())) (best #f) (best-ms -1))
+    (if (null? xs)
+        best
+        (let* ((n (car xs))
+               (stack (hash-ref n "stack" '()))
+               (id (hash-ref n "id" ""))
+               (ms (perf:node-clock n)))
+          (if (and (list? stack) (pair? stack) (null? (cdr stack))
+                   (not (string=? id ""))
+                   (number? ms) (> ms best-ms)
+                   (let scan ((ys nodes))
+                     (if (null? ys)
+                         #f
+                         (let ((st (hash-ref (car ys) "stack" '())))
+                           (if (and (list? st) (pair? st) (pair? (cdr st))
+                                    (string=? (car st) id))
+                               #t
+                               (scan (cdr ys)))))))
+              (loop (cdr xs) n ms)
+              (loop (cdr xs) best best-ms))))))
+
+; aura-perf#36: the root region's self time — its clock minus the timed
+; callees directly under it. When that remainder is the largest clock
+; node in the tree and owns more than self-pct of the root's clock, the
+; cost lives in callees the profile did not time. Attributing it to a
+; timed sibling region would key the negative memory on the wrong
+; hot-node. #f when there is no such root.
+(define (perf:cct-untimed-root cct self-pct)
+  (let* ((nodes (if (hash? cct) (hash-ref cct "nodes" '()) '()))
+         (root (perf:cct-root nodes)))
+    (if (not (hash? root))
+        #f
+        (let* ((id (hash-ref root "id" ""))
+               (root-ms (perf:node-clock root))
+               (children-ms
+                 (let loop ((xs nodes) (acc 0))
+                   (if (null? xs)
+                       acc
+                       (let ((st (hash-ref (car xs) "stack" '())))
+                         (loop (cdr xs)
+                               (if (and (list? st) (pair? st) (pair? (cdr st))
+                                        (null? (cdr (cdr st)))
+                                        (string=? (car st) id))
+                                   (+ acc (perf:node-clock (car xs)))
+                                   acc))))))
+               (self-ms (- root-ms children-ms))
+               (max-other
+                 (let loop ((xs nodes) (best 0))
+                   (if (null? xs)
+                       best
+                       (let ((n (car xs))
+                             (ms (perf:node-clock n)))
+                         (loop (cdr xs)
+                               (if (and (not (eq? n root)) (number? ms) (> ms best))
+                                   ms
+                                   best)))))))
+          (if (and (number? root-ms) (> root-ms 0)
+                   (number? self-ms) (> self-ms max-other)
+                   (> (* self-ms 100) (* root-ms self-pct)))
+              (hash "root" id "self-ms" self-ms "root-ms" root-ms
+                    "self-pct" (quotient (* self-ms 100) root-ms))
+              #f)))))
+
+; The measured region set: every node name in the tree, sorted and
+; joined. The negative memory keys on it, so a record made under one
+; region set does not blind-skip a run whose profile measures another
+; (aura-perf#36).
+(define (perf:profile-fingerprint cct)
+  (let ((nodes (if (hash? cct) (hash-ref cct "nodes" '()) '())))
+    (let loop ((xs nodes) (names '()))
+      (if (null? xs)
+          (perf:join (sort names string<?) ",")
+          (let ((id (hash-ref (car xs) "id" "")))
+            (loop (cdr xs)
+                  (if (or (string=? id "") (perf:member? names id))
+                      names
+                      (cons id names))))))))
 
 (define (perf:cct-subtree cct id)
   (let ((nodes (if (hash? cct) (hash-ref cct "nodes" '()) '())))
@@ -271,49 +354,64 @@
                      (if (hash? profile) (hash-ref profile "catalog" #f) #f)))
         (ratio (perf:gene-num gene "ratio" 2))
         (th (perf:gene-num gene "actionable-ms" 1))
+        (self-pct (perf:gene-num gene "untimed-self-pct" 40))
         (prot (if (list? protected) protected '())))
     (if (not cct)
         (hash "class" "" "hot-node" "" "site" "" "prefix" '()
               "hypotheses" '() "actionable" '()
-              "ratio" ratio "actionable-ms" th)
-        (let* ((prefix (perf:cct-hot-prefix cct))
+              "ratio" ratio "actionable-ms" th
+              "profile-fp" (perf:profile-fingerprint #f))
+        (let* ((untimed (perf:cct-untimed-root cct self-pct))
+               (prefix (perf:cct-hot-prefix cct))
                (leaf (perf:prefix-leaf-of prefix))
                (parent (perf:prefix-parent-of prefix))
                (leaf-ms (perf:clock-of cct leaf))
                (sibling-ms (if (string=? leaf "") 0 (perf:sibling-clock cct parent leaf)))
                (native (perf:hottest-native (hash-ref cct "nodes" '()) th))
-               (class (cond ((and (number? leaf-ms) (number? sibling-ms)
-                                   (> sibling-ms 0) (> leaf-ms (* sibling-ms ratio)))
+               (class (cond ((hash? untimed) "untimed-callee-dominant")
+                            ((and (number? leaf-ms) (number? sibling-ms)
+                                  (> sibling-ms 0) (> leaf-ms (* sibling-ms ratio)))
                              "repeated-index-walk")
                             ((hash? native) "native-symbol")
                             ((pair? prefix) "flat-hot")
                             (else "")))
-               (hot (if (string=? class "native-symbol")
-                        (hash-ref native "define" "")
-                        (if (and (pair? prefix) (pair? (cdr prefix)))
-                            (car (cdr prefix))
-                            (if (pair? prefix) (car prefix) ""))))
-               (site (if (string=? class "native-symbol")
-                         (hash-ref native "define" "")
-                         (if (pair? prefix) (car prefix) "")))
-               (shown (if (string=? class "native-symbol")
-                          (let ((st (hash-ref native "stack" '())))
-                            (if (and (list? st) (pair? st)) st (list site)))
-                          prefix))
+               (hot (cond ((string=? class "untimed-callee-dominant")
+                           (hash-ref untimed "root" ""))
+                          ((string=? class "native-symbol")
+                           (hash-ref native "define" ""))
+                          ((and (pair? prefix) (pair? (cdr prefix)))
+                           (car (cdr prefix)))
+                          ((pair? prefix) (car prefix))
+                          (else "")))
+               (site (cond ((string=? class "untimed-callee-dominant")
+                            (hash-ref untimed "root" ""))
+                           ((string=? class "native-symbol")
+                            (hash-ref native "define" ""))
+                           ((pair? prefix) (car prefix))
+                           (else "")))
+               (shown (cond ((string=? class "untimed-callee-dominant")
+                             (list (hash-ref untimed "root" "")))
+                            ((string=? class "native-symbol")
+                             (let ((st (hash-ref native "stack" '())))
+                               (if (and (list? st) (pair? st)) st (list site))))
+                            (else prefix)))
                (ndso (if (hash? native) (hash-ref native "dso" "") ""))
                (nev (if (hash? native) (hash-ref native "event" "") "")))
-          (hash "class" class
-                "hot-node" hot
-                "site" site
-                "prefix" shown
-                "hot-ms" leaf-ms
-                "sibling-ms" sibling-ms
-                "ratio" ratio
-                "actionable-ms" th
-                "actionable" (perf:cct-actionable cct th prot)
-                "hypotheses" (if (string=? class "native-symbol")
-                                 (perf:native-hypotheses site ndso nev)
-                                 (perf:catalog-hypotheses catalog class site)))))))
+         (hash "class" class
+               "hot-node" hot
+               "site" site
+               "prefix" shown
+               "hot-ms" leaf-ms
+               "sibling-ms" sibling-ms
+               "ratio" ratio
+               "actionable-ms" th
+               "profile-fp" (perf:profile-fingerprint cct)
+               "untimed-self-ms" (if (hash? untimed) (hash-ref untimed "self-ms" 0) -1)
+               "untimed-self-pct" (if (hash? untimed) (hash-ref untimed "self-pct" 0) -1)
+               "actionable" (perf:cct-actionable cct th prot)
+               "hypotheses" (if (string=? class "native-symbol")
+                                (perf:native-hypotheses site ndso nev)
+                                (perf:catalog-hypotheses catalog class site)))))))
 
 ; The protected defines come from the sealed intend. The miner does not
 ; protect anything on its own: a target that protects nothing is a

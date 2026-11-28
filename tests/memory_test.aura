@@ -25,3 +25,23 @@
                (length (hash-ref filt "skipped" '()))
                (perf:neg-ideas mem "repeated-index-walk" "k-ref")))
 (newline)
+
+; aura-perf#36: the profile fingerprint is part of the key. A record
+; made under another region set does not block this run; a record
+; without a fingerprint (an old memory.json) still does.
+(define memfp
+  (perf:neg-remember '() "flat-hot" "collide" "pset-share" "no-speedup"
+                     "bench-kernel,collide,pset,pxs"))
+(define legacy
+  (perf:neg-remember '() "flat-hot" "collide" "pset-share" "no-speedup"))
+(display (list (if (perf:neg-blocked? memfp "flat-hot" "collide" "pset-share"
+                                      "bench-kernel,collide,pset,pxs") 1 0)
+               (if (perf:neg-blocked? memfp "flat-hot" "collide" "pset-share"
+                                      "bench-kernel,collide,pset,pxs,step") 1 0)
+               (if (perf:neg-blocked? legacy "flat-hot" "collide" "pset-share"
+                                      "bench-kernel,collide,pset,pxs,step") 1 0)
+               (if (perf:neg-blocked? memfp "flat-hot" "collide" "pset-share") 1 0)
+               (length (perf:neg-query memfp "flat-hot" "collide"
+                                       "bench-kernel,collide,pset,pxs,step"))
+               (hash-ref (car memfp) "profile-fp")))
+(newline)

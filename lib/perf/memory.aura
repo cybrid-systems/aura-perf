@@ -1,17 +1,24 @@
-; Negative memory keyed by the hot node (the site) and the idea.
-; Dropping a candidate id is not enough: the same idea must not be
-; proposed again for the same hotspot, and may be proposed again when
-; the hotspot changes.
+; Negative memory keyed by the hot node (the site), the idea, and the
+; profile fingerprint. Dropping a candidate id is not enough: the same
+; idea must not be proposed again for the same hotspot, and may be
+; proposed again when the hotspot changes.
 ;
 ; The class is not part of the key. The class is a mining result and it
 ; moves with the machine: the same target can be classified differently
 ; on two runs, and a memory keyed by it would miss. The record keeps the
 ; class it was made under, for the report.
+;
+; The fingerprint is the measured region set (perf:profile-fingerprint
+; over the profile's CCT). A record made under another region set does
+; not block this run: the hot-node attribution was made against a
+; different coverage, so the old failure is not evidence about the new
+; hotspot (aura-perf#36). Records written before fingerprints existed
+; carry "" and still match, so an old memory.json keeps working.
 
 (export perf:neg-remember perf:neg-blocked? perf:neg-query
         perf:neg-ideas perf:filter-negative
         perf:memory-path perf:memory-load perf:memory-save
-        perf:headroom-memory?)
+        perf:headroom-memory? perf:neg-fp-match?)
 
 (require "lib/perf/util" all:)
 
@@ -34,69 +41,84 @@
 (define (perf:memory-save path mem)
   (perf:write-text path (json-encode (if (list? mem) mem '()))))
 
-(define (perf:neg-same? rec class hot idea)
+; Either side may carry no fingerprint: an old record, or a query from
+; a tree that was not measured. Then the key is the hot node alone.
+(define (perf:neg-fp-match? a b)
+  (or (string=? a "") (string=? b "") (string=? a b)))
+
+(define (perf:neg-same? rec hot idea fp)
   (and (hash? rec)
        (string=? (hash-ref rec "hot-node" "") hot)
-       (string=? (hash-ref rec "idea" "") idea)))
+       (string=? (hash-ref rec "idea" "") idea)
+       (perf:neg-fp-match? (hash-ref rec "profile-fp" "") fp)))
 
-(define (perf:neg-blocked? mem class hot idea)
-  (let loop ((xs (if (list? mem) mem '())))
-    (if (null? xs)
-        #f
-        (if (perf:neg-same? (car xs) class hot idea)
-            #t
-            (loop (cdr xs))))))
+(define (perf:neg-blocked? mem class hot idea . rest)
+  (let ((fp (if (and (pair? rest) (string? (car rest))) (car rest) "")))
+    (let loop ((xs (if (list? mem) mem '())))
+      (if (null? xs)
+          #f
+          (if (perf:neg-same? (car xs) hot idea fp)
+              #t
+              (loop (cdr xs)))))))
 
-(define (perf:neg-remember mem class hot idea reason)
-  (if (or (not (string? idea)) (string=? idea "")
-          (perf:neg-blocked? mem class hot idea))
-      (if (list? mem) mem '())
-      (cons (hash "class" class
-                  "hot-node" hot
-                  "idea" idea
-                  "reason" (if (string? reason) reason ""))
-            (if (list? mem) mem '()))))
+(define (perf:neg-remember mem class hot idea reason . rest)
+  (let ((fp (if (and (pair? rest) (string? (car rest))) (car rest) "")))
+    (if (or (not (string? idea)) (string=? idea "")
+            (perf:neg-blocked? mem class hot idea fp))
+        (if (list? mem) mem '())
+        (cons (hash "class" class
+                    "hot-node" hot
+                    "idea" idea
+                    "reason" (if (string? reason) reason "")
+                    "profile-fp" fp)
+              (if (list? mem) mem '())))))
 
 ; A site the headroom probe already found without room. It is a memory
 ; record like any other: the next run does not spend a probe child on
 ; it again, and the record says when and at what percentage it was
-; measured.
-(define (perf:headroom-memory? mem site)
-  (let loop ((xs (if (list? mem) mem '())))
-    (if (null? xs)
-        #f
-        (let ((r (car xs)))
-          (if (and (hash? r)
-                   (string=? (hash-ref r "idea" "") "headroom-no-room")
-                   (string=? (hash-ref r "hot-node" "") site))
-              #t
-              (loop (cdr xs)))))))
+; measured. A record from another region set does not count.
+(define (perf:headroom-memory? mem site . rest)
+  (let ((fp (if (and (pair? rest) (string? (car rest))) (car rest) "")))
+    (let loop ((xs (if (list? mem) mem '())))
+      (if (null? xs)
+          #f
+          (let ((r (car xs)))
+            (if (and (hash? r)
+                     (string=? (hash-ref r "idea" "") "headroom-no-room")
+                     (string=? (hash-ref r "hot-node" "") site)
+                     (perf:neg-fp-match? (hash-ref r "profile-fp" "") fp))
+                #t
+                (loop (cdr xs))))))))
 
-(define (perf:neg-query mem class hot)
-  (let loop ((xs (if (list? mem) mem '())) (acc '()))
-    (if (null? xs)
-        (reverse acc)
-        (let ((r (car xs)))
+(define (perf:neg-query mem class hot . rest)
+  (let ((fp (if (and (pair? rest) (string? (car rest))) (car rest) "")))
+    (let loop ((xs (if (list? mem) mem '())) (acc '()))
+      (if (null? xs)
+          (reverse acc)
+          (let ((r (car xs)))
+            (loop (cdr xs)
+                  (if (and (hash? r)
+                           (string=? (hash-ref r "hot-node" "") hot)
+                           (perf:neg-fp-match? (hash-ref r "profile-fp" "") fp))
+                      (cons r acc)
+                      acc)))))))
+
+(define (perf:neg-ideas mem class hot . rest)
+  (let ((fp (if (and (pair? rest) (string? (car rest))) (car rest) "")))
+    (let loop ((xs (perf:neg-query mem class hot fp)) (acc ""))
+      (if (null? xs)
+          acc
           (loop (cdr xs)
-                (if (and (hash? r)
-                         (string=? (hash-ref r "hot-node" "") hot))
-                    (cons r acc)
-                    acc))))))
+                (string-append acc
+                               (if (string=? acc "") "" ",")
+                               (hash-ref (car xs) "idea" "")))))))
 
-(define (perf:neg-ideas mem class hot)
-  (let loop ((xs (perf:neg-query mem class hot)) (acc ""))
-    (if (null? xs)
-        acc
-        (loop (cdr xs)
-              (string-append acc
-                             (if (string=? acc "") "" ",")
-                             (hash-ref (car xs) "idea" ""))))))
-
-(define (perf:filter-negative cands mem class hot)
-  (let loop ((xs (if (list? cands) cands '())) (ok '()) (skipped '()))
-    (if (null? xs)
-        (hash "ok" (reverse ok) "skipped" (reverse skipped))
-        (let ((id (hash-ref (car xs) "id" "")))
-          (if (perf:neg-blocked? mem class hot id)
-              (loop (cdr xs) ok (cons (car xs) skipped))
-              (loop (cdr xs) (cons (car xs) ok) skipped))))))
+(define (perf:filter-negative cands mem class hot . rest)
+  (let ((fp (if (and (pair? rest) (string? (car rest))) (car rest) "")))
+    (let loop ((xs (if (list? cands) cands '())) (ok '()) (skipped '()))
+      (if (null? xs)
+          (hash "ok" (reverse ok) "skipped" (reverse skipped))
+          (let ((id (hash-ref (car xs) "id" "")))
+            (if (perf:neg-blocked? mem class hot id fp)
+                (loop (cdr xs) ok (cons (car xs) skipped))
+                (loop (cdr xs) (cons (car xs) ok) skipped)))))))

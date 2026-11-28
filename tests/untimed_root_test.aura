@@ -1,0 +1,60 @@
+; aura-perf#36: when the workload root's own time (its clock minus the
+; timed callees) is the largest clock node and owns more than 40% of
+; the root, the cost lives in callees the profile did not time. The
+; miner must not attribute it to a timed sibling region: hot-node is
+; the root, class says the coverage is missing.
+(require "lib/perf/cct" all:)
+
+(define rows
+  (list (hash "name" "bench-kernel" "task-clock" 940 "calls" 1
+              "stack" (list "bench-kernel"))
+        (hash "name" "collide" "task-clock" 373 "calls" 600
+              "stack" (list "bench-kernel" "collide"))
+        (hash "name" "pset" "task-clock" 41 "calls" 7800
+              "stack" (list "bench-kernel" "pset"))
+        (hash "name" "pxs" "task-clock" 45 "calls" 18000
+              "stack" (list "bench-kernel" "pxs"))))
+(define cct (perf:cct-build rows))
+(define mined (perf:mine (hash "cct" cct)))
+
+; With the hot callee timed, the same target mines normally: the root's
+; remainder is small, and the hot prefix is the timed leaf. The root
+; row carries the self time (root minus its callees), as a region-timer
+; profile reports it.
+(define covered (perf:cct-build
+                  (list (hash "name" "bench-kernel" "task-clock" 140 "calls" 1
+                              "stack" (list "bench-kernel"))
+                        (hash "name" "step" "task-clock" 800 "calls" 600
+                              "stack" (list "bench-kernel" "step"))
+                        (hash "name" "collide" "task-clock" 373 "calls" 600
+                              "stack" (list "step" "collide")))))
+(define mined-covered (perf:mine (hash "cct" covered)))
+(define high (perf:mine-with (hash "cct" cct)
+                             (hash "ratio" 2 "actionable-ms" 1 "untimed-self-pct" 90)
+                             '()))
+
+; The fingerprint is the measured region set: same names in another
+; order give the same key, another region set gives another key.
+(define reordered (perf:cct-build (reverse rows)))
+(define fewer (perf:cct-build
+                (list (hash "name" "bench-kernel" "task-clock" 940 "calls" 1
+                            "stack" (list "bench-kernel"))
+                      (hash "name" "collide" "task-clock" 373 "calls" 600
+                            "stack" (list "bench-kernel" "collide")))))
+
+(display (list (hash-ref mined "class")
+               (hash-ref mined "hot-node")
+               (hash-ref mined "site")
+               (hash-ref mined "prefix")
+               (hash-ref mined "untimed-self-ms")
+               (hash-ref mined "untimed-self-pct")
+               (hash-ref mined-covered "class")
+               (hash-ref mined-covered "hot-node")
+               (hash-ref high "class")
+               (hash-ref high "hot-node")
+               (string=? (perf:profile-fingerprint cct)
+                         (perf:profile-fingerprint reordered))
+               (string=? (perf:profile-fingerprint cct)
+                         (perf:profile-fingerprint fewer))
+               (hash-ref mined "profile-fp")))
+(newline)

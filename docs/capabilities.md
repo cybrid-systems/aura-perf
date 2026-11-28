@@ -21,7 +21,7 @@ spec 是目标项目和运行时之间的那份约定，运行时按它工作：
 | `inputs` | `(n -> inputs)` | `perf:range` |
 | `oracle` | `(inputs -> expected)` | `perf:sum-ref` |
 | `check-inputs` | checksum 用的那几组输入（列表或过程） | sum-scan 的几组 |
-| `regions-fn` | 要计时的 define 和它们的 stack | 无 |
+| `regions-fn` | 要计时的 define 和它们的 stack。regions 要覆盖 kernel self 的主要 callee：workload 根的 self（根的计时减去已计时 callee）超过根的 40% 且是最大时钟节点时，矿工报 `untimed-callee-dominant`，hot-node 是根本身，不归因给已计时兄弟（aura-perf#36） | 无 |
 | `profile-command` | 一个 child 打印所有 region 的命令（每行 `region <name> ms <n> calls <n> stack <a>|<b>`）；有它就不为每个 region 起进程 | 无 |
 | `catalog` | 候选：id、target、genome、thought；或 `genomes` 一组 `(target, genome)`（也接受 target → genome 的 hash），一条候选一次改多个 define | 无 |
 | `intend` | 最低加速、checksum、预算、protected | 无 |
@@ -75,6 +75,8 @@ Agent 不接收报告。一次采集得到一个 profile 值，里面有 `cct`�
 ### 3. 自动矿工 + 可执行假设
 
 矿工不做 exclusive 排序然后交出一个函数名。`repeated-index-walk` 的判定是结构的：热叶子（热前缀的最后一个 define）比它**同一个父节点下的兄弟加起来**还贵 `ratio` 倍。名字不在这条规则里：sum-scan 的例子恰好是 `k-ref` 和 `k-length` 并排，别的目标是它自己的 define 和它自己的兄弟。`protected` 也来自 spec，不写死。
+
+region-timer 下还有一条覆盖检查（aura-perf#36）：workload 根（深度 1、下面有已计时 callee 的节点）的 self = 根的计时 − 直接 callee 的计时之和。self 是树里最大的时钟节点、且超过根的 `untimed-self-pct`（默认 40，gene 可调）时，class 是 `untimed-callee-dominant`，hot-node 和 site 都是根：时间主体在**没被计时的 callee** 里，把它归因给某个已计时兄弟会让负例记忆记错键。报告写 `untimed-callee-dominant root=… self-ms=… self-pct=…`，提示 regions 缺少覆盖。
 
 分类对应一组**可 trial 的假设**。运行时的假设表就是 spec 的 `catalog`：每条有 id、位点（`site` 或 `target`）、预期 `expect`、要动的计数器 `counter`；class 只决定顺序。没有 `catalog` 的 profile 才回退到内置的 sum-scan 表。下面这组是 sum-scan 的 catalog：
 
@@ -150,18 +152,18 @@ Trial 子进程在 checksum 通过之后，量出那条 worldline 的树。**树
 
 度量：`cleared` 行点名候选；`worldline` 行给出 measured / prefix-removed / cost-moved / cct-source。空树是 `measured=0`，不算「前缀被删掉」。目标自己的测量和自动探针都没有产出时，报告如实写 `measured=0`。
 
-### 8. 负例按 class + hot-node，跨次累积
+### 8. 负例按位点 + profile 指纹，跨次累积
 
-`(perf:neg-remember mem class hot idea reason)` 记下失败的想法。`(perf:neg-blocked? …)` 在同一热点上拒绝原样重提；热点或 class 变了，同一 id 可以再提。`perf:round-candidates` 会过滤，并打印 `negative-skip`。这和「从 order 里删掉 id」同时存在，过滤才是按热点的那一层。
+`(perf:neg-remember mem class hot idea reason [profile-fp])` 记下失败的想法。`(perf:neg-blocked? …)` 在同一热点上拒绝原样重提；热点变了，同一 id 可以再提。`perf:round-candidates` 会过滤，并打印 `negative-skip`。这和「从 order 里删掉 id」同时存在，过滤才是按热点的那一层。
 
 负例**跨次**累积：跑完写在 `<out-dir>/memory.json`（spec 可以用 `memory-path` 换位置），
 下一次跑先读回来。于是第二次跑同一个目标，不再把预算花在已经失败过的想法上：
 `memory-loaded 3`，`negative-skip wrong-scale`、`negative-skip redundant-pass`，
 `budget-used` 从 3 降到 1，结论不变。
 
-键是**位点**（热叶子）和想法，不是 class。class 是矿工的结果，会跟着机器的噪声动：
-同一个目标两次跑可能被分成不同的 class，按 class 记的负例就漏了。记录里仍然留着
-当时的 class，报告里看得到。
+键是**位点**（热叶子）、想法和 **profile 指纹**（`perf:profile-fingerprint`：CCT 全部节点名排序后逗号连接，即这次量到的 region 集合），不是 class。class 是矿工的结果，会跟着机器的噪声动：同一个目标两次跑可能被分成不同的 class，按 class 记的负例就漏了。记录里仍然留着当时的 class，报告里看得到。
+
+指纹让 regions 变化时旧记录不盲 skip（aura-perf#36）：spec 的 regions 改了（比如补上 `step`），hot-node 的归因基础就变了，旧指纹下的失败不是新热点的证据，候选可以重试。旧 memory.json 里没有指纹的记录按空指纹处理，仍然匹配，跨次记忆不作废。`headroom-no-room` 记录同样按指纹匹配。
 
 ### 9. 策略基因走同一条 KEEP / ROLLBACK
 
@@ -570,7 +572,7 @@ Trial 在子进程的 `evo:trial` 里做，live 指纹不变；过门才在父�
 
 ## 实施顺序
 
-1. 已做：目标程序的测量 → CCT → `perf:mine` → 策略基因 → protected 拒绝 → 并行 trial（每条 worldline 一棵 CCT）→ KEEP → 负例按 class + hot-node → intend 门。
+1. 已做：目标程序的测量 → CCT → `perf:mine` → 策略基因 → protected 拒绝 → 并行 trial（每条 worldline 一棵 CCT）→ KEEP → 负例按位点 + profile 指纹 → intend 门。
 2. 已做：`aura-perf sysinfo` 和 `aura-perf check` 把机器库存收成 Aura 值。缺工具就写 skipped。
 3. 下一步：语义火焰，然后才是 kernel 下沉、c2c 采样和外部 trace。
 4. 已做：模型提议者经 `std/llm` 接上，候选是 catalog 条目，走同一道门，没有 KEEP 权（13）。

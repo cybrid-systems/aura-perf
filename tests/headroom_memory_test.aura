@@ -5,3 +5,11 @@
                (perf:headroom-memory? mem "k-length")
                (perf:neg-blocked? mem "flat-hot" "k-ref" "headroom-no-room")))
 (newline)
+; aura-perf#36: a no-room record from another region set does not skip
+; this run's probe; the same fingerprint does.
+(define memfp (perf:neg-remember '() "flat-hot" "k-ref" "headroom-no-room"
+                                 "headroom-pct=3" "bench-kernel,k-ref"))
+(display (list (perf:headroom-memory? memfp "k-ref" "bench-kernel,k-ref")
+               (perf:headroom-memory? memfp "k-ref" "bench-kernel,k-ref,k-length")
+               (perf:headroom-memory? memfp "k-ref")))
+(newline)

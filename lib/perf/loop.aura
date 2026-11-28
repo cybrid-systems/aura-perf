@@ -579,7 +579,8 @@
                                             (hash-ref spec "class" "")
                                             (hash-ref spec "hot-node" "")
                                             id
-                                            "reference-missing"))
+                                            "reference-missing"
+                                            (hash-ref spec "profile-fp" "")))
               (loop (cdr xs)))))
       (let loop ((xs trialable))
         (if (null? xs)
@@ -765,7 +766,8 @@
                                                         (hash-ref spec "class" "")
                                                         (hash-ref spec "hot-node" "")
                                                         id
-                                                        (perf:short-reason reason))))))))
+                                                        (perf:short-reason reason)
+                                                        (hash-ref spec "profile-fp" ""))))))))
               (let ((res (loop (cdr xs))))
                 (perf:bus-task-close bus task (length res) (perf:any-infra? res))
                 res))))))
@@ -1039,7 +1041,8 @@
          (filtered (perf:filter-negative (hash-ref split "ok" '())
                                          (hash-ref buf "memory" '())
                                          (hash-ref spec "class" "")
-                                         (hash-ref spec "hot-node" "")))
+                                         (hash-ref spec "hot-node" "")
+                                         (hash-ref spec "profile-fp" "")))
          (ordered (perf:headroom-order spec (hash-ref filtered "ok" '())))
          (gated (perf:headroom-filter spec buf ordered))
          (k0 (let ((n (hash-ref plan "per-round" 1)))
@@ -1074,7 +1077,8 @@
                                         (hash-ref spec "class" "")
                                         (hash-ref spec "hot-node" "")
                                         (hash-ref c "id" "")
-                                        "protected"))
+                                        "protected"
+                                        (hash-ref spec "profile-fp" "")))
           (hash-set! buf "refused"
                      (cons (hash-ref c "id" "") (hash-ref buf "refused" '())))
           (hash-set! buf "results"
@@ -1169,6 +1173,7 @@
           "hotspots" (perf:hotspots profile)
           "class" (hash-ref spec "class" "")
           "hot-node" (hash-ref spec "hot-node" "")
+          "profile-fp" (hash-ref spec "profile-fp" "")
           "target" (hash-ref spec "target" "bench-kernel")
           "targets" targets
           "context" context
@@ -1197,7 +1202,8 @@
          (filtered (perf:filter-negative (hash-ref split "ok" '())
                                          (hash-ref buf "memory" '())
                                          (hash-ref spec "class" "")
-                                         (hash-ref spec "hot-node" "")))
+                                         (hash-ref spec "hot-node" "")
+                                         (hash-ref spec "profile-fp" "")))
          (k (if (hash? llm) (hash-ref llm "budget" 0) 0)))
     (perf:refuse-each spec buf (hash-ref split "refused" '()))
     (perf:say-skips buf spec (hash-ref filtered "skipped" '()))
@@ -1400,6 +1406,7 @@
                                                 "after-samples" (hash-ref buf "after-samples" '())
                                                 "class" (hash-ref spec "class" "")
                                                 "hot-node" (hash-ref spec "hot-node" "")
+                                                "profile-fp" (hash-ref spec "profile-fp" "")
                                                 "prefix" (hash-ref spec "prefix" '())
                                                 "cct" (hash-ref spec "profile-cct" (hash))
                                                 "baseline-cct" (hash-ref spec "baseline-cct" (hash))
@@ -1458,6 +1465,7 @@
       (hash-set! spec "class" (hash-ref mined "class" ""))
       (hash-set! spec "hot-node" (hash-ref mined "hot-node" ""))
       (hash-set! spec "prefix" (hash-ref mined "prefix" '()))
+      (hash-set! spec "profile-fp" (hash-ref mined "profile-fp" ""))
       (hash-set! spec "gene-mine" (lambda (p) (perf:mine-with p g prot catalog)))
       (hash-set! spec "strategy-per-round" (let ((n (hash-ref g "per-round" 2)))
                                              (if (and (number? n) (> n 0)) n 2)))
@@ -1777,18 +1785,21 @@
                                  " hot-node=" (hash-ref spec "hot-node" "")
                                  " blocked=" (perf:neg-ideas (hash-ref buf "memory" '())
                                                              (hash-ref spec "class" "")
-                                                             (hash-ref spec "hot-node" ""))))
+                                                             (hash-ref spec "hot-node" "")
+                                                             (hash-ref spec "profile-fp" ""))))
     (perf:say buf (string-append "negative-blocked same-hot="
                                  (if (perf:neg-blocked? (hash-ref buf "memory" '())
                                                         (hash-ref spec "class" "")
                                                         (hash-ref spec "hot-node" "")
-                                                        "wrong-scale")
+                                                        "wrong-scale"
+                                                        (hash-ref spec "profile-fp" ""))
                                      "1" "0")
                                  " other-hot="
                                  (if (perf:neg-blocked? (hash-ref buf "memory" '())
                                                         (hash-ref spec "class" "")
                                                         "other-node"
-                                                        "wrong-scale")
+                                                        "wrong-scale"
+                                                        (hash-ref spec "profile-fp" ""))
                                      "1" "0")))))
 
 (define (perf:after-keep spec buf winner baseline out)
@@ -1818,7 +1829,7 @@
                 (hash-set! spec "class" (hash-ref mined "class" ""))
                 (hash-set! spec "hot-node" (hash-ref mined "hot-node" ""))
                 (hash-set! spec "prefix" (hash-ref mined "prefix" '()))
-                (hash-set! spec "profile-cct" (hash-ref winner "cct" #f))
+                (hash-set! spec "profile-fp" (hash-ref mined "profile-fp" ""))
                 (let* ((plan (hash "order" (let loop ((xs (hash-ref mined "hypotheses" '())) (acc '()))
                                              (if (null? xs)
                                                  (reverse acc)
@@ -1859,7 +1870,7 @@
                   (if (and (string? n) (not (string=? n ""))
                            (not (string=? n kernel))
                            (not (perf:member? protected n))
-                           (not (perf:headroom-memory? mem n))
+                           (not (perf:headroom-memory? mem n (hash-ref spec "profile-fp" "")))
                            (not (perf:member? acc n)))
                       (cons n acc)
                       acc)))))))
@@ -1899,7 +1910,7 @@
           (if (null? hs)
               #t
               (let ((n (hash-ref (car hs) "name" "")))
-                (if (and (string? n) (perf:headroom-memory? mem n))
+                (if (and (string? n) (perf:headroom-memory? mem n (hash-ref spec "profile-fp" "")))
                     (perf:say buf (string-append "headroom-remembered " n))
                     #f)
                 (loop (cdr hs)))))
@@ -1978,7 +1989,8 @@
                                              (hash-ref spec "class" "")
                                              site
                                              "headroom-no-room"
-                                             (string-append "headroom-pct=" (number->string pct)))))
+                                             (string-append "headroom-pct=" (number->string pct))
+                                             (hash-ref spec "profile-fp" ""))))
                               #f)
                           (loop (cdr xs)))))
                   #f))
@@ -2080,6 +2092,13 @@
           (perf:say buf (string-append "mined class=" (hash-ref plan "class" "")
                                        " hot-node=" (hash-ref plan "hotspot" "")
                                        " site=" (hash-ref plan "site" "")))
+          (if (string=? (hash-ref spec "class" "") "untimed-callee-dominant")
+              (perf:say buf (string-append
+                              "untimed-callee-dominant root=" (hash-ref spec "hot-node" "")
+                              " self-ms=" (number->string (hash-ref plan "untimed-self-ms" -1))
+                              " self-pct=" (number->string (hash-ref plan "untimed-self-pct" -1))
+                              " hint=regions miss the kernel's main callees; hot-node is the root, not a timed sibling"))
+              #f)
           (perf:say buf (string-append "prefix " (perf:join (hash-ref spec "prefix" (hash-ref plan "prefix" '())) ">")))
           (perf:say buf (string-append "strategy-order"
                                        (perf:join (map (lambda (s) (string-append " " s))

@@ -1,1 +1,2 @@
 (1 0 1 2 2 linear-scan 2 redundant-pass,wrong-scale)
+(1 0 1 1 0 bench-kernel,collide,pset,pxs)
